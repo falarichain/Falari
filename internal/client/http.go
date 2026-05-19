@@ -1,0 +1,87 @@
+package client
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type HTTP struct {
+	base   string
+	client *http.Client
+}
+
+func NewHTTP(base string) *HTTP {
+	return &HTTP{
+		base: strings.TrimRight(base, "/"),
+		client: &http.Client{
+			Timeout: 2 * time.Minute,
+		},
+	}
+}
+
+func (h *HTTP) Get(path string, out any) error {
+	req, err := http.NewRequest(http.MethodGet, h.base+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return decodeResponse(resp, out)
+}
+
+func (h *HTTP) GetBytes(path string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, h.base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func (h *HTTP) Post(path string, in any, out any) error {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, h.base+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return decodeResponse(resp, out)
+}
+
+func decodeResponse(resp *http.Response, out any) error {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if out == nil || len(body) == 0 {
+		return nil
+	}
+	return json.Unmarshal(body, out)
+}

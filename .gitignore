@@ -1,0 +1,16 @@
+# Build output
+chainctl
+chainnode
+storagenode
+retrievalnode
+indexer
+
+# Cache & IDE
+.gocache/
+.DS_Store
+
+# Local test data
+data/
+
+# Design docs
+docs/
