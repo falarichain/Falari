@@ -1,9 +1,9 @@
-# Build output
-chainctl
-chainnode
-storagenode
-retrievalnode
-indexer
+# Build output (root-level binaries only)
+/chainctl
+/chainnode
+/storagenode
+/retrievalnode
+/indexer
 
 # Cache & IDE
 .gocache/
