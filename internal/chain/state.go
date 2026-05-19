@@ -185,6 +185,7 @@ func newState() State {
 		CollectionRecords:   map[string][]string{},
 		AppliedTxs:          map[string]bool{},
 		ConfirmedTxs:        map[string]bool{},
+		AgentKeys:           map[string]*wire.AgentKey{},
 	}
 }
 
@@ -281,6 +282,9 @@ func normalizeState(state *State) {
 	}
 	if state.ConfirmedTxs == nil {
 		state.ConfirmedTxs = map[string]bool{}
+	}
+	if state.AgentKeys == nil {
+		state.AgentKeys = map[string]*wire.AgentKey{}
 	}
 	for address, account := range state.Accounts {
 		normalized := wire.NormalizeAddress(address)
