@@ -8,6 +8,7 @@
 # Cache & IDE
 .gocache/
 .DS_Store
+.trae/
 
 # Local test data
 data/
