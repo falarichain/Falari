@@ -95,13 +95,14 @@ type State struct {
 }
 
 type Store struct {
-	mu            sync.Mutex
-	path          string
-	db            *leveldb.DB
-	data          State
-	blockProducer *ValidatorIdentity
-	broadcaster   BlockBroadcaster
-	txBroadcaster TransactionBroadcaster
+	mu              sync.Mutex
+	path            string
+	db              *leveldb.DB
+	data            State
+	blockProducer   *ValidatorIdentity
+	broadcaster     BlockBroadcaster
+	txBroadcaster   TransactionBroadcaster
+	voteBroadcaster ConsensusVoteBroadcaster
 }
 
 func OpenStore(path string) (*Store, error) {

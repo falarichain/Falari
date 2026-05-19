@@ -529,8 +529,8 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if i < 2 && resp.Finalized {
-			t.Fatal("expected finality only after quorum precommits")
+		if i == len(identities)-1 && !resp.Finalized {
+			t.Fatal("expected finality after quorum precommits")
 		}
 	}
 	latest, err := store.LatestBlock()
@@ -542,6 +542,60 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 	}
 	if store.data.ConsensusHeight != latest.Height+1 || store.data.ConsensusPhase != consensus.PhasePropose {
 		t.Fatalf("expected consensus to advance, height=%d phase=%s", store.data.ConsensusHeight, store.data.ConsensusPhase)
+	}
+}
+
+func TestSubmitConsensusVoteBroadcastsAcceptedVoteOnce(t *testing.T) {
+	store, identity := registeredTestValidator(t, 10)
+	store.SetBlockProducer(identity)
+	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	produced, err := store.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.data.ConsensusVotes = map[string]wire.ConsensusVote{}
+	peerIdentity, err := LoadOrCreateValidatorIdentity("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.data.Validators[peerIdentity.Address] = wire.ValidatorInfo{
+		Address:   peerIdentity.Address,
+		PublicKey: peerIdentity.PublicKeyBase64(),
+		Stake:     10,
+		Status:    wire.ValidatorStatusActive,
+	}
+	store.data.ConsensusValidators[peerIdentity.Address] = true
+	broadcaster := &captureConsensusVoteBroadcaster{votes: make(chan wire.ConsensusVote, 2)}
+	store.SetConsensusVoteBroadcaster(broadcaster)
+	vote := signTestConsensusVote(t, produced.Block, identity, wire.ConsensusVotePrevote, validatorPower(store.data.Validators[identity.Address]))
+	resp, err := store.SubmitConsensusVote(wire.SubmitConsensusVoteRequest{Vote: vote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Accepted {
+		t.Fatal("expected vote accepted")
+	}
+	select {
+	case got := <-broadcaster.votes:
+		if got.Signature != vote.Signature {
+			t.Fatalf("broadcast vote mismatch: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected accepted vote to be broadcast")
+	}
+	duplicate, err := store.SubmitConsensusVote(wire.SubmitConsensusVoteRequest{Vote: vote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.Accepted {
+		t.Fatal("expected duplicate vote ignored")
+	}
+	select {
+	case got := <-broadcaster.votes:
+		t.Fatalf("duplicate vote should not broadcast again: %+v", got)
+	case <-time.After(20 * time.Millisecond):
 	}
 }
 
@@ -948,4 +1002,12 @@ func signTestConsensusVote(t *testing.T, block wire.Block, identity *ValidatorId
 		t.Fatal(err)
 	}
 	return vote
+}
+
+type captureConsensusVoteBroadcaster struct {
+	votes chan wire.ConsensusVote
+}
+
+func (b *captureConsensusVoteBroadcaster) BroadcastConsensusVote(vote wire.ConsensusVote) {
+	b.votes <- vote
 }

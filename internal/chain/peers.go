@@ -14,12 +14,12 @@ import (
 	"chain/internal/wire"
 
 	libp2p "github.com/libp2p/go-libp2p"
-	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
-	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	host "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
+	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
+	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -31,6 +31,10 @@ type BlockBroadcaster interface {
 
 type TransactionBroadcaster interface {
 	BroadcastTransaction(tx wire.Transaction)
+}
+
+type ConsensusVoteBroadcaster interface {
+	BroadcastConsensusVote(vote wire.ConsensusVote)
 }
 
 type StorageProviderBroadcaster interface {
@@ -147,6 +151,21 @@ func (p *PeerNetwork) BroadcastTransaction(tx wire.Transaction) {
 		go func() {
 			if err := p.postJSON(peer+"/p2p/txs", tx); err != nil {
 				log.Printf("broadcast tx to %s failed: %v", peer, err)
+			}
+		}()
+	}
+}
+
+func (p *PeerNetwork) BroadcastConsensusVote(vote wire.ConsensusVote) {
+	if p == nil {
+		return
+	}
+	p.publishGossip("consensus_vote", vote)
+	for _, peer := range p.peers {
+		peer := peer
+		go func() {
+			if err := p.postJSON(peer+"/consensus/votes", wire.SubmitConsensusVoteRequest{Vote: vote}); err != nil {
+				log.Printf("broadcast consensus vote to %s failed: %v", peer, err)
 			}
 		}()
 	}
@@ -365,6 +384,7 @@ func (p *PeerNetwork) readGossip() {
 			}
 			if accepted {
 				log.Printf("accepted gossip block height=%d hash=%s from=%s", block.Height, block.Hash, msg.ReceivedFrom)
+				p.store.SubmitLocalConsensusVotesForBlock(block)
 			}
 		case "transaction":
 			var tx wire.Transaction
@@ -379,6 +399,25 @@ func (p *PeerNetwork) readGossip() {
 			}
 			if accepted {
 				log.Printf("accepted gossip tx %s from=%s", tx.TxID, msg.ReceivedFrom)
+			}
+		case "consensus_vote":
+			var vote wire.ConsensusVote
+			if err := json.Unmarshal(envelope.Payload, &vote); err != nil {
+				log.Printf("decode gossip consensus vote failed: %v", err)
+				continue
+			}
+			resp, err := p.store.SubmitConsensusVote(wire.SubmitConsensusVoteRequest{Vote: vote})
+			if err != nil {
+				log.Printf("accept gossip consensus vote height=%d round=%d type=%s validator=%s failed: %v",
+					vote.Height, vote.Round, vote.Type, vote.ValidatorAddress, err)
+				continue
+			}
+			if resp.Accepted {
+				log.Printf("accepted gossip consensus vote height=%d round=%d type=%s validator=%s power=%d",
+					vote.Height, vote.Round, vote.Type, vote.ValidatorAddress, vote.Power)
+			}
+			if vote.Type == wire.ConsensusVotePrevote && resp.Prevotes.Finalized {
+				p.store.MaybeSubmitLocalConsensusPrecommit(resp.Block)
 			}
 		case "storage_provider":
 			var announcement wire.StorageProviderAnnouncement
@@ -427,6 +466,7 @@ func (p *PeerNetwork) syncFromPeer(peer string) error {
 		}
 		if accepted {
 			log.Printf("synced block height=%d hash=%s from=%s", block.Height, block.Hash, peer)
+			p.store.SubmitLocalConsensusVotesForBlock(block)
 		}
 	}
 	return nil
@@ -478,6 +518,12 @@ func (s *Store) SetTransactionBroadcaster(broadcaster TransactionBroadcaster) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.txBroadcaster = broadcaster
+}
+
+func (s *Store) SetConsensusVoteBroadcaster(broadcaster ConsensusVoteBroadcaster) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.voteBroadcaster = broadcaster
 }
 
 func (s *Store) broadcastBlock(block wire.Block) {

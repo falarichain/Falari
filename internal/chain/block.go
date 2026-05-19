@@ -93,6 +93,7 @@ func (s *Store) ProduceBlock() (wire.ProduceBlockResponse, error) {
 	}
 	s.mu.Unlock()
 	s.broadcastBlock(block)
+	s.SubmitLocalConsensusVotesForBlock(block)
 	return wire.ProduceBlockResponse{Produced: true, Block: block}, nil
 }
 
@@ -360,6 +361,13 @@ func (s *Store) SubmitConsensusVote(req wire.SubmitConsensusVoteRequest) (wire.S
 	if err := s.saveLocked(); err != nil {
 		return wire.SubmitConsensusVoteResponse{}, err
 	}
+	broadcaster := s.voteBroadcaster
+	if broadcaster != nil {
+		go broadcaster.BroadcastConsensusVote(vote)
+	}
+	if vote.Type == wire.ConsensusVotePrevote && prevotes.Finalized {
+		go s.MaybeSubmitLocalConsensusPrecommit(block)
+	}
 	return wire.SubmitConsensusVoteResponse{
 		Accepted:   true,
 		Finalized:  block.Finality.Finalized,
@@ -368,6 +376,38 @@ func (s *Store) SubmitConsensusVote(req wire.SubmitConsensusVoteRequest) (wire.S
 		Prevotes:   prevotes,
 		Precommits: precommits,
 	}, nil
+}
+
+func (s *Store) ConsensusVotes(height uint64, round uint64, voteType string) wire.ConsensusVotesResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	votes := make([]wire.ConsensusVote, 0)
+	for _, vote := range s.data.ConsensusVotes {
+		if height > 0 && vote.Height != height {
+			continue
+		}
+		if round > 0 && vote.Round != round {
+			continue
+		}
+		if voteType != "" && vote.Type != voteType {
+			continue
+		}
+		votes = append(votes, vote)
+	}
+	sort.SliceStable(votes, func(i, j int) bool {
+		if votes[i].Height != votes[j].Height {
+			return votes[i].Height < votes[j].Height
+		}
+		if votes[i].Round != votes[j].Round {
+			return votes[i].Round < votes[j].Round
+		}
+		if votes[i].Type != votes[j].Type {
+			return votes[i].Type < votes[j].Type
+		}
+		return votes[i].ValidatorAddress < votes[j].ValidatorAddress
+	})
+	return wire.ConsensusVotesResponse{Height: height, Round: round, Type: voteType, Votes: votes}
 }
 
 func validateBlockShape(block wire.Block) error {

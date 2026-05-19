@@ -69,6 +69,7 @@ func main() {
 	defer network.Close()
 	store.SetBlockBroadcaster(network)
 	store.SetTransactionBroadcaster(network)
+	store.SetConsensusVoteBroadcaster(network)
 	log.Printf("validator %s enabled endpoint=%s stake=%d", identity.Address, endpoint, *validatorStake)
 	if len(network.Peers()) > 0 {
 		log.Printf("peer network enabled peers=%v", network.Peers())

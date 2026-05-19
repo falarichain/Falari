@@ -26,6 +26,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("GET /snapshot", s.snapshot)
 	mux.HandleFunc("GET /consensus", s.consensus)
+	mux.HandleFunc("GET /consensus/votes", s.listConsensusVotes)
 	mux.HandleFunc("POST /upgrade", s.setUpgrade)
 	mux.HandleFunc("GET /upgrade", s.getUpgrade)
 	mux.HandleFunc("GET /intents/{id}/health", s.intentHealth)
@@ -785,6 +786,13 @@ func (s *Server) submitConsensusVote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) listConsensusVotes(w http.ResponseWriter, r *http.Request) {
+	height, _ := strconv.ParseUint(r.URL.Query().Get("height"), 10, 64)
+	round, _ := strconv.ParseUint(r.URL.Query().Get("round"), 10, 64)
+	resp := s.store.ConsensusVotes(height, round, r.URL.Query().Get("type"))
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) latestBlock(w http.ResponseWriter, _ *http.Request) {
 	block, err := s.store.LatestBlock()
 	if err != nil {
@@ -818,6 +826,9 @@ func (s *Server) receivePeerBlock(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if accepted {
+		s.store.SubmitLocalConsensusVotesForBlock(block)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accepted": accepted,

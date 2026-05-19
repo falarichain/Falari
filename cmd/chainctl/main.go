@@ -78,6 +78,8 @@ func main() {
 		listGovernanceAudit(os.Args[2:])
 	case "consensus":
 		consensusState(os.Args[2:])
+	case "consensus-votes":
+		consensusVotes(os.Args[2:])
 	case "set-upgrade":
 		setUpgrade(os.Args[2:])
 	case "retrieval-receipt":
@@ -732,6 +734,49 @@ func consensusState(args []string) {
 	}
 	fmt.Printf("consensus height=%d round=%d phase=%s proposer=%s voting_power=%d total_power=%d timeout_ms=%d\n",
 		cs.Height, cs.Round, cs.Phase, cs.Proposer, cs.VotingPower, cs.TotalPower, cs.BlockTimeout)
+}
+
+func consensusVotes(args []string) {
+	fs := flag.NewFlagSet("consensus-votes", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	height := fs.Uint64("height", 0, "optional block height")
+	round := fs.Uint64("round", 0, "optional consensus round")
+	voteType := fs.String("type", "", "optional vote type: prevote or precommit")
+	fs.Parse(args)
+
+	query := url.Values{}
+	if *height > 0 {
+		query.Set("height", fmt.Sprintf("%d", *height))
+	}
+	if *round > 0 {
+		query.Set("round", fmt.Sprintf("%d", *round))
+	}
+	if *voteType != "" {
+		query.Set("type", *voteType)
+	}
+	path := "/consensus/votes"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var resp wire.ConsensusVotesResponse
+	if err := client.NewHTTP(*chainURL).Get(path, &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("consensus_votes=%d", len(resp.Votes))
+	if resp.Height > 0 {
+		fmt.Printf(" height=%d", resp.Height)
+	}
+	if resp.Round > 0 {
+		fmt.Printf(" round=%d", resp.Round)
+	}
+	if resp.Type != "" {
+		fmt.Printf(" type=%s", resp.Type)
+	}
+	fmt.Println()
+	for _, vote := range resp.Votes {
+		fmt.Printf("vote height=%d round=%d type=%s validator=%s power=%d block=%s\n",
+			vote.Height, vote.Round, vote.Type, vote.ValidatorAddress, vote.Power, vote.BlockHash)
+	}
 }
 
 func setUpgrade(args []string) {
@@ -2488,6 +2533,14 @@ func downloadSegmentShards(receipts map[int]wire.MinerReceipt, totalShards int, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			routes := discoverStorageRoutes(chainURL, receipt.ShardHash, receipt.ShardCID)
+			if data, err := downloadShardViaRoutes(receipt, routes); err == nil {
+				if chaincrypto.HashBytes(data) != receipt.ShardHash {
+					err = fmt.Errorf("downloaded shard hash mismatch for segment %d shard %d", receipt.SegmentID, receipt.ShardIndex)
+				}
+				resultCh <- shardDownloadResult{shardIndex: shardIndex, data: data, err: err}
+				return
+			}
 			providers := discoverStorageProviders(chainURL, receipt.ShardHash, receipt.ShardCID)
 			endpoints := providerEndpoints(providers)
 			endpoints = append(endpoints, fallbackEndpoints...)
@@ -2522,6 +2575,93 @@ func downloadSegmentShards(receipts map[int]wire.MinerReceipt, totalShards int, 
 		lastErr = fmt.Errorf("not enough shard receipts available")
 	}
 	return nil, fmt.Errorf("only downloaded %d/%d required shards: %w", available, requiredShards, lastErr)
+}
+
+func downloadShardViaRoutes(receipt wire.MinerReceipt, routes []wire.StorageRoute) ([]byte, error) {
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("no storage routes available")
+	}
+	var lastErr error
+	for _, route := range routes {
+		provider := providerFromRoute(route)
+		switch route.Transport {
+		case "libp2p":
+			if route.ShardCID == "" || route.PeerID == "" || len(route.PeerAddrs) == 0 {
+				continue
+			}
+			data, err := storage.FetchBlockViaLibP2P(context.Background(), route.ShardCID, route.PeerID, route.PeerAddrs)
+			if err == nil {
+				storage.RememberProviderFetchSuccess(provider, "libp2p")
+				log.Printf("download route=libp2p miner=%s cid=%s", route.MinerAddress, route.ShardCID)
+				return data, nil
+			}
+			storage.RememberProviderFetchFailure(provider, "libp2p", err)
+			lastErr = err
+		case "http-block":
+			if route.Endpoint == "" || route.ShardCID == "" {
+				continue
+			}
+			data, err := client.NewHTTP(route.Endpoint).GetBytes("/blocks/" + route.ShardCID)
+			if err == nil {
+				storage.RememberProviderFetchSuccess(provider, "http-block")
+				log.Printf("download route=http-block endpoint=%s cid=%s", route.Endpoint, route.ShardCID)
+				return data, nil
+			}
+			storage.RememberProviderFetchFailure(provider, "http-block", err)
+			lastErr = err
+		case "http-shard":
+			shardHash := route.ShardHash
+			if shardHash == "" {
+				shardHash = receipt.ShardHash
+			}
+			if route.Endpoint == "" || shardHash == "" {
+				continue
+			}
+			data, err := client.NewHTTP(route.Endpoint).GetBytes("/shards/" + shardHash + ".bin")
+			if err == nil {
+				storage.RememberProviderFetchSuccess(provider, "http-shard")
+				log.Printf("download route=http-shard endpoint=%s hash=%s", route.Endpoint, shardHash)
+				return data, nil
+			}
+			storage.RememberProviderFetchFailure(provider, "http-shard", err)
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no reachable storage route for shard %s", receipt.ShardHash)
+	}
+	return nil, lastErr
+}
+
+func discoverStorageRoutes(chainURL string, shardHash string, shardCID string) []wire.StorageRoute {
+	if chainURL == "" || (shardHash == "" && shardCID == "") {
+		return nil
+	}
+	var resp wire.StorageRoutesResponse
+	query := url.Values{}
+	if shardHash != "" {
+		query.Set("shard_hash", shardHash)
+	}
+	if shardCID != "" {
+		query.Set("shard_cid", shardCID)
+	}
+	if err := client.NewHTTP(chainURL).Get("/storage/routes?"+query.Encode(), &resp); err != nil {
+		return nil
+	}
+	return resp.Routes
+}
+
+func providerFromRoute(route wire.StorageRoute) wire.StorageProviderRecord {
+	return wire.StorageProviderRecord{
+		MinerAddress:       route.MinerAddress,
+		Endpoint:           route.Endpoint,
+		PeerID:             route.PeerID,
+		PeerAddrs:          append([]string(nil), route.PeerAddrs...),
+		ShardHashes:        []string{route.ShardHash},
+		HealthScoreBPS:     route.HealthScoreBPS,
+		ProviderRecordLive: route.ProviderRecordLive,
+		ProviderSource:     route.ProviderSource,
+	}
 }
 
 func discoverStorageEndpoints(chainURL string, shardHash string, shardCID string) []string {
@@ -2764,6 +2904,8 @@ func usage() {
   chainctl evm-record-append -chain http://localhost:8080 -key ./alice.json -collection collection_xxx -intent intent_xxx -kind memory -record-key session/1
   chainctl intent        -chain http://localhost:8080 -id intent_xxx
   chainctl mempool       -chain http://localhost:8080
+  chainctl consensus     -chain http://localhost:8080
+  chainctl consensus-votes -chain http://localhost:8080 -height 1 -type precommit
   chainctl block         -chain http://localhost:8080 -height latest
   chainctl produce-block -chain http://localhost:8080
   chainctl vote-block    -chain http://localhost:8080 -height latest -validator-key ./data/validator.json

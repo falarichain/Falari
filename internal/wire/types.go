@@ -1123,6 +1123,13 @@ type SubmitConsensusVoteResponse struct {
 	Precommits BlockFinality `json:"precommits,omitempty"`
 }
 
+type ConsensusVotesResponse struct {
+	Height uint64          `json:"height,omitempty"`
+	Round  uint64          `json:"round,omitempty"`
+	Type   string          `json:"type,omitempty"`
+	Votes  []ConsensusVote `json:"votes"`
+}
+
 type BlockFinality struct {
 	Round          uint64      `json:"round"`
 	VotingPower    uint64      `json:"voting_power"`
