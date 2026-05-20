@@ -2,12 +2,51 @@ package wire
 
 import (
 	"crypto/ecdsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
+
+const AgentKeyPrefix = "fara_"
+
+// EncodeAgentKeyString packs agent_key_id, master, address, and private_key
+// into a single copy‑pasteable string: fara_<base64url(key_id|master|address|privkey)>
+func EncodeAgentKeyString(agentKeyID, master, address, privateKeyHex string) string {
+	raw := agentKeyID + "|" + master + "|" + address + "|" + privateKeyHex
+	return AgentKeyPrefix + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+type AgentKeyParts struct {
+	AgentKeyID string
+	Master     string
+	Address    string
+	PrivateKey string
+}
+
+// DecodeAgentKeyString parses a fara_... string back into its components.
+func DecodeAgentKeyString(encoded string) (AgentKeyParts, error) {
+	if !strings.HasPrefix(encoded, AgentKeyPrefix) {
+		return AgentKeyParts{}, errors.New("agent key string must start with " + AgentKeyPrefix)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(encoded, AgentKeyPrefix))
+	if err != nil {
+		return AgentKeyParts{}, fmt.Errorf("decode agent key: %w", err)
+	}
+	parts := strings.Split(string(decoded), "|")
+	if len(parts) != 4 {
+		return AgentKeyParts{}, errors.New("invalid agent key string format")
+	}
+	return AgentKeyParts{
+		AgentKeyID: parts[0],
+		Master:     parts[1],
+		Address:    parts[2],
+		PrivateKey: parts[3],
+	}, nil
+}
 
 type registerAgentKeySigningPayload struct {
 	Master      string   `json:"master"`

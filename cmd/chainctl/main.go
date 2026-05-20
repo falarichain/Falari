@@ -122,6 +122,8 @@ func main() {
 		listPeers(os.Args[2:])
 	case "storage-providers":
 		storageProviders(os.Args[2:])
+	case "genesis":
+		genesisCommand(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -1835,6 +1837,13 @@ type accountKeyFile struct {
 	PrivateKey string `json:"private_key"`
 }
 
+type agentKeyFile struct {
+	AgentKeyID string `json:"agent_key_id"`
+	Master     string `json:"master"`
+	Address    string `json:"address"`
+	PrivateKey string `json:"private_key"`
+}
+
 type accountKey struct {
 	Address    string
 	PublicKey  *ecdsa.PublicKey
@@ -2733,26 +2742,16 @@ func agentKeyCreate(args []string) {
 		log.Fatal(err)
 	}
 	agentPub := *keyFile
+	var agentPriv *ecdsa.PrivateKey
 	if agentPub == "" {
-		agentPriv, err := ethcrypto.GenerateKey()
+		var err error
+		agentPriv, err = ethcrypto.GenerateKey()
 		if err != nil {
 			log.Fatal(err)
 		}
 		agentPub = encodeHex(ethcrypto.FromECDSAPub(&agentPriv.PublicKey))
-		key := accountKeyFile{
-			Address:    wire.AccountAddress(&agentPriv.PublicKey),
-			PublicKey:  agentPub,
-			PrivateKey: encodeHex(ethcrypto.FromECDSA(agentPriv)),
-		}
-		raw, err := json.MarshalIndent(key, "", "  ")
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := os.WriteFile(*keyOut, raw, 0o600); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("agent key saved to: %s\n", *keyOut)
-		fmt.Printf("agent public key:  %s\n", agentPub)
+	} else {
+		log.Fatal("-key-file with pre-existing key not supported with new format; omit -key-file to generate a new key")
 	}
 
 	var expiresAt int64
@@ -2775,15 +2774,40 @@ func agentKeyCreate(args []string) {
 	if err := client.NewHTTP(*chainURL).Post("/agent-keys", req, &resp); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("agent key registered:\n")
-	fmt.Printf("  key_id:      %s\n", resp.Key.KeyID)
-	fmt.Printf("  name:        %s\n", resp.Key.Name)
-	fmt.Printf("  permissions: %v\n", resp.Key.Permissions)
-	fmt.Printf("  daily_limit: %d\n", resp.Key.DailyLimit)
-	fmt.Printf("  total_limit: %d\n", resp.Key.TotalLimit)
-	if resp.Key.ExpiresAt > 0 {
-		fmt.Printf("  expires_at:  %s\n", time.Unix(resp.Key.ExpiresAt, 0))
+
+	keyFileContent := agentKeyFile{
+		AgentKeyID: resp.Key.KeyID,
+		Master:     master.Address,
+		Address:    wire.AccountAddress(&agentPriv.PublicKey),
+		PrivateKey: encodeHex(ethcrypto.FromECDSA(agentPriv)),
 	}
+	raw, err := json.MarshalIndent(keyFileContent, "", "  ")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(*keyOut, raw, 0o600); err != nil {
+		log.Fatal(err)
+	}
+
+	agentKeyString := wire.EncodeAgentKeyString(
+		resp.Key.KeyID,
+		master.Address,
+		wire.AccountAddress(&agentPriv.PublicKey),
+		encodeHex(ethcrypto.FromECDSA(agentPriv)),
+	)
+
+	fmt.Printf("\n============================================================\n")
+	fmt.Printf("  Copy this key to your AI agent:\n")
+	fmt.Printf("  %s\n", agentKeyString)
+	fmt.Printf("============================================================\n\n")
+	fmt.Printf("  name:         %s\n", *name)
+	fmt.Printf("  permissions:  %v\n", resp.Key.Permissions)
+	fmt.Printf("  daily_limit:  %d\n", resp.Key.DailyLimit)
+	fmt.Printf("  total_limit:  %d\n", resp.Key.TotalLimit)
+	if resp.Key.ExpiresAt > 0 {
+		fmt.Printf("  expires_at:   %s\n", time.Unix(resp.Key.ExpiresAt, 0))
+	}
+	fmt.Printf("  key file:     %s  (backup)\n", *keyOut)
 }
 
 func agentKeyList(args []string) {
@@ -2857,6 +2881,43 @@ func agentKeyRevoke(args []string) {
 	fmt.Printf("agent key %s revoked\n", *keyID)
 }
 
+func genesisCommand(args []string) {
+	if len(args) < 1 || args[0] != "init" {
+		log.Fatal("genesis requires subcommand: init")
+	}
+	genesisInit(args[1:])
+}
+
+func genesisInit(args []string) {
+	fs := flag.NewFlagSet("genesis init", flag.ExitOnError)
+	outPath := fs.String("out", "./genesis.json", "output genesis file path")
+	chainID := fs.String("chain-id", "falari-1", "chain identifier")
+	fs.Parse(args)
+
+	now := time.Now().Unix()
+	doc := wire.GenesisDoc{
+		ChainID:     *chainID,
+		GenesisTime: now,
+		RewardPools: &wire.GenesisRewardPools{
+			StoragePoolRemaining:   6_300_000_000,
+			RetrievalPoolRemaining: 1_200_000_000,
+			ValidatorPoolRemaining: 1_000_000_000,
+			RepairPoolRemaining:    500_000_000,
+		},
+	}
+
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(*outPath, raw, 0o644); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("genesis file created: %s\n", *outPath)
+	fmt.Printf("edit this file to add accounts and validators, then start chainnode with:\n")
+	fmt.Printf("  chainnode -genesis %s\n", *outPath)
+}
+
 func usage() {
 	fmt.Println(`usage:
   chainctl status        -chain http://localhost:8080 -storage http://localhost:9090,http://localhost:9091
@@ -2913,5 +2974,6 @@ func usage() {
   chainctl agent-key list   -master 0xa1b2c3...
   chainctl agent-key revoke -id key_abc123 -master 0xa1b2c3...
   chainctl validators    -chain http://localhost:8080
-  chainctl peers         -chain http://localhost:8080`)
+  chainctl peers         -chain http://localhost:8080
+  chainctl genesis init  -out ./genesis.json`)
 }

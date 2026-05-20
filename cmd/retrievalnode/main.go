@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"chain/internal/gateway"
 	"chain/internal/storage"
 )
 
@@ -23,6 +24,13 @@ func main() {
 	p2pListen := flag.String("p2p-listen", "", "libp2p provider discovery listen addrs")
 	p2pPeers := flag.String("p2p-peers", "", "libp2p provider discovery peer addrs")
 	p2pTopic := flag.String("p2p-topic", "storage-chain/providers/devnet", "libp2p provider discovery topic")
+
+	gatewayEnabled := flag.Bool("gateway", false, "enable upload gateway (erasure coding + miner dispatch)")
+	gatewayStorage := flag.String("gateway-storage", "", "comma-separated storage miner endpoints for gateway uploads")
+	gatewayTmp := flag.String("gateway-tmp", "", "temporary directory for gateway uploads (default: data/gateway)")
+	dataShards := flag.Int("gateway-data-shards", 4, "data shards for erasure coding")
+	parityShards := flag.Int("gateway-parity-shards", 2, "parity shards for erasure coding")
+	segmentSize := flag.Int64("gateway-segment-size", 1<<26, "segment size in bytes (default 64 MiB)")
 	flag.Parse()
 
 	node, err := storage.OpenNode(*data)
@@ -69,9 +77,81 @@ func main() {
 		node.EnableShardCache(*cacheSize)
 	}
 
+	var gwHandler *gateway.Handler
+	if *gatewayEnabled {
+		if *chainURL == "" {
+			log.Fatal("-gateway requires -chain")
+		}
+		if *gatewayStorage == "" {
+			log.Fatal("-gateway requires -gateway-storage (comma-separated miner endpoints)")
+		}
+		tmpDir := *gatewayTmp
+		if tmpDir == "" {
+			tmpDir = *data + "/gateway"
+		}
+		storageEndpoints := splitCSV(*gatewayStorage)
+		gwHandler, err = gateway.New(gateway.Config{
+			ChainURL:         *chainURL,
+			StorageEndpoints: storageEndpoints,
+			TmpDir:           tmpDir,
+			DataShards:       *dataShards,
+			ParityShards:     *parityShards,
+			SegmentSize:      *segmentSize,
+		})
+		if err != nil {
+			log.Fatalf("start gateway: %v", err)
+		}
+		log.Printf("gateway enabled (upload+download) storage=%v data-shards=%d parity-shards=%d", storageEndpoints, *dataShards, *parityShards)
+	}
+
 	log.Printf("retrieval node %s listening on %s", node.Address(), *addr)
-	server := storage.NewServerWithProviderNetwork(node, providerNetwork)
-	if err := http.ListenAndServe(*addr, server.Routes()); err != nil {
+
+	mux := http.NewServeMux()
+	storageMux := storage.NewServerWithProviderNetwork(node, providerNetwork).Routes()
+	mux.Handle("/", storageMux)
+	if gwHandler != nil {
+		gwMux := gwHandler.Routes()
+		mux.Handle("/upload", gwMux)
+		mux.Handle("/download/", gwMux)
+		mux.Handle("/status/", gwMux)
+		mux.Handle("/gateway/", gwMux)
+	}
+
+	if err := http.ListenAndServe(*addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := []string{}
+	current := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' {
+			p := trimSpace(current)
+			if p != "" {
+				parts = append(parts, p)
+			}
+			current = ""
+		} else {
+			current += string(s[i])
+		}
+	}
+	p := trimSpace(current)
+	if p != "" {
+		parts = append(parts, p)
+	}
+	return parts
+}
+
+func trimSpace(s string) string {
+	for len(s) > 0 && s[0] == ' ' {
+		s = s[1:]
+	}
+	for len(s) > 0 && s[len(s)-1] == ' ' {
+		s = s[:len(s)-1]
+	}
+	return s
 }

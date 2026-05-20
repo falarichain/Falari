@@ -106,6 +106,10 @@ type Store struct {
 }
 
 func OpenStore(path string) (*Store, error) {
+	return OpenStoreWithGenesis(path, "")
+}
+
+func OpenStoreWithGenesis(path string, genesisPath string) (*Store, error) {
 	store := &Store{
 		path: path,
 		data: newState(),
@@ -114,37 +118,23 @@ func OpenStore(path string) (*Store, error) {
 		return store, nil
 	}
 
-	if isLevelDBPath(path) {
-		dbPath := strings.TrimPrefix(path, "leveldb://")
-		db, err := leveldb.OpenFile(dbPath, nil)
+	raw, rawErr := readStateFile(path)
+	hasGenesis := genesisPath != ""
+
+	if !hasExistingStateFile(path) && hasGenesis {
+		data, err := newStateFromGenesisFile(genesisPath)
 		if err != nil {
 			return nil, err
 		}
-		store.db = db
-		raw, err := db.Get(levelDBStateKey, nil)
-		if errors.Is(err, leveldb.ErrNotFound) {
-			return store, nil
-		}
-		if err != nil {
-			_ = db.Close()
+		store.data = data
+		if err := store.saveLocked(); err != nil {
 			return nil, err
 		}
-		if len(raw) > 0 {
-			if err := json.Unmarshal(raw, &store.data); err != nil {
-				_ = db.Close()
-				return nil, err
-			}
-		}
-		normalizeState(&store.data)
 		return store, nil
 	}
 
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return store, nil
-	}
-	if err != nil {
-		return nil, err
+	if rawErr != nil {
+		return nil, rawErr
 	}
 	if len(raw) == 0 {
 		return store, nil
@@ -154,6 +144,91 @@ func OpenStore(path string) (*Store, error) {
 	}
 	normalizeState(&store.data)
 	return store, nil
+}
+
+func readStateFile(path string) ([]byte, error) {
+	if isLevelDBPath(path) {
+		db, err := leveldb.OpenFile(strings.TrimPrefix(path, "leveldb://"), nil)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Close()
+		raw, err := db.Get(levelDBStateKey, nil)
+		if errors.Is(err, leveldb.ErrNotFound) {
+			return nil, nil
+		}
+		return raw, err
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return raw, err
+}
+
+func hasExistingStateFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	if isLevelDBPath(path) {
+		db, err := leveldb.OpenFile(strings.TrimPrefix(path, "leveldb://"), nil)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		_, err = db.Get(levelDBStateKey, nil)
+		return err == nil
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func newStateFromGenesisFile(path string) (State, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return State{}, err
+	}
+	var doc wire.GenesisDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return State{}, err
+	}
+	return newStateFromGenesis(doc), nil
+}
+
+func newStateFromGenesis(doc wire.GenesisDoc) State {
+	state := newState()
+	for _, acc := range doc.Accounts {
+		address := wire.NormalizeAddress(acc.Address)
+		state.Accounts[address] = wire.Account{
+			Address:      address,
+			Balance:      acc.Balance,
+			LockedStake:  0,
+			LockedStorage: 0,
+		}
+	}
+	for _, v := range doc.Validators {
+		addr := wire.NormalizeAddress(v.Address)
+		state.Validators[addr] = wire.ValidatorInfo{
+			Address:          addr,
+			PublicKey:        v.PublicKey,
+			Endpoint:         v.Endpoint,
+			Stake:            v.Stake,
+			SelfStake:        v.Stake,
+			Status:           "active",
+			Consensus:        true,
+			RegisteredAtUnix: doc.GenesisTime,
+		}
+		state.ConsensusValidators[addr] = true
+	}
+	if doc.RewardPools != nil {
+		state.RewardPools = &reward.Pools{
+			StorageRemaining:   doc.RewardPools.StoragePoolRemaining,
+			RetrievalRemaining: doc.RewardPools.RetrievalPoolRemaining,
+			ValidatorRemaining: doc.RewardPools.ValidatorPoolRemaining,
+			RepairRemaining:    doc.RewardPools.RepairPoolRemaining,
+		}
+	}
+	return state
 }
 
 func newState() State {

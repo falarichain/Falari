@@ -13,6 +13,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	state := flag.String("state", "./data/chain.json", "state file path")
+	genesis := flag.String("genesis", "", "genesis file path (applied only on first start)")
 	epochInterval := flag.Duration("epoch-interval", 0, "automatic proof epoch interval, disabled when 0")
 	epochDuration := flag.Duration("epoch-duration", 10*time.Minute, "automatic proof epoch duration")
 	epochChallenges := flag.Int("epoch-challenges", 3, "automatic challenges per finalized deal")
@@ -31,7 +32,7 @@ func main() {
 	syncInterval := flag.Duration("sync-interval", 5*time.Second, "peer block sync interval, disabled when 0")
 	flag.Parse()
 
-	store, err := chain.OpenStore(*state)
+	store, err := chain.OpenStoreWithGenesis(*state, *genesis)
 	if err != nil {
 		log.Fatalf("open chain state: %v", err)
 	}

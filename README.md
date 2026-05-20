@@ -87,7 +87,7 @@ FalariChain is a **decentralized storage chain purpose‑built for the AI era**.
 
 - **Chain Nodes** run POS + BFT consensus, produce blocks, execute transactions, and maintain the on‑chain state.
 - **Storage Nodes (Miners)** store file shards, submit storage proofs, and earn storage rewards.
-- **Retrieval Nodes** serve file downloads, collect retrieval receipts, and earn retrieval rewards.
+- **Retrieval Nodes** serve file downloads, earn retrieval mining rewards, and can optionally act as an **upload gateway**（erasure coding, miner dispatch, batch commit）— this gives retrieval node operators a business incentive to offer upload services, since more data on the chain means more retrieval requests and more rewards.
 - **Indexer** syncs blocks from a chain node and provides search APIs for deals, CIDs, and providers.
 - **AI Agents** use Agent Keys（API‑Key‑style credentials）to upload datasets, download checkpoints, and manage collections — with immutable spending limits, fine‑grained permissions, and zero risk to the master wallet.
 
@@ -261,10 +261,9 @@ go run ./cmd/chainctl/ download \
   -output ./restored.txt
 ```
 
-### 5. Create an Agent Key（for AI pipelines）
+### 5. Create an Agent Key (one string, paste to AI agent)
 
 ```bash
-# Create a key with limited spending
 go run ./cmd/chainctl/ agent-key create \
   -name "my-training-bot" \
   -allow "create_intent,batch_commit,finalize" \
@@ -272,15 +271,24 @@ go run ./cmd/chainctl/ agent-key create \
   -total-limit 10000 \
   -expire 90d \
   -master-key ./my-org.key
+```
 
+Outputs a single string like `fara_a2V5X01IUW1TS...` — **copy and paste this to your AI agent**. The agent needs nothing else.
+
+```bash
 # List all keys under a master address
-go run ./cmd/chainctl/ agent-key list \
-  -master 0xa1b2c3d4...
+go run ./cmd/chainctl/ agent-key list -master 0xa1b2c3...
 
 # Revoke a compromised key
-go run ./cmd/chainctl/ agent-key revoke \
-  -id key_abc123 \
-  -master-key ./my-org.key
+go run ./cmd/chainctl/ agent-key revoke -id key_abc123 -master-key ./my-org.key
+```
+
+**Agent side** (any language, ~5 lines):
+```python
+import base64
+raw = base64.urlsafe_b64decode(key_string[5:] + "==").decode()
+agent_key_id, master, address, private_key = raw.split("|")
+# use private_key to sign, from=master, agent_key_id in tx
 ```
 
 ### 6. Check Status
