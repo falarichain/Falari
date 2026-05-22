@@ -62,6 +62,8 @@ func main() {
 		settleIntent(os.Args[2:])
 	case "renew":
 		renewDeal(os.Args[2:])
+	case "permanent-fund":
+		topUpPermanentFund(os.Args[2:])
 	case "terminate-deal":
 		terminateDeal(os.Args[2:])
 	case "delete-tasks":
@@ -724,6 +726,45 @@ func renewDeal(args []string) {
 	}
 	fmt.Printf("renewed intent %s status=%s expires_at=%d paid=%d locked=%d grace=%t\n",
 		resp.IntentID, resp.Status, resp.ExpiresAtUnix, resp.PaidAmount, resp.NewLockedFee, resp.GraceUsed)
+}
+
+func topUpPermanentFund(args []string) {
+	fs := flag.NewFlagSet("permanent-fund", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	intentID := fs.String("intent", "", "intent id")
+	user := fs.String("user", "", "optional user address")
+	amount := fs.Uint64("amount", 0, "amount to add to the permanent storage fund")
+	planPath := fs.String("plan", "", "optional upload plan path")
+	fs.Parse(args)
+
+	if *planPath != "" {
+		plan, err := client.LoadPlan(*planPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if *intentID == "" {
+			*intentID = plan.IntentID
+		}
+		if *user == "" {
+			*user = plan.User
+		}
+	}
+	if *intentID == "" {
+		log.Fatal("-intent or -plan is required")
+	}
+	if *amount == 0 {
+		log.Fatal("-amount is required")
+	}
+	var resp wire.PermanentFundTopUpResponse
+	if err := client.NewHTTP(*chainURL).Post("/intents/permanent-fund", wire.PermanentFundTopUpRequest{
+		IntentID: *intentID,
+		User:     *user,
+		Amount:   *amount,
+	}, &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("permanent fund intent=%s balance=%d contributed=%d paid=%d closed=%t\n",
+		resp.Fund.IntentID, resp.Fund.Balance, resp.Fund.Contributed, resp.Fund.Paid, resp.Fund.Closed)
 }
 
 func consensusState(args []string) {
@@ -2934,6 +2975,8 @@ func usage() {
   chainctl upload        -chain http://localhost:8080 -storage http://localhost:9090,http://localhost:9091 -plan ./upload-plan.json -file ./data.bin -key ./storage.key
   chainctl finalize      -chain http://localhost:8080 -plan ./upload-plan.json
   chainctl settle-intent -chain http://localhost:8080 -plan ./upload-plan.json
+  chainctl renew        -chain http://localhost:8080 -plan ./upload-plan.json -duration 31536000
+  chainctl permanent-fund -chain http://localhost:8080 -plan ./upload-plan.json -amount 1000000
   chainctl terminate-deal -chain http://localhost:8080 -plan ./upload-plan.json
   chainctl delete-tasks  -chain http://localhost:8080 -intent intent_xxx
   chainctl access-policy -chain http://localhost:8080 -intent intent_xxx -user user_demo -status blocked -reason-hash hash

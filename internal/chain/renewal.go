@@ -11,9 +11,9 @@ import (
 const defaultGracePeriod = int64(7 * 24 * 60 * 60)
 
 type renewDealTxPayload struct {
-	Request        wire.RenewDealRequest  `json:"request"`
-	Response       wire.RenewDealResponse `json:"response"`
-	RenewedAtUnix  int64                  `json:"renewed_at_unix"`
+	Request       wire.RenewDealRequest  `json:"request"`
+	Response      wire.RenewDealResponse `json:"response"`
+	RenewedAtUnix int64                  `json:"renewed_at_unix"`
 }
 
 func (s *Store) RenewDeal(req wire.RenewDealRequest) (wire.RenewDealResponse, error) {
@@ -127,6 +127,33 @@ func (s *Store) estimateRenewalPriceLocked(intent *Intent, duration int64) uint6
 	return price
 }
 
+func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
+	req := payload.Request
+	req.User = wire.NormalizeAddress(req.User)
+	intent, ok := s.data.Intents[req.IntentID]
+	if !ok {
+		return errors.New("intent not found")
+	}
+	if intent.User != req.User {
+		return errors.New("user mismatch")
+	}
+	price := payload.Response.PaidAmount
+	account := s.accountLocked(req.User)
+	if account.Balance < price {
+		return errors.New("replay renew deal has insufficient balance")
+	}
+	account.Balance -= price
+	account.LockedStorage = saturatingAdd(account.LockedStorage, price)
+	s.data.Accounts[req.User] = account
+	intent.LockedFee = payload.Response.NewLockedFee
+	intent.Status = payload.Response.Status
+	intent.StorageStatus = wire.StorageStatusActive
+	intent.ExpiresAtUnix = payload.Response.ExpiresAtUnix
+	intent.Policy.Duration = req.Duration
+	intent.UpdatedAt = payload.RenewedAtUnix
+	return nil
+}
+
 func (s *Store) autoRenewDealsLocked(now int64) (renewed int) {
 	for _, intent := range s.data.Intents {
 		if !intent.Policy.AutoRenew || !intent.Policy.Renewable {
@@ -174,9 +201,16 @@ func (s *Store) StartAutoRenewScheduler(interval time.Duration) {
 		for range ticker.C {
 			s.mu.Lock()
 			renewed := s.autoRenewDealsLocked(time.Now().Unix())
+			var err error
+			if renewed > 0 {
+				err = s.saveLocked()
+			}
 			s.mu.Unlock()
 			if renewed > 0 {
 				log.Printf("auto renewed %d deals", renewed)
+			}
+			if err != nil {
+				log.Printf("auto renew save failed: %v", err)
 			}
 		}
 	}()

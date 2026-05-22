@@ -108,6 +108,31 @@ type StoragePricing struct {
 	PermanentDuration    int64  `json:"permanent_duration"`
 }
 
+type PermanentStorageFund struct {
+	IntentID          string `json:"intent_id"`
+	User              string `json:"user"`
+	Balance           uint64 `json:"balance"`
+	Contributed       uint64 `json:"contributed"`
+	Paid              uint64 `json:"paid"`
+	CreatedAtUnix     int64  `json:"created_at_unix"`
+	UpdatedAtUnix     int64  `json:"updated_at_unix"`
+	LastPayoutUnix    int64  `json:"last_payout_unix,omitempty"`
+	Closed            bool   `json:"closed,omitempty"`
+	ClosedReason      string `json:"closed_reason,omitempty"`
+	ClosedAtUnix      int64  `json:"closed_at_unix,omitempty"`
+	TransferredToPool uint64 `json:"transferred_to_pool,omitempty"`
+}
+
+type PermanentFundTopUpRequest struct {
+	IntentID string `json:"intent_id"`
+	User     string `json:"user"`
+	Amount   uint64 `json:"amount"`
+}
+
+type PermanentFundTopUpResponse struct {
+	Fund PermanentStorageFund `json:"fund"`
+}
+
 type ChainStatusResponse struct {
 	Status                 string         `json:"status"`
 	Height                 uint64         `json:"height"`
@@ -294,6 +319,8 @@ type IntentView struct {
 	LockedFee               uint64              `json:"locked_fee"`
 	PaidFee                 uint64              `json:"paid_fee,omitempty"`
 	RefundedFee             uint64              `json:"refunded_fee,omitempty"`
+	PermanentFundBalance    uint64              `json:"permanent_fund_balance,omitempty"`
+	PermanentFundPaid       uint64              `json:"permanent_fund_paid,omitempty"`
 	UploadedSize            int64               `json:"uploaded_size"`
 	CommittedSegments       int                 `json:"committed_segments"`
 	Status                  string              `json:"status"`
@@ -391,15 +418,17 @@ type GovernanceDealActionResponse struct {
 }
 
 type DeleteTask struct {
-	TaskID          string `json:"task_id"`
-	IntentID        string `json:"intent_id"`
-	ShardHash       string `json:"shard_hash"`
-	MinerAddress    string `json:"miner_address"`
-	MinerPublicKey  string `json:"miner_public_key"`
-	Status          string `json:"status"`
-	Reason          string `json:"reason,omitempty"`
-	CreatedAtUnix   int64  `json:"created_at_unix"`
-	CompletedAtUnix int64  `json:"completed_at_unix,omitempty"`
+	TaskID           string `json:"task_id"`
+	IntentID         string `json:"intent_id"`
+	ShardHash        string `json:"shard_hash"`
+	MinerAddress     string `json:"miner_address"`
+	MinerPublicKey   string `json:"miner_public_key"`
+	Status           string `json:"status"`
+	Reason           string `json:"reason,omitempty"`
+	RetainPhysical   bool   `json:"retain_physical,omitempty"`
+	ActiveReferences int    `json:"active_references,omitempty"`
+	CreatedAtUnix    int64  `json:"created_at_unix"`
+	CompletedAtUnix  int64  `json:"completed_at_unix,omitempty"`
 }
 
 type DeleteTaskResponse struct {
@@ -439,6 +468,13 @@ type GovernanceBlockDealRequest struct {
 
 type GovernanceAuditResponse struct {
 	Records []GovernanceAuditRecord `json:"records"`
+}
+
+type GovernanceOperator struct {
+	Operator      string   `json:"operator"`
+	Permissions   []string `json:"permissions"`
+	Enabled       bool     `json:"enabled"`
+	CreatedAtUnix int64    `json:"created_at_unix,omitempty"`
 }
 
 type DeleteReceipt struct {
@@ -1255,6 +1291,107 @@ type RegisterValidatorResponse struct {
 
 type ListValidatorsResponse struct {
 	Validators []ValidatorInfo `json:"validators"`
+}
+
+const (
+	KeyEnvelopeRecipientOwner    = "owner"
+	KeyEnvelopeRecipientAddress  = "address"
+	KeyEnvelopeRecipientAgent    = "agent"
+	KeyEnvelopeRecipientPasscode = "passcode"
+)
+
+const (
+	ShareModeAddress      = "address"
+	ShareModePasscode     = "passcode"
+	ShareModeLinkFragment = "link_fragment"
+)
+
+type PasscodeKDFParams struct {
+	Name        string `json:"name"`
+	Salt        string `json:"salt"`
+	MemoryKiB   int    `json:"memory_kib"`
+	Iterations  int    `json:"iterations"`
+	Parallelism int    `json:"parallelism"`
+}
+
+type KeyEnvelope struct {
+	EnvelopeID       string             `json:"envelope_id"`
+	IntentID         string             `json:"intent_id"`
+	ShareID          string             `json:"share_id,omitempty"`
+	Owner            string             `json:"owner"`
+	Recipient        string             `json:"recipient"`
+	RecipientType    string             `json:"recipient_type"`
+	Algorithm        string             `json:"algorithm"`
+	EncryptedDataKey string             `json:"encrypted_data_key"`
+	Nonce            string             `json:"nonce,omitempty"`
+	KDF              *PasscodeKDFParams `json:"kdf,omitempty"`
+	CreatedAtUnix    int64              `json:"created_at_unix"`
+	ExpiresAtUnix    int64              `json:"expires_at_unix,omitempty"`
+	Revoked          bool               `json:"revoked,omitempty"`
+}
+
+type ShareRecord struct {
+	ShareID       string `json:"share_id"`
+	IntentID      string `json:"intent_id"`
+	Owner         string `json:"owner"`
+	Mode          string `json:"mode"`
+	Recipient     string `json:"recipient,omitempty"`
+	EnvelopeID    string `json:"envelope_id"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+	ExpiresAtUnix int64  `json:"expires_at_unix,omitempty"`
+	Revoked       bool   `json:"revoked,omitempty"`
+}
+
+type CreateKeyEnvelopeRequest struct {
+	IntentID         string             `json:"intent_id"`
+	Owner            string             `json:"owner"`
+	Recipient        string             `json:"recipient"`
+	RecipientType    string             `json:"recipient_type"`
+	Algorithm        string             `json:"algorithm"`
+	EncryptedDataKey string             `json:"encrypted_data_key"`
+	Nonce            string             `json:"nonce,omitempty"`
+	KDF              *PasscodeKDFParams `json:"kdf,omitempty"`
+	ExpiresAtUnix    int64              `json:"expires_at_unix,omitempty"`
+}
+
+type CreateKeyEnvelopeResponse struct {
+	Envelope KeyEnvelope `json:"envelope"`
+}
+
+type CreateAddressShareRequest struct {
+	IntentID         string `json:"intent_id"`
+	Owner            string `json:"owner"`
+	Recipient        string `json:"recipient"`
+	Algorithm        string `json:"algorithm"`
+	EncryptedDataKey string `json:"encrypted_data_key"`
+	Nonce            string `json:"nonce,omitempty"`
+	ExpiresAtUnix    int64  `json:"expires_at_unix,omitempty"`
+}
+
+type CreatePasscodeShareRequest struct {
+	IntentID         string             `json:"intent_id"`
+	Owner            string             `json:"owner"`
+	Mode             string             `json:"mode,omitempty"`
+	Algorithm        string             `json:"algorithm"`
+	EncryptedDataKey string             `json:"encrypted_data_key"`
+	Nonce            string             `json:"nonce,omitempty"`
+	KDF              *PasscodeKDFParams `json:"kdf"`
+	ExpiresAtUnix    int64              `json:"expires_at_unix,omitempty"`
+}
+
+type CreateShareResponse struct {
+	Share    ShareRecord `json:"share"`
+	Envelope KeyEnvelope `json:"envelope"`
+}
+
+type RevokeShareRequest struct {
+	ShareID string `json:"share_id"`
+	Owner   string `json:"owner"`
+}
+
+type ListSharesResponse struct {
+	Shares    []ShareRecord `json:"shares"`
+	Envelopes []KeyEnvelope `json:"envelopes,omitempty"`
 }
 
 type AgentKey struct {

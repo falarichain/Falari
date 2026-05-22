@@ -153,6 +153,24 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyDataRecordPayloadLocked(payload)
+	case "create_key_envelope":
+		var payload createKeyEnvelopeTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyCreateKeyEnvelopeLocked(payload)
+	case "create_share":
+		var payload createShareTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyCreateShareLocked(payload)
+	case "revoke_share":
+		var payload revokeShareTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyRevokeShareLocked(payload)
 	case "batch_commit":
 		var payload batchCommitTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -171,6 +189,18 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applySettleIntentLocked(payload)
+	case "renew_deal":
+		var payload renewDealTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyRenewDealLocked(payload)
+	case "permanent_fund_topup":
+		var payload permanentFundTopUpTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyPermanentFundTopUpLocked(payload)
 	case "terminate_deal":
 		var payload terminateDealTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -445,6 +475,7 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 		CreatedAt:    createdAt,
 		UpdatedAt:    createdAt,
 	}
+	s.createPermanentFundLocked(s.data.Intents[payload.IntentID], createdAt)
 	s.reserveStorageAssignmentsLocked(assignments)
 	return nil
 }
@@ -577,6 +608,9 @@ func (s *Store) applySetAccessPolicyLocked(payload setAccessPolicyTxPayload) err
 }
 
 func (s *Store) applyGovernanceDealActionLocked(payload governanceDealActionTxPayload) error {
+	if err := s.validateGovernanceOperatorLocked(payload.Request.Operator, payload.Request.Action); err != nil {
+		return err
+	}
 	resp, err := s.governanceDealActionLocked(payload.Request, payload.Response.UpdatedAtUnix)
 	if err != nil {
 		return err
@@ -593,6 +627,9 @@ func (s *Store) applyGovernanceDealActionLocked(payload governanceDealActionTxPa
 }
 
 func (s *Store) applyCommitteeFreezeDealLocked(payload committeeFreezeDealTxPayload) error {
+	if err := s.validateGovernanceOperatorLocked(payload.Request.Operator, "freeze"); err != nil {
+		return err
+	}
 	resp, err := s.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:      payload.Request.IntentID,
 		Operator:      payload.Request.Operator,
@@ -614,6 +651,9 @@ func (s *Store) applyCommitteeFreezeDealLocked(payload committeeFreezeDealTxPayl
 }
 
 func (s *Store) applyGovernanceBlockDealLocked(payload governanceBlockDealTxPayload) error {
+	if err := s.validateGovernanceOperatorLocked(payload.Request.Operator, "block"); err != nil {
+		return err
+	}
 	resp, err := s.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:           payload.Request.IntentID,
 		Operator:           payload.Request.Operator,

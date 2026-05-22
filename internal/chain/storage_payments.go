@@ -1,6 +1,10 @@
 package chain
 
-import "chain/internal/wire"
+import (
+	"time"
+
+	"chain/internal/wire"
+)
 
 func (s *Store) payableStorageRewardLocked(challenge wire.StorageChallenge) uint64 {
 	if challenge.Reward == 0 {
@@ -11,6 +15,10 @@ func (s *Store) payableStorageRewardLocked(challenge wire.StorageChallenge) uint
 		return 0
 	}
 	remaining := remainingIntentEscrow(intent)
+	if isPermanentIntent(intent) {
+		fund := s.ensurePermanentFundLocked(intent, 0)
+		remaining = fund.Balance
+	}
 	if remaining == 0 {
 		return 0
 	}
@@ -31,6 +39,9 @@ func (s *Store) payStorageRewardLocked(challenge wire.StorageChallenge, minerAdd
 	}
 	intent, ok := s.data.Intents[challenge.IntentID]
 	if ok {
+		if isPermanentIntent(intent) {
+			reward = s.spendPermanentFundLocked(intent, reward, time.Now().Unix())
+		}
 		user := s.accountLocked(intent.User)
 		if user.LockedStorage < reward {
 			reward = user.LockedStorage

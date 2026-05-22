@@ -69,10 +69,12 @@ type State struct {
 	FeeMarket               wire.FeeMarket                         `json:"fee_market"`
 	FeeChargedTxs           map[string]bool                        `json:"fee_charged_txs"`
 	StoragePricing          wire.StoragePricing                    `json:"storage_pricing"`
+	PermanentStorageFunds   map[string]wire.PermanentStorageFund   `json:"permanent_storage_funds"`
 	RepairTasks             map[string]wire.RepairTask             `json:"repair_tasks"`
 	ProviderRecords         map[string]wire.StorageProviderRecord  `json:"provider_records"`
 	DeleteTasks             map[string]wire.DeleteTask             `json:"delete_tasks"`
 	GovernanceAudits        []wire.GovernanceAuditRecord           `json:"governance_audits"`
+	GovernanceOperators     map[string]wire.GovernanceOperator     `json:"governance_operators"`
 	DeleteReceipts          map[string]wire.DeleteReceipt          `json:"delete_receipts"`
 	RetrievalReceipts       map[string]wire.RetrievalReceipt       `json:"retrieval_receipts"`
 	RetrievalWindows        map[string]wire.RetrievalRateWindow    `json:"retrieval_windows"`
@@ -83,6 +85,8 @@ type State struct {
 	Collections             map[string]wire.DataCollection         `json:"collections"`
 	DataRecords             map[string]wire.DataRecord             `json:"data_records"`
 	CollectionRecords       map[string][]string                    `json:"collection_records"`
+	KeyEnvelopes            map[string]wire.KeyEnvelope            `json:"key_envelopes"`
+	ShareRecords            map[string]wire.ShareRecord            `json:"share_records"`
 	AppliedTxs              map[string]bool                        `json:"applied_txs"`
 	ConfirmedTxs            map[string]bool                        `json:"confirmed_txs"`
 	EpochRound              uint64                                 `json:"epoch_round"`
@@ -200,9 +204,9 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 	for _, acc := range doc.Accounts {
 		address := wire.NormalizeAddress(acc.Address)
 		state.Accounts[address] = wire.Account{
-			Address:      address,
-			Balance:      acc.Balance,
-			LockedStake:  0,
+			Address:       address,
+			Balance:       acc.Balance,
+			LockedStake:   0,
 			LockedStorage: 0,
 		}
 	}
@@ -228,40 +232,60 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 			RepairRemaining:    doc.RewardPools.RepairPoolRemaining,
 		}
 	}
+	for _, operator := range doc.GovernanceOperators {
+		key := normalizeGovernanceOperator(operator.Operator)
+		if key == "" {
+			continue
+		}
+		enabled := true
+		if operator.Enabled != nil {
+			enabled = *operator.Enabled
+		}
+		state.GovernanceOperators[key] = wire.GovernanceOperator{
+			Operator:      key,
+			Permissions:   append([]string(nil), operator.Permissions...),
+			Enabled:       enabled,
+			CreatedAtUnix: doc.GenesisTime,
+		}
+	}
 	return state
 }
 
 func newState() State {
 	return State{
-		Intents:             map[string]*Intent{},
-		Deals:               map[string]string{},
-		Challenges:          map[string]wire.StorageChallenge{},
-		Proofs:              map[string]wire.StorageProof{},
-		Epochs:              map[string]wire.ProofEpoch{},
-		Miners:              map[string]wire.MinerStats{},
-		Accounts:            map[string]wire.Account{},
-		Blocks:              []wire.Block{},
-		PendingTxs:          []wire.Transaction{},
-		Receipts:            map[string]wire.TransactionReceipt{},
-		Validators:          map[string]wire.ValidatorInfo{},
-		ConsensusValidators: map[string]bool{},
-		ValidatorEvidence:   map[string]wire.ValidatorEvidence{},
-		ConsensusVotes:      map[string]wire.ConsensusVote{},
-		FeeMarket:           defaultFeeMarket(),
-		FeeChargedTxs:       map[string]bool{},
-		StoragePricing:      defaultStoragePricing(),
-		RepairTasks:         map[string]wire.RepairTask{},
-		ProviderRecords:     map[string]wire.StorageProviderRecord{},
-		DeleteTasks:         map[string]wire.DeleteTask{},
-		GovernanceAudits:    []wire.GovernanceAuditRecord{},
-		DeleteReceipts:      map[string]wire.DeleteReceipt{},
-		RetrievalReceipts:   map[string]wire.RetrievalReceipt{},
-		Collections:         map[string]wire.DataCollection{},
-		DataRecords:         map[string]wire.DataRecord{},
-		CollectionRecords:   map[string][]string{},
-		AppliedTxs:          map[string]bool{},
-		ConfirmedTxs:        map[string]bool{},
-		AgentKeys:           map[string]*wire.AgentKey{},
+		Intents:               map[string]*Intent{},
+		Deals:                 map[string]string{},
+		Challenges:            map[string]wire.StorageChallenge{},
+		Proofs:                map[string]wire.StorageProof{},
+		Epochs:                map[string]wire.ProofEpoch{},
+		Miners:                map[string]wire.MinerStats{},
+		Accounts:              map[string]wire.Account{},
+		Blocks:                []wire.Block{},
+		PendingTxs:            []wire.Transaction{},
+		Receipts:              map[string]wire.TransactionReceipt{},
+		Validators:            map[string]wire.ValidatorInfo{},
+		ConsensusValidators:   map[string]bool{},
+		ValidatorEvidence:     map[string]wire.ValidatorEvidence{},
+		ConsensusVotes:        map[string]wire.ConsensusVote{},
+		FeeMarket:             defaultFeeMarket(),
+		FeeChargedTxs:         map[string]bool{},
+		StoragePricing:        defaultStoragePricing(),
+		PermanentStorageFunds: map[string]wire.PermanentStorageFund{},
+		RepairTasks:           map[string]wire.RepairTask{},
+		ProviderRecords:       map[string]wire.StorageProviderRecord{},
+		DeleteTasks:           map[string]wire.DeleteTask{},
+		GovernanceAudits:      []wire.GovernanceAuditRecord{},
+		GovernanceOperators:   map[string]wire.GovernanceOperator{},
+		DeleteReceipts:        map[string]wire.DeleteReceipt{},
+		RetrievalReceipts:     map[string]wire.RetrievalReceipt{},
+		Collections:           map[string]wire.DataCollection{},
+		DataRecords:           map[string]wire.DataRecord{},
+		CollectionRecords:     map[string][]string{},
+		KeyEnvelopes:          map[string]wire.KeyEnvelope{},
+		ShareRecords:          map[string]wire.ShareRecord{},
+		AppliedTxs:            map[string]bool{},
+		ConfirmedTxs:          map[string]bool{},
+		AgentKeys:             map[string]*wire.AgentKey{},
 	}
 }
 
@@ -326,6 +350,9 @@ func normalizeState(state *State) {
 	if state.StoragePricing.PermanentDuration == 0 {
 		state.StoragePricing.PermanentDuration = defaultPermanentStorageDuration
 	}
+	if state.PermanentStorageFunds == nil {
+		state.PermanentStorageFunds = map[string]wire.PermanentStorageFund{}
+	}
 	if state.RepairTasks == nil {
 		state.RepairTasks = map[string]wire.RepairTask{}
 	}
@@ -337,6 +364,9 @@ func normalizeState(state *State) {
 	}
 	if state.GovernanceAudits == nil {
 		state.GovernanceAudits = []wire.GovernanceAuditRecord{}
+	}
+	if state.GovernanceOperators == nil {
+		state.GovernanceOperators = map[string]wire.GovernanceOperator{}
 	}
 	if state.DeleteReceipts == nil {
 		state.DeleteReceipts = map[string]wire.DeleteReceipt{}
@@ -352,6 +382,12 @@ func normalizeState(state *State) {
 	}
 	if state.CollectionRecords == nil {
 		state.CollectionRecords = map[string][]string{}
+	}
+	if state.KeyEnvelopes == nil {
+		state.KeyEnvelopes = map[string]wire.KeyEnvelope{}
+	}
+	if state.ShareRecords == nil {
+		state.ShareRecords = map[string]wire.ShareRecord{}
 	}
 	if state.AppliedTxs == nil {
 		state.AppliedTxs = map[string]bool{}
@@ -376,6 +412,10 @@ func normalizeState(state *State) {
 	for _, intent := range state.Intents {
 		if intent.Receipts == nil {
 			intent.Receipts = map[int]map[int]wire.MinerReceipt{}
+		}
+		if fund, ok := state.PermanentStorageFunds[intent.IntentID]; ok {
+			intent.PermanentFundBalance = fund.Balance
+			intent.PermanentFundPaid = fund.Paid
 		}
 		normalizeIntentLifecycle(intent)
 	}
@@ -471,6 +511,7 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
+	s.createPermanentFundLocked(s.data.Intents[intentID], now)
 	s.reserveStorageAssignmentsLocked(assignments)
 	s.recordTxLocked("create_intent", req.User, createIntentTxPayload{
 		IntentID:      intentID,

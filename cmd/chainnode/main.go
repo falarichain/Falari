@@ -20,6 +20,7 @@ func main() {
 	epochReward := flag.Uint64("epoch-reward", 1, "automatic reward per accepted proof")
 	epochSlash := flag.Uint64("epoch-slash", 1, "automatic slash per missed proof")
 	settleInterval := flag.Duration("settle-interval", 1*time.Minute, "automatic storage intent settlement interval, disabled when 0")
+	renewInterval := flag.Duration("renew-interval", 1*time.Minute, "automatic renewable deal renewal interval, disabled when 0")
 	blockInterval := flag.Duration("block-interval", 5*time.Second, "automatic block production interval, disabled when 0")
 	validatorKey := flag.String("validator-key", "./data/validator.json", "validator identity file path")
 	validatorEndpoint := flag.String("validator-endpoint", "", "public validator endpoint")
@@ -86,6 +87,7 @@ func main() {
 		SlashPerMissed:    *epochSlash,
 	})
 	store.StartIntentSettlementScheduler(chain.IntentSettlementSchedulerConfig{Interval: *settleInterval})
+	store.StartAutoRenewScheduler(*renewInterval)
 	store.StartBlockProducer(*blockInterval)
 	network.StartBlockSync(*syncInterval)
 

@@ -179,9 +179,13 @@ func (n *Node) deletePendingTasks(chainURL string) error {
 		if task.MinerAddress != n.address {
 			continue
 		}
-		if err := n.DeleteShard(task.ShardHash); err != nil {
-			log.Printf("auto delete failed locally: task=%s shard=%s error=%v", task.TaskID, task.ShardHash, err)
-			continue
+		if task.RetainPhysical {
+			log.Printf("auto delete retained shared shard task=%s intent=%s shard=%s refs=%d", task.TaskID, task.IntentID, task.ShardHash, task.ActiveReferences)
+		} else {
+			if err := n.DeleteShard(task.ShardHash); err != nil {
+				log.Printf("auto delete failed locally: task=%s shard=%s error=%v", task.TaskID, task.ShardHash, err)
+				continue
+			}
 		}
 		receipt := wire.DeleteReceipt{
 			IntentID:       task.IntentID,

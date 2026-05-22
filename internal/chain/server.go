@@ -37,6 +37,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /storage/providers", s.acceptStorageProvider)
 	mux.HandleFunc("POST /intents", s.createIntent)
 	mux.HandleFunc("POST /intents/settle", s.settleIntent)
+	mux.HandleFunc("POST /intents/permanent-fund", s.topUpPermanentFund)
 	mux.HandleFunc("POST /intents/{id}/renew", s.renewDeal)
 	mux.HandleFunc("POST /intents/terminate", s.terminateDeal)
 	mux.HandleFunc("POST /intents/access", s.setAccessPolicy)
@@ -52,6 +53,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /records", s.appendRecord)
 	mux.HandleFunc("GET /records/{id}/manifest", s.getRecordManifest)
 	mux.HandleFunc("GET /records/", s.getRecord)
+	mux.HandleFunc("POST /key-envelopes", s.createKeyEnvelope)
+	mux.HandleFunc("GET /key-envelopes", s.listKeyEnvelopes)
+	mux.HandleFunc("POST /shares/address", s.createAddressShare)
+	mux.HandleFunc("POST /shares/passcode", s.createPasscodeShare)
+	mux.HandleFunc("POST /shares/revoke", s.revokeShare)
+	mux.HandleFunc("GET /shares", s.listShares)
 	mux.HandleFunc("POST /batch-commits", s.batchCommit)
 	mux.HandleFunc("POST /finalize", s.finalize)
 	mux.HandleFunc("POST /challenges", s.generateChallenges)
@@ -139,6 +146,19 @@ func (s *Server) allDealHealth(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, wire.DealHealthResponse{Healths: healths})
+}
+
+func (s *Server) topUpPermanentFund(w http.ResponseWriter, r *http.Request) {
+	var req wire.PermanentFundTopUpRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.TopUpPermanentFund(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
@@ -866,6 +886,89 @@ func (s *Server) listPeers(w http.ResponseWriter, _ *http.Request) {
 		"libp2p_id":    s.network.LibP2PID(),
 		"libp2p_addrs": s.network.LibP2PAddrs(),
 	})
+}
+
+func (s *Server) createKeyEnvelope(w http.ResponseWriter, r *http.Request) {
+	var req wire.CreateKeyEnvelopeRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.CreateKeyEnvelope(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) listKeyEnvelopes(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	envelopes, err := s.store.ListKeyEnvelopes(
+		query.Get("intent_id"),
+		query.Get("recipient"),
+		query.Get("recipient_type"),
+		query.Get("share_id"),
+		query.Get("include_revoked") == "true",
+	)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"envelopes": envelopes})
+}
+
+func (s *Server) createAddressShare(w http.ResponseWriter, r *http.Request) {
+	var req wire.CreateAddressShareRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.CreateAddressShare(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) createPasscodeShare(w http.ResponseWriter, r *http.Request) {
+	var req wire.CreatePasscodeShareRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.CreatePasscodeShare(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) revokeShare(w http.ResponseWriter, r *http.Request) {
+	var req wire.RevokeShareRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.store.RevokeShare(req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked", "share_id": req.ShareID})
+}
+
+func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	resp, err := s.store.ListShares(
+		query.Get("intent_id"),
+		query.Get("owner"),
+		query.Get("recipient"),
+		query.Get("share_id"),
+		query.Get("include_revoked") == "true",
+	)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {

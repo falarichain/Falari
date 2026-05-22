@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"chain/internal/wire"
@@ -132,7 +133,10 @@ func (s *Store) terminateDealLocked(req wire.TerminateDealRequest, now int64) (w
 	intent.UpdatedAt = now
 	s.releaseUncommittedStorageReservationsLocked(intent)
 	refund := remainingIntentEscrow(intent)
-	if refund > 0 {
+	if isPermanentIntent(intent) {
+		s.closePermanentFundLocked(intent, "terminate_deal", now)
+		refund = 0
+	} else if refund > 0 {
 		user := s.accountLocked(intent.User)
 		if user.LockedStorage < refund {
 			refund = user.LockedStorage
@@ -203,6 +207,9 @@ func (s *Store) setAccessPolicyLocked(req wire.SetAccessPolicyRequest, now int64
 func (s *Store) GovernanceDealAction(req wire.GovernanceDealActionRequest) (wire.GovernanceDealActionResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.validateGovernanceOperatorLocked(req.Operator, req.Action); err != nil {
+		return wire.GovernanceDealActionResponse{}, err
+	}
 	resp, err := s.governanceDealActionLocked(req, time.Now().Unix())
 	if err != nil {
 		return wire.GovernanceDealActionResponse{}, err
@@ -217,6 +224,9 @@ func (s *Store) GovernanceDealAction(req wire.GovernanceDealActionRequest) (wire
 func (s *Store) CommitteeFreezeDeal(req wire.CommitteeFreezeDealRequest) (wire.GovernanceDealActionResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.validateGovernanceOperatorLocked(req.Operator, "freeze"); err != nil {
+		return wire.GovernanceDealActionResponse{}, err
+	}
 	now := time.Now().Unix()
 	resp, err := s.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:      req.IntentID,
@@ -238,6 +248,9 @@ func (s *Store) CommitteeFreezeDeal(req wire.CommitteeFreezeDealRequest) (wire.G
 func (s *Store) GovernanceBlockDeal(req wire.GovernanceBlockDealRequest) (wire.GovernanceDealActionResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.validateGovernanceOperatorLocked(req.Operator, "block"); err != nil {
+		return wire.GovernanceDealActionResponse{}, err
+	}
 	now := time.Now().Unix()
 	resp, err := s.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:           req.IntentID,
@@ -289,6 +302,7 @@ func (s *Store) governanceDealActionLocked(req wire.GovernanceDealActionRequest,
 		if !req.PreserveStorage {
 			intent.StorageStatus = wire.StorageStatusTerminating
 			intent.TerminatedAtUnix = now
+			s.closePermanentFundLocked(intent, "governance_block", now)
 			s.ensureDeleteTasksLocked(intent, "governance_block", now)
 		}
 	case "legal_hold":
@@ -455,17 +469,23 @@ func (s *Store) ensureDeleteTasksLocked(intent *Intent, reason string, now int64
 		taskID := deleteTaskID(intent.IntentID, receipt.ShardHash, receipt.MinerAddress)
 		task, exists := s.data.DeleteTasks[taskID]
 		if !exists {
+			activeReferences := s.activeShardReferencesLocked(intent.IntentID, receipt.ShardHash, receipt.MinerAddress)
 			task = wire.DeleteTask{
-				TaskID:         taskID,
-				IntentID:       intent.IntentID,
-				ShardHash:      receipt.ShardHash,
-				MinerAddress:   receipt.MinerAddress,
-				MinerPublicKey: receipt.MinerPublicKey,
-				Status:         deleteTaskStatusPending,
-				Reason:         reason,
-				CreatedAtUnix:  now,
+				TaskID:           taskID,
+				IntentID:         intent.IntentID,
+				ShardHash:        receipt.ShardHash,
+				MinerAddress:     receipt.MinerAddress,
+				MinerPublicKey:   receipt.MinerPublicKey,
+				Status:           deleteTaskStatusPending,
+				Reason:           reason,
+				RetainPhysical:   activeReferences > 0,
+				ActiveReferences: activeReferences,
+				CreatedAtUnix:    now,
 			}
 		} else {
+			activeReferences := s.activeShardReferencesLocked(intent.IntentID, receipt.ShardHash, receipt.MinerAddress)
+			task.RetainPhysical = activeReferences > 0
+			task.ActiveReferences = activeReferences
 			if task.Reason == "" {
 				task.Reason = reason
 			}
@@ -488,6 +508,36 @@ func (s *Store) ensureDeleteTasksLocked(intent *Intent, reason string, now int64
 		intent.Status = wire.StatusDeleted
 	}
 	return tasks
+}
+
+func (s *Store) activeShardReferencesLocked(excludingIntentID string, shardHash string, minerAddress string) int {
+	if shardHash == "" || minerAddress == "" {
+		return 0
+	}
+	count := 0
+	for _, candidate := range s.data.Intents {
+		if candidate == nil || candidate.IntentID == excludingIntentID {
+			continue
+		}
+		normalizeIntentLifecycle(candidate)
+		if candidate.Status != wire.StatusFinalized {
+			continue
+		}
+		if candidate.StorageStatus != wire.StorageStatusActive {
+			continue
+		}
+		if candidate.AccessStatus == wire.AccessStatusBlocked {
+			continue
+		}
+		for _, byShard := range candidate.Receipts {
+			for _, receipt := range byShard {
+				if receipt.ShardHash == shardHash && receipt.MinerAddress == minerAddress {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }
 
 func (s *Store) pendingDeleteTaskLocked(intentID string, shardHash string, minerAddress string) (string, wire.DeleteTask, bool) {
@@ -525,6 +575,41 @@ func validAccessStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func (s *Store) validateGovernanceOperatorLocked(operator string, action string) error {
+	operator = normalizeGovernanceOperator(operator)
+	if operator == "" {
+		return errors.New("governance operator is required")
+	}
+	if len(s.data.GovernanceOperators) == 0 {
+		return nil
+	}
+	record, ok := s.data.GovernanceOperators[operator]
+	if !ok || !record.Enabled {
+		return errors.New("governance operator is not authorized")
+	}
+	if len(record.Permissions) == 0 {
+		return nil
+	}
+	for _, permission := range record.Permissions {
+		if permission == action || permission == governanceTypeForAction(action) || permission == "all" {
+			return nil
+		}
+	}
+	return errors.New("governance operator lacks permission: " + action)
+}
+
+func normalizeGovernanceOperator(operator string) string {
+	trimmed := strings.TrimSpace(operator)
+	if trimmed == "" {
+		return ""
+	}
+	normalized := wire.NormalizeAddress(trimmed)
+	if normalized != "" {
+		return normalized
+	}
+	return trimmed
 }
 
 func intentReceiptForShard(intent *Intent, shardHash string, minerAddress string) (wire.MinerReceipt, bool) {

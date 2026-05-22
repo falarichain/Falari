@@ -20,6 +20,12 @@ var agentAllowedOps = []string{
 	"retrieval",
 	"collection_create",
 	"append_record",
+	"create_key_envelope",
+	"create_share",
+	"revoke_share",
+	"share_create",
+	"share_revoke",
+	"private_read",
 }
 
 const maxAgentKeyNameLen = 64

@@ -238,6 +238,75 @@ func TestGovernanceBlockDealCreatesDeleteTasksAndAudit(t *testing.T) {
 	}
 }
 
+func TestGovernanceOperatorAllowlistRejectsUnauthorizedOperator(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := testLifecycleIntent()
+	store.data.Intents[intent.IntentID] = intent
+	store.data.GovernanceOperators["committee"] = wire.GovernanceOperator{
+		Operator:    "committee",
+		Permissions: []string{"freeze"},
+		Enabled:     true,
+	}
+	if _, err := store.GovernanceBlockDeal(wire.GovernanceBlockDealRequest{
+		IntentID:   intent.IntentID,
+		Operator:   "committee",
+		ReasonHash: "block_reason",
+	}); err == nil {
+		t.Fatal("expected operator without block permission to be rejected")
+	}
+	if _, err := store.CommitteeFreezeDeal(wire.CommitteeFreezeDealRequest{
+		IntentID:      intent.IntentID,
+		Operator:      "committee",
+		ReasonHash:    "freeze_reason",
+		ExpiresAtUnix: time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteTaskRetainsPhysicalShardWhenSharedByActiveIntent(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentA := testLifecycleIntent()
+	intentA.IntentID = "intent_a"
+	intentA.DealID = "deal_a"
+	intentA.Receipts[0][0] = wire.MinerReceipt{
+		MinerAddress:   "miner_lifecycle",
+		MinerPublicKey: "miner_pub",
+		ShardHash:      "shared_shard",
+		ShardSize:      32,
+	}
+	intentB := testLifecycleIntent()
+	intentB.IntentID = "intent_b"
+	intentB.DealID = "deal_b"
+	intentB.Receipts[0][0] = wire.MinerReceipt{
+		MinerAddress:   "miner_lifecycle",
+		MinerPublicKey: "miner_pub",
+		ShardHash:      "shared_shard",
+		ShardSize:      32,
+	}
+	store.data.Intents[intentA.IntentID] = intentA
+	store.data.Intents[intentB.IntentID] = intentB
+	store.data.Accounts[intentA.User] = wire.Account{Address: intentA.User, LockedStorage: 10}
+
+	resp, err := store.TerminateDeal(wire.TerminateDealRequest{IntentID: intentA.IntentID, User: intentA.User})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.DeleteTasks) != 1 {
+		t.Fatalf("expected one delete task, got %+v", resp)
+	}
+	task := resp.DeleteTasks[0]
+	if !task.RetainPhysical || task.ActiveReferences != 1 {
+		t.Fatalf("expected shared shard delete task to retain physical data, got %+v", task)
+	}
+}
+
 func TestDeleteTasksQueryFiltersByStatusAndIntent(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
@@ -304,6 +373,8 @@ func testLifecycleIntent() *Intent {
 			SegmentRoots:     []string{"segment_lifecycle"},
 			Segments:         []wire.SegmentPlan{{SegmentID: 0, SegmentRoot: "segment_lifecycle", ShardHashes: []string{"shard_lifecycle"}}},
 			Erasure:          wire.ErasurePolicy{DataShards: 1, ParityShards: 0, ShardSize: 32},
+			Policy:           wire.StoragePolicy{Duration: int64(365 * 24 * time.Hour / time.Second)},
+			ExpiresAtUnix:    time.Now().Add(365 * 24 * time.Hour).Unix(),
 			LockedFee:        10,
 			Status:           wire.StatusFinalized,
 			StorageStatus:    wire.StorageStatusActive,
