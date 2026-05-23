@@ -49,10 +49,11 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 
 		availabilityScore = 0
 	}
 
-	weight := storedBytes * proofScore / 10000 * defaultMinerStoredBytesWeightBPS / 10000
-	weight += storedBytes * availabilityScore / 10000 * defaultMinerAvailabilityWeightBPS / 10000
-	weight += storedBytes * decentralizationScore / 10000 * defaultMinerDecentralizationWeightBPS / 10000
-	weight += storedBytes * defaultMinerProofScoreWeightBPS / 10000
+	params := s.miningParamsLocked()
+	weight := storedBytes * proofScore / 10000 * params.StoredBytesWeightBPS / 10000
+	weight += storedBytes * availabilityScore / 10000 * params.AvailabilityWeightBPS / 10000
+	weight += storedBytes * decentralizationScore / 10000 * params.DecentralizationWeightBPS / 10000
+	weight += storedBytes * params.ProofScoreWeightBPS / 10000
 
 	return weight
 }

@@ -109,18 +109,19 @@ type StoragePricing struct {
 }
 
 type PermanentStorageFund struct {
-	IntentID          string `json:"intent_id"`
-	User              string `json:"user"`
-	Balance           uint64 `json:"balance"`
-	Contributed       uint64 `json:"contributed"`
-	Paid              uint64 `json:"paid"`
-	CreatedAtUnix     int64  `json:"created_at_unix"`
-	UpdatedAtUnix     int64  `json:"updated_at_unix"`
-	LastPayoutUnix    int64  `json:"last_payout_unix,omitempty"`
-	Closed            bool   `json:"closed,omitempty"`
-	ClosedReason      string `json:"closed_reason,omitempty"`
-	ClosedAtUnix      int64  `json:"closed_at_unix,omitempty"`
-	TransferredToPool uint64 `json:"transferred_to_pool,omitempty"`
+	IntentID             string `json:"intent_id"`
+	User                 string `json:"user"`
+	Balance              uint64 `json:"balance"`
+	Contributed          uint64 `json:"contributed"`
+	Paid                 uint64 `json:"paid"`
+	SustainableDailyRate uint64 `json:"sustainable_daily_rate,omitempty"`
+	CreatedAtUnix        int64  `json:"created_at_unix"`
+	UpdatedAtUnix        int64  `json:"updated_at_unix"`
+	LastPayoutUnix       int64  `json:"last_payout_unix,omitempty"`
+	Closed               bool   `json:"closed,omitempty"`
+	ClosedReason         string `json:"closed_reason,omitempty"`
+	ClosedAtUnix         int64  `json:"closed_at_unix,omitempty"`
+	TransferredToPool    uint64 `json:"transferred_to_pool,omitempty"`
 }
 
 type PermanentFundTopUpRequest struct {
@@ -131,6 +132,29 @@ type PermanentFundTopUpRequest struct {
 
 type PermanentFundTopUpResponse struct {
 	Fund PermanentStorageFund `json:"fund"`
+}
+
+type StorageFeePool struct {
+	TotalLocked             uint64 `json:"total_locked"`
+	TotalPaid               uint64 `json:"total_paid"`
+	TotalRefunded           uint64 `json:"total_refunded"`
+	TransferredToRewardPool uint64 `json:"transferred_to_reward_pool,omitempty"`
+	PermanentFundBalance    uint64 `json:"permanent_fund_balance"`
+	InsuranceReserve        uint64 `json:"insurance_reserve,omitempty"`
+}
+
+type DealEscrow struct {
+	IntentID          string `json:"intent_id"`
+	User              string `json:"user"`
+	LockedFee         uint64 `json:"locked_fee"`
+	PaidFee           uint64 `json:"paid_fee"`
+	RefundedFee       uint64 `json:"refunded_fee"`
+	AccruedFee        uint64 `json:"accrued_fee,omitempty"`
+	StartAtUnix       int64  `json:"start_at_unix,omitempty"`
+	ExpiresAtUnix     int64  `json:"expires_at_unix,omitempty"`
+	LastAccruedAtUnix int64  `json:"last_accrued_at_unix,omitempty"`
+	Status            string `json:"status"`
+	Permanent         bool   `json:"permanent,omitempty"`
 }
 
 type ChainStatusResponse struct {
@@ -167,6 +191,9 @@ type ChainStatusResponse struct {
 	TotalStorageRewards    uint64         `json:"total_storage_rewards,omitempty"`
 	TotalRetrievalRewards  uint64         `json:"total_retrieval_rewards,omitempty"`
 	TotalRepairRewards     uint64         `json:"total_repair_rewards,omitempty"`
+	TotalMiningPending     uint64         `json:"total_mining_pending,omitempty"`
+	PendingMiningBuckets   int            `json:"pending_mining_buckets,omitempty"`
+	StorageFeePool         StorageFeePool `json:"storage_fee_pool,omitempty"`
 	TotalSlashed           uint64         `json:"total_slashed,omitempty"`
 	TotalSupply            uint64         `json:"total_supply,omitempty"`
 	StoragePoolRemaining   uint64         `json:"storage_pool_remaining,omitempty"`
@@ -903,6 +930,17 @@ type PendingRetrievalReward struct {
 	ReleaseAtUnix int64  `json:"release_at_unix"`
 }
 
+type MiningRewardVestingBucket struct {
+	BucketID           string            `json:"bucket_id"`
+	Address            string            `json:"address"`
+	DayUnix            int64             `json:"day_unix"`
+	Total              uint64            `json:"total"`
+	Released           uint64            `json:"released"`
+	CreatedAtUnix      int64             `json:"created_at_unix"`
+	LastReleasedAtUnix int64             `json:"last_released_at_unix,omitempty"`
+	Sources            map[string]uint64 `json:"sources,omitempty"`
+}
+
 type EpochRewardsResponse struct {
 	EpochID              string `json:"epoch_id"`
 	EpochRound           uint64 `json:"epoch_round,omitempty"`
@@ -911,6 +949,7 @@ type EpochRewardsResponse struct {
 	RepairRewardsPaid    uint64 `json:"repair_rewards_paid,omitempty"`
 	StorageSlashed       uint64 `json:"storage_slashed,omitempty"`
 	PendingRetrieval     int    `json:"pending_retrieval_count,omitempty"`
+	PendingMiningRewards uint64 `json:"pending_mining_rewards,omitempty"`
 }
 
 type StateSnapshot struct {
@@ -929,8 +968,10 @@ type StateSnapshot struct {
 	ConsensusValidators   int    `json:"consensus_validators"`
 	TotalStakeLocked      uint64 `json:"total_stake_locked"`
 	TotalStorageLocked    uint64 `json:"total_storage_locked"`
+	TotalMiningPending    uint64 `json:"total_mining_pending,omitempty"`
 	TotalTokenSupply      uint64 `json:"total_token_supply"`
 	PendingRetrieval      int    `json:"pending_retrieval_count"`
+	PendingMiningBuckets  int    `json:"pending_mining_buckets,omitempty"`
 	PendingChallenges     int    `json:"pending_challenges"`
 	ActiveEpochs          int    `json:"active_epochs"`
 	PendingRepairTasks    int    `json:"pending_repair_tasks"`
@@ -977,30 +1018,31 @@ type RewardPools struct {
 }
 
 type MinerStats struct {
-	MinerAddress        string `json:"miner_address"`
-	PublicKey           string `json:"public_key"`
-	Endpoint            string `json:"endpoint"`
-	CapacityBytes       uint64 `json:"capacity_bytes"`
-	UsedBytes           uint64 `json:"used_bytes"`
-	ReservedBytes       uint64 `json:"reserved_bytes,omitempty"`
-	Stake               uint64 `json:"stake"`
-	Status              string `json:"status"`
-	RegisteredAtUnix    int64  `json:"registered_at_unix"`
-	ProofSuccess        uint64 `json:"proof_success"`
-	ProofFailure        uint64 `json:"proof_failure"`
-	ConsecutiveFailures uint64 `json:"consecutive_failures,omitempty"`
-	Rewards             uint64 `json:"rewards"`
-	StorageRewards      uint64 `json:"storage_rewards,omitempty"`
-	RetrievalSuccess    uint64 `json:"retrieval_success,omitempty"`
-	RetrievalBytes      uint64 `json:"retrieval_bytes,omitempty"`
-	RetrievalRewards    uint64 `json:"retrieval_rewards,omitempty"`
-	RepairRewards       uint64 `json:"repair_rewards,omitempty"`
-	Slashed             uint64 `json:"slashed"`
-	ExitedAtUnix        int64  `json:"exited_at_unix,omitempty"`
-	EffectiveWeight     uint64 `json:"effective_weight,omitempty"`
-	DelegatorCount      int    `json:"delegator_count,omitempty"`
-	SpeedScore          uint64 `json:"speed_score,omitempty"`
-	AntiSpamScore       uint64 `json:"anti_spam_score,omitempty"`
+	MinerAddress         string `json:"miner_address"`
+	PublicKey            string `json:"public_key"`
+	Endpoint             string `json:"endpoint"`
+	CapacityBytes        uint64 `json:"capacity_bytes"`
+	UsedBytes            uint64 `json:"used_bytes"`
+	ReservedBytes        uint64 `json:"reserved_bytes,omitempty"`
+	Stake                uint64 `json:"stake"`
+	Status               string `json:"status"`
+	RegisteredAtUnix     int64  `json:"registered_at_unix"`
+	ProofSuccess         uint64 `json:"proof_success"`
+	ProofFailure         uint64 `json:"proof_failure"`
+	ConsecutiveFailures  uint64 `json:"consecutive_failures,omitempty"`
+	Rewards              uint64 `json:"rewards"`
+	StorageRewards       uint64 `json:"storage_rewards,omitempty"`
+	RetrievalSuccess     uint64 `json:"retrieval_success,omitempty"`
+	RetrievalBytes       uint64 `json:"retrieval_bytes,omitempty"`
+	RetrievalRewards     uint64 `json:"retrieval_rewards,omitempty"`
+	RepairRewards        uint64 `json:"repair_rewards,omitempty"`
+	PendingMiningRewards uint64 `json:"pending_mining_rewards,omitempty"`
+	Slashed              uint64 `json:"slashed"`
+	ExitedAtUnix         int64  `json:"exited_at_unix,omitempty"`
+	EffectiveWeight      uint64 `json:"effective_weight,omitempty"`
+	DelegatorCount       int    `json:"delegator_count,omitempty"`
+	SpeedScore           uint64 `json:"speed_score,omitempty"`
+	AntiSpamScore        uint64 `json:"anti_spam_score,omitempty"`
 }
 
 type RetrievalRateWindow struct {
@@ -1029,12 +1071,13 @@ type RegisterMinerResponse struct {
 }
 
 type Account struct {
-	Address       string `json:"address"`
-	PublicKey     string `json:"public_key,omitempty"`
-	Balance       uint64 `json:"balance"`
-	Nonce         uint64 `json:"nonce"`
-	LockedStake   uint64 `json:"locked_stake"`
-	LockedStorage uint64 `json:"locked_storage"`
+	Address              string `json:"address"`
+	PublicKey            string `json:"public_key,omitempty"`
+	Balance              uint64 `json:"balance"`
+	Nonce                uint64 `json:"nonce"`
+	LockedStake          uint64 `json:"locked_stake"`
+	LockedStorage        uint64 `json:"locked_storage"`
+	PendingMiningRewards uint64 `json:"pending_mining_rewards,omitempty"`
 }
 
 type FaucetRequest struct {

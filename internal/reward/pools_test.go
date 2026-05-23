@@ -25,7 +25,13 @@ func TestNewPoolsInitialBalances(t *testing.T) {
 
 func TestReleaseEpochRewards(t *testing.T) {
 	p := NewPools()
-	s1, r1, v1 := p.ReleaseEpochRewards()
+	// Use default release rates matching DefaultMiningParams()
+	const (
+		defaultStorageBPS   uint64 = 3
+		defaultRetrievalBPS uint64 = 20
+		defaultValidatorBPS uint64 = 2
+	)
+	s1, r1, v1 := p.ReleaseEpochRewards(defaultStorageBPS, defaultRetrievalBPS, defaultValidatorBPS)
 
 	if s1 == 0 || r1 == 0 || v1 == 0 {
 		t.Fatalf("expected non-zero epoch release: storage=%d retrieval=%d validator=%d", s1, r1, v1)
@@ -69,7 +75,7 @@ func TestReleaseEpochDepletesPool(t *testing.T) {
 		ValidatorRemaining: 10,
 		RepairRemaining:    RepairPoolInitial,
 	}
-	s, r, v := p.ReleaseEpochRewards()
+	s, r, v := p.ReleaseEpochRewards(3, 20, 2)
 	total := s + r + v
 	if total == 0 || total > 30 {
 		t.Fatalf("unexpected release from tiny pools: %d+%d+%d=%d", s, r, v, total)

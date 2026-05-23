@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"chain/internal/chain"
@@ -92,8 +96,24 @@ func main() {
 	network.StartBlockSync(*syncInterval)
 
 	server := chain.NewServer(store, network)
-	log.Printf("chain node listening on %s", *addr)
-	if err := http.ListenAndServe(*addr, server.Routes()); err != nil {
-		log.Fatal(err)
+	httpServer := &http.Server{
+		Addr:    *addr,
+		Handler: server.Routes(),
 	}
+
+	go func() {
+		log.Printf("chain node listening on %s", *addr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("chain node server error: %v", err)
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Println("chain node: shutting down...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	httpServer.Shutdown(shutdownCtx)
 }

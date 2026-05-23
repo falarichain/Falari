@@ -85,6 +85,7 @@ func (s *Store) RenewDeal(req wire.RenewDealRequest) (wire.RenewDealResponse, er
 	intent.UpdatedAt = now
 	intent.ExpiresAtUnix = newExpiry
 	intent.Policy.Duration = req.Duration
+	s.addDealEscrowFundsLocked(intent, price, now)
 
 	resp := wire.RenewDealResponse{
 		IntentID:      intent.IntentID,
@@ -151,6 +152,7 @@ func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 	intent.ExpiresAtUnix = payload.Response.ExpiresAtUnix
 	intent.Policy.Duration = req.Duration
 	intent.UpdatedAt = payload.RenewedAtUnix
+	s.addDealEscrowFundsLocked(intent, price, payload.RenewedAtUnix)
 	return nil
 }
 
@@ -186,6 +188,7 @@ func (s *Store) autoRenewDealsLocked(now int64) (renewed int) {
 		intent.LockedFee = saturatingAdd(intent.LockedFee, price)
 		intent.UpdatedAt = now
 		intent.ExpiresAtUnix = now + duration
+		s.addDealEscrowFundsLocked(intent, price, now)
 		renewed++
 	}
 	return renewed

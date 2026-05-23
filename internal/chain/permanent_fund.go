@@ -47,6 +47,7 @@ func (s *Store) TopUpPermanentFund(req wire.PermanentFundTopUpRequest) (wire.Per
 	fund := s.ensurePermanentFundLocked(intent, now)
 	fund.Balance = saturatingAdd(fund.Balance, req.Amount)
 	fund.Contributed = saturatingAdd(fund.Contributed, req.Amount)
+	fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
 	fund.UpdatedAtUnix = now
 	fund.Closed = false
 	fund.ClosedReason = ""
@@ -54,6 +55,8 @@ func (s *Store) TopUpPermanentFund(req wire.PermanentFundTopUpRequest) (wire.Per
 	fund.TransferredToPool = 0
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
 	intent.LockedFee = saturatingAdd(intent.LockedFee, req.Amount)
+	s.addDealEscrowFundsLocked(intent, req.Amount, now)
+	s.data.StorageFeePool.PermanentFundBalance = saturatingAdd(s.data.StorageFeePool.PermanentFundBalance, req.Amount)
 	intent.PermanentFundBalance = fund.Balance
 	intent.PermanentFundPaid = fund.Paid
 	intent.UpdatedAt = now
@@ -97,8 +100,11 @@ func (s *Store) applyPermanentFundTopUpLocked(payload permanentFundTopUpTxPayloa
 		fund.Contributed = saturatingAdd(fund.Contributed, req.Amount)
 		fund.UpdatedAtUnix = payload.ToppedUpAtUnix
 	}
+	fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
 	intent.LockedFee = saturatingAdd(intent.LockedFee, req.Amount)
+	s.addDealEscrowFundsLocked(intent, req.Amount, payload.ToppedUpAtUnix)
+	s.data.StorageFeePool.PermanentFundBalance = saturatingAdd(s.data.StorageFeePool.PermanentFundBalance, req.Amount)
 	intent.PermanentFundBalance = fund.Balance
 	intent.PermanentFundPaid = fund.Paid
 	intent.UpdatedAt = payload.ToppedUpAtUnix
@@ -110,13 +116,14 @@ func (s *Store) ensurePermanentFundLocked(intent *Intent, now int64) wire.Perman
 	if !ok {
 		remaining := remainingIntentEscrow(intent)
 		fund = wire.PermanentStorageFund{
-			IntentID:      intent.IntentID,
-			User:          intent.User,
-			Balance:       remaining,
-			Contributed:   intent.LockedFee,
-			Paid:          intent.PaidFee,
-			CreatedAtUnix: firstNonZero(intent.CreatedAt, now),
-			UpdatedAtUnix: now,
+			IntentID:             intent.IntentID,
+			User:                 intent.User,
+			Balance:              remaining,
+			Contributed:          intent.LockedFee,
+			Paid:                 intent.PaidFee,
+			SustainableDailyRate: permanentFundDailyRate(remaining),
+			CreatedAtUnix:        firstNonZero(intent.CreatedAt, now),
+			UpdatedAtUnix:        now,
 		}
 	}
 	if fund.User == "" {
@@ -137,6 +144,7 @@ func (s *Store) createPermanentFundLocked(intent *Intent, now int64) {
 	}
 	fund := s.ensurePermanentFundLocked(intent, now)
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
+	s.data.StorageFeePool.PermanentFundBalance = saturatingAdd(s.data.StorageFeePool.PermanentFundBalance, fund.Balance)
 	intent.PermanentFundBalance = fund.Balance
 	intent.PermanentFundPaid = fund.Paid
 }
@@ -149,12 +157,37 @@ func (s *Store) spendPermanentFundLocked(intent *Intent, amount uint64, now int6
 	if fund.Closed {
 		return 0
 	}
+	if fund.SustainableDailyRate == 0 {
+		fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
+	}
+	lastPayout := fund.LastPayoutUnix
+	if lastPayout == 0 {
+		lastPayout = firstNonZero(fund.CreatedAtUnix, intent.CreatedAt, now)
+	}
+	elapsedDays := (now - lastPayout) / miningRewardVestingDaySeconds
+	if elapsedDays <= 0 {
+		fund.UpdatedAtUnix = now
+		s.data.PermanentStorageFunds[intent.IntentID] = fund
+		intent.PermanentFundBalance = fund.Balance
+		intent.PermanentFundPaid = fund.Paid
+		return 0
+	}
+	spendLimit := fund.SustainableDailyRate * uint64(elapsedDays)
+	if amount > spendLimit {
+		amount = spendLimit
+	}
 	if amount > fund.Balance {
 		amount = fund.Balance
+	}
+	user := s.accountLocked(intent.User)
+	if amount > user.LockedStorage {
+		amount = user.LockedStorage
 	}
 	if amount == 0 {
 		return 0
 	}
+	user.LockedStorage -= amount
+	s.data.Accounts[intent.User] = user
 	fund.Balance -= amount
 	fund.Paid = saturatingAdd(fund.Paid, amount)
 	fund.LastPayoutUnix = now
@@ -162,6 +195,18 @@ func (s *Store) spendPermanentFundLocked(intent *Intent, amount uint64, now int6
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
 	intent.PermanentFundBalance = fund.Balance
 	intent.PermanentFundPaid = fund.Paid
+	intent.PaidFee = saturatingAdd(intent.PaidFee, amount)
+	escrow := s.dealEscrowLocked(intent)
+	escrow.PaidFee = saturatingAdd(escrow.PaidFee, amount)
+	escrow.AccruedFee = saturatingAdd(escrow.AccruedFee, amount)
+	escrow.LastAccruedAtUnix = now
+	s.data.DealEscrows[intent.IntentID] = escrow
+	s.data.StorageFeePool.TotalPaid = saturatingAdd(s.data.StorageFeePool.TotalPaid, amount)
+	if s.data.StorageFeePool.PermanentFundBalance >= amount {
+		s.data.StorageFeePool.PermanentFundBalance -= amount
+	} else {
+		s.data.StorageFeePool.PermanentFundBalance = 0
+	}
 	return amount
 }
 
@@ -191,6 +236,12 @@ func (s *Store) closePermanentFundLocked(intent *Intent, reason string, now int6
 	fund.UpdatedAtUnix = now
 	fund.TransferredToPool = saturatingAdd(fund.TransferredToPool, remaining)
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
+	if s.data.StorageFeePool.PermanentFundBalance >= remaining {
+		s.data.StorageFeePool.PermanentFundBalance -= remaining
+	} else {
+		s.data.StorageFeePool.PermanentFundBalance = 0
+	}
+	s.data.StorageFeePool.TransferredToRewardPool = saturatingAdd(s.data.StorageFeePool.TransferredToRewardPool, remaining)
 	intent.PermanentFundBalance = 0
 	intent.PermanentFundPaid = fund.Paid
 	return remaining

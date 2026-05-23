@@ -1776,8 +1776,8 @@ func evmRecordAppend(args []string) {
 }
 
 func printAccount(account wire.Account) {
-	fmt.Printf("account %s balance=%d nonce=%d locked_stake=%d locked_storage=%d\n",
-		account.Address, account.Balance, account.Nonce, account.LockedStake, account.LockedStorage)
+	fmt.Printf("account %s balance=%d nonce=%d locked_stake=%d locked_storage=%d pending_mining=%d\n",
+		account.Address, account.Balance, account.Nonce, account.LockedStake, account.LockedStorage, account.PendingMiningRewards)
 }
 
 func accountNonce(chainURL string, address string) uint64 {

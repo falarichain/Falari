@@ -29,6 +29,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /consensus/votes", s.listConsensusVotes)
 	mux.HandleFunc("POST /upgrade", s.setUpgrade)
 	mux.HandleFunc("GET /upgrade", s.getUpgrade)
+	mux.HandleFunc("GET /admin/mining-params", s.getMiningParams)
+	mux.HandleFunc("POST /admin/mining-params", s.updateMiningParams)
 	mux.HandleFunc("GET /intents/{id}/health", s.intentHealth)
 	mux.HandleFunc("GET /intents/health", s.allDealHealth)
 	mux.HandleFunc("POST /storage/quote", s.storageQuote)
@@ -969,6 +971,24 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) getMiningParams(w http.ResponseWriter, _ *http.Request) {
+	params := s.store.GetMiningParams()
+	writeJSON(w, http.StatusOK, params)
+}
+
+func (s *Server) updateMiningParams(w http.ResponseWriter, r *http.Request) {
+	var req MiningParams
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	updated, err := s.store.UpdateMiningParams(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {

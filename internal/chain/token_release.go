@@ -8,8 +8,6 @@ import (
 	"chain/internal/wire"
 )
 
-const defaultValidatorCommissionBPS uint64 = 1000
-
 func (s *Store) initRewardPoolsLocked() {
 	if s.data.RewardPools == nil {
 		s.data.RewardPools = reward.NewPools()
@@ -18,7 +16,12 @@ func (s *Store) initRewardPoolsLocked() {
 
 func (s *Store) releaseEpochRewardsLocked() {
 	s.initRewardPoolsLocked()
-	storageRelease, retrievalRelease, validatorRelease := s.data.RewardPools.ReleaseEpochRewards()
+	params := s.miningParamsLocked()
+	storageRelease, retrievalRelease, validatorRelease := s.data.RewardPools.ReleaseEpochRewards(
+		params.StorageReleaseRateBPS,
+		params.RetrievalReleaseRateBPS,
+		params.ValidatorReleaseRateBPS,
+	)
 
 	s.distributeStoragePoolRewardsLocked(storageRelease)
 	s.distributeRetrievalPoolRewardsLocked(retrievalRelease)
@@ -62,9 +65,7 @@ func (s *Store) distributeStoragePoolRewardsLocked(amount uint64) {
 		if reward == 0 {
 			continue
 		}
-		account := s.accountLocked(entry.address)
-		account.Balance += reward
-		s.data.Accounts[entry.address] = account
+		s.vestMiningRewardLocked(entry.address, reward, miningRewardSourceStoragePool, time.Now().Unix())
 		stats := s.minerStatsLocked(entry.address)
 		stats.StorageRewards = saturatingAdd(stats.StorageRewards, reward)
 		stats.Rewards = saturatingAdd(stats.Rewards, reward)
@@ -115,7 +116,7 @@ func (s *Store) distributeRetrievalPoolRewardsLocked(amount uint64) {
 			continue
 		}
 		distributed = saturatingAdd(distributed, reward)
-		s.payToMinerLocked(entry.address, reward)
+		s.vestMiningRewardLocked(entry.address, reward, miningRewardSourceRetrievalPool, time.Now().Unix())
 		stats := s.minerStatsLocked(entry.address)
 		stats.RetrievalRewards = saturatingAdd(stats.RetrievalRewards, reward)
 		stats.Rewards = saturatingAdd(stats.Rewards, reward)
@@ -164,19 +165,19 @@ func (s *Store) distributeValidatorRewardLocked(validatorAddress string, amount 
 	}
 	totalPower := selfStake + validator.DelegatedStake
 	if totalPower == 0 {
-		s.payToMinerLocked(validatorAddress, amount)
+		s.vestMiningRewardLocked(validatorAddress, amount, miningRewardSourceValidatorPool, time.Now().Unix())
 		validator.Rewards = saturatingAdd(validator.Rewards, amount)
 		s.data.Validators[validatorAddress] = validator
 		return
 	}
-	commission := amount * defaultValidatorCommissionBPS / 10000
+	commission := amount * s.miningParamsLocked().ValidatorCommissionBPS / 10000
 	selfReward := amount * selfStake / totalPower
 	validatorReward := saturatingAdd(commission, selfReward)
 	if validatorReward > amount {
 		validatorReward = amount
 	}
 	delegatorPool := amount - validatorReward
-	s.payToMinerLocked(validatorAddress, validatorReward)
+	s.vestMiningRewardLocked(validatorAddress, validatorReward, miningRewardSourceValidatorPool, time.Now().Unix())
 	validator.Rewards = saturatingAdd(validator.Rewards, validatorReward)
 
 	delegations := s.validatorDelegationsLocked(validatorAddress)
@@ -193,12 +194,12 @@ func (s *Store) distributeValidatorRewardLocked(validatorAddress string, amount 
 			continue
 		}
 		delegatedPaid = saturatingAdd(delegatedPaid, share)
-		s.payToMinerLocked(delegation.Delegator, share)
+		s.vestMiningRewardLocked(delegation.Delegator, share, miningRewardSourceDelegation, time.Now().Unix())
 		validator.DelegationRewards = saturatingAdd(validator.DelegationRewards, share)
 	}
 	if delegatedPaid < delegatorPool {
 		remainder := delegatorPool - delegatedPaid
-		s.payToMinerLocked(validatorAddress, remainder)
+		s.vestMiningRewardLocked(validatorAddress, remainder, miningRewardSourceValidatorPool, time.Now().Unix())
 		validator.Rewards = saturatingAdd(validator.Rewards, remainder)
 	}
 	s.data.Validators[validatorAddress] = validator
@@ -246,7 +247,14 @@ func (s *Store) StartTokenReleaseScheduler(interval time.Duration) {
 		defer ticker.Stop()
 		for range ticker.C {
 			s.mu.Lock()
+			releasedBuckets, releasedTotal := s.releaseVestedMiningRewardsLocked(time.Now().Unix())
+			if releasedBuckets > 0 {
+				log.Printf("released %d mining reward vesting buckets total=%d", releasedBuckets, releasedTotal)
+			}
 			s.releaseEpochRewardsLocked()
+			if err := s.saveLocked(); err != nil {
+				log.Printf("save token release state failed: %v", err)
+			}
 			s.mu.Unlock()
 		}
 	}()

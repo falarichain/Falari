@@ -476,6 +476,7 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 		UpdatedAt:    createdAt,
 	}
 	s.createPermanentFundLocked(s.data.Intents[payload.IntentID], createdAt)
+	s.createDealEscrowLocked(s.data.Intents[payload.IntentID], createdAt)
 	s.reserveStorageAssignmentsLocked(assignments)
 	return nil
 }
@@ -559,6 +560,7 @@ func (s *Store) applyFinalizeDealLocked(payload finalizeDealTxPayload) error {
 		intent.ExpiresAtUnix = now + intent.Policy.Duration
 	}
 	intent.UpdatedAt = now
+	s.activateDealEscrowLocked(intent, now)
 	s.data.Deals[payload.DealID] = payload.IntentID
 	return nil
 }
@@ -846,10 +848,11 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 		stats := s.minerStatsLocked(challenge.MinerAddress)
 		stats.ProofFailure++
 		stats.ConsecutiveFailures++
-		if stats.Status == wire.MinerStatusActive && stats.ConsecutiveFailures >= defaultMinerDegradeThreshold {
+		threshold := s.miningParamsLocked().MinerDegradeThreshold
+		if stats.Status == wire.MinerStatusActive && stats.ConsecutiveFailures >= threshold {
 			stats.Status = wire.MinerStatusDegraded
 		}
-		if stats.Status == wire.MinerStatusDegraded && stats.ConsecutiveFailures >= defaultMinerDegradeThreshold*2 {
+		if stats.Status == wire.MinerStatusDegraded && stats.ConsecutiveFailures >= threshold*2 {
 			stats.Status = wire.MinerStatusJailed
 		}
 		slash := epoch.SlashPerMissedProof

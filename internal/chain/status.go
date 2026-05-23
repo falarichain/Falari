@@ -27,6 +27,7 @@ func (s *Store) Status() wire.ChainStatusResponse {
 		TotalSupply:         reward.TotalSupply,
 		FeeMarket:           s.data.FeeMarket,
 		StoragePricing:      s.data.StoragePricing,
+		StorageFeePool:      s.data.StorageFeePool,
 	}
 	if len(s.data.Blocks) > 0 {
 		latest := s.data.Blocks[len(s.data.Blocks)-1]
@@ -103,6 +104,13 @@ func (s *Store) Status() wire.ChainStatusResponse {
 		resp.TotalRepairRewards = saturatingAdd(resp.TotalRepairRewards, miner.RepairRewards)
 		resp.TotalSlashed = saturatingAdd(resp.TotalSlashed, miner.Slashed)
 	}
+	for _, bucket := range s.data.MiningRewardVestings {
+		if bucket.Total <= bucket.Released {
+			continue
+		}
+		resp.TotalMiningPending = saturatingAdd(resp.TotalMiningPending, bucket.Total-bucket.Released)
+		resp.PendingMiningBuckets++
+	}
 	return resp
 }
 
@@ -111,15 +119,16 @@ func (s *Store) Snapshot() wire.StateSnapshot {
 	defer s.mu.Unlock()
 
 	snap := wire.StateSnapshot{
-		Height:              uint64(len(s.data.Blocks)),
-		EpochRound:          s.data.EpochRound,
-		Accounts:            len(s.data.Accounts),
-		Intents:             len(s.data.Intents),
-		Deals:               len(s.data.Deals),
-		ConsensusValidators: len(s.data.ConsensusValidators),
-		PendingRetrieval:    len(s.data.PendingRetrievalRewards),
-		TotalTokenSupply:    reward.TotalSupply,
-		SnapshotAtUnix:      time.Now().Unix(),
+		Height:               uint64(len(s.data.Blocks)),
+		EpochRound:           s.data.EpochRound,
+		Accounts:             len(s.data.Accounts),
+		Intents:              len(s.data.Intents),
+		Deals:                len(s.data.Deals),
+		ConsensusValidators:  len(s.data.ConsensusValidators),
+		PendingRetrieval:     len(s.data.PendingRetrievalRewards),
+		PendingMiningBuckets: len(s.data.MiningRewardVestings),
+		TotalTokenSupply:     reward.TotalSupply,
+		SnapshotAtUnix:       time.Now().Unix(),
 	}
 
 	for _, intent := range s.data.Intents {
@@ -153,10 +162,12 @@ func (s *Store) Snapshot() wire.StateSnapshot {
 	for _, account := range s.data.Accounts {
 		snap.TotalStakeLocked = saturatingAdd(snap.TotalStakeLocked, account.LockedStake)
 		snap.TotalStorageLocked = saturatingAdd(snap.TotalStorageLocked, account.LockedStorage)
+		snap.TotalMiningPending = saturatingAdd(snap.TotalMiningPending, account.PendingMiningRewards)
 		snap.TotalTokenSupply = saturatingAdd(snap.TotalTokenSupply, account.Balance)
 	}
 	snap.TotalTokenSupply = saturatingAdd(snap.TotalTokenSupply, snap.TotalStakeLocked)
 	snap.TotalTokenSupply = saturatingAdd(snap.TotalTokenSupply, snap.TotalStorageLocked)
+	snap.TotalTokenSupply = saturatingAdd(snap.TotalTokenSupply, snap.TotalMiningPending)
 
 	for challengeID := range s.data.Challenges {
 		if _, ok := s.data.Proofs[challengeID]; !ok {

@@ -59,12 +59,17 @@ func TestSubmitProofRequiresAllChallengeSamples(t *testing.T) {
 	challenge.LeafRanges = challengeLeafRanges(challenge.ShardSize, challenge.LeafSize, challenge.LeafIndices)
 	challenge.ChallengeHash = storageChallengeHash(challenge)
 	store.data.Intents[challenge.IntentID] = &Intent{IntentView: wire.IntentView{
-		IntentID:  challenge.IntentID,
-		User:      "alice",
-		FileSize:  int64(len(data)),
-		Status:    wire.StatusFinalized,
-		LockedFee: 10,
-	}}
+		IntentID:      challenge.IntentID,
+		User:          "alice",
+		FileSize:      int64(len(data)),
+		Status:        wire.StatusFinalized,
+		StorageStatus: wire.StorageStatusActive,
+		LockedFee:     10,
+		Policy:        wire.StoragePolicy{Duration: 10},
+	},
+		CreatedAt: time.Now().Add(-20 * time.Second).Unix(),
+		UpdatedAt: time.Now().Add(-20 * time.Second).Unix(),
+	}
 	store.data.Challenges[challenge.ChallengeID] = challenge
 
 	proof := multiSampleProof(t, data, challenge, minerPublicKey, minerAddress, privateKey)
@@ -78,8 +83,10 @@ func TestSubmitProofRequiresAllChallengeSamples(t *testing.T) {
 	if user := store.accountLocked("alice"); user.LockedStorage != 3 {
 		t.Fatalf("expected user locked storage 3, got %d", user.LockedStorage)
 	}
-	if miner := store.accountLocked(minerAddress); miner.Balance != 7 {
-		t.Fatalf("expected miner balance 7, got %d", miner.Balance)
+	if miner := store.accountLocked(minerAddress); miner.Balance != 0 {
+		t.Fatalf("expected miner balance 0 before vesting release, got %d", miner.Balance)
+	} else if miner.PendingMiningRewards != 7 {
+		t.Fatalf("expected miner pending mining rewards 7, got %d", miner.PendingMiningRewards)
 	}
 	if stats := store.minerStatsLocked(minerAddress); stats.Rewards != 7 || stats.ProofSuccess != 1 {
 		t.Fatalf("unexpected miner stats %+v", stats)
@@ -146,12 +153,17 @@ func TestSubmitProofRewardIsCappedByLockedStorage(t *testing.T) {
 	challenge.LeafRanges = challengeLeafRanges(challenge.ShardSize, challenge.LeafSize, challenge.LeafIndices)
 	challenge.ChallengeHash = storageChallengeHash(challenge)
 	store.data.Intents[challenge.IntentID] = &Intent{IntentView: wire.IntentView{
-		IntentID:  challenge.IntentID,
-		User:      "alice",
-		FileSize:  int64(len(data)),
-		Status:    wire.StatusFinalized,
-		LockedFee: 4,
-	}}
+		IntentID:      challenge.IntentID,
+		User:          "alice",
+		FileSize:      int64(len(data)),
+		Status:        wire.StatusFinalized,
+		StorageStatus: wire.StorageStatusActive,
+		LockedFee:     4,
+		Policy:        wire.StoragePolicy{Duration: 10},
+	},
+		CreatedAt: time.Now().Add(-20 * time.Second).Unix(),
+		UpdatedAt: time.Now().Add(-20 * time.Second).Unix(),
+	}
 	store.data.Challenges[challenge.ChallengeID] = challenge
 
 	proof := multiSampleProof(t, data, challenge, minerPublicKey, minerAddress, privateKey)
@@ -159,25 +171,28 @@ func TestSubmitProofRewardIsCappedByLockedStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Reward != 4 {
-		t.Fatalf("expected capped reward 4, got %d", resp.Reward)
+	if resp.Reward != 9 {
+		t.Fatalf("expected full reward 9 with storage pool subsidy, got %d", resp.Reward)
 	}
 	if user := store.accountLocked("alice"); user.LockedStorage != 0 {
 		t.Fatalf("expected user locked storage 0, got %d", user.LockedStorage)
 	}
-	if miner := store.accountLocked(minerAddress); miner.Balance != 4 {
-		t.Fatalf("expected miner balance 4, got %d", miner.Balance)
+	if miner := store.accountLocked(minerAddress); miner.Balance != 0 {
+		t.Fatalf("expected miner balance 0 before vesting release, got %d", miner.Balance)
+	} else if miner.PendingMiningRewards != 9 {
+		t.Fatalf("expected miner pending mining rewards 9, got %d", miner.PendingMiningRewards)
 	}
 }
 
 func TestStorageProofSampleCountScalesWithShardSize(t *testing.T) {
-	small := storageProofSampleCount(chaincrypto.DefaultLeafSize*2, chaincrypto.DefaultLeafSize)
-	large := storageProofSampleCount(chaincrypto.DefaultLeafSize*4096, chaincrypto.DefaultLeafSize)
-	huge := storageProofSampleCount(1<<62, chaincrypto.DefaultLeafSize)
+	samples := DefaultMiningParams().StorageProofSamples
+	small := storageProofSampleCount(chaincrypto.DefaultLeafSize*2, chaincrypto.DefaultLeafSize, samples)
+	large := storageProofSampleCount(chaincrypto.DefaultLeafSize*4096, chaincrypto.DefaultLeafSize, samples)
+	huge := storageProofSampleCount(1<<62, chaincrypto.DefaultLeafSize, samples)
 	if small != 2 {
 		t.Fatalf("expected small shard to sample all leaves, got %d", small)
 	}
-	if large <= defaultStorageProofSamples {
+	if large <= samples {
 		t.Fatalf("expected large shard sample count to grow past default, got %d", large)
 	}
 	if huge != 64 {

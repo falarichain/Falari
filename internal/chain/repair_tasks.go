@@ -234,7 +234,7 @@ func (s *Store) completeRepairTaskLocked(task wire.RepairTask) {
 	if !ok {
 		return
 	}
-	reward := defaultRepairRewardPerShard
+	reward := s.miningParamsLocked().RepairRewardPerShard
 	s.payRepairRewardLocked(intent, existing.Assignment.MinerAddress, reward)
 	stats := s.minerStatsLocked(existing.Assignment.MinerAddress)
 	stats.RepairRewards = saturatingAdd(stats.RepairRewards, reward)

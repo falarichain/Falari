@@ -144,6 +144,7 @@ func (s *Store) terminateDealLocked(req wire.TerminateDealRequest, now int64) (w
 		user.LockedStorage -= refund
 		user.Balance += refund
 		intent.RefundedFee += refund
+		s.recordStorageFeeRefundLocked(intent, refund)
 		s.data.Accounts[user.Address] = user
 	}
 	var tasks []wire.DeleteTask

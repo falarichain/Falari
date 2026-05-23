@@ -159,7 +159,7 @@ func (s *Store) isUpgradeHaltedLocked(height uint64, timeUnix int64) bool {
 func (s *Store) stateRootLocked() string {
 	leaves := make([]string, 0, len(s.data.Accounts))
 	for _, account := range s.data.Accounts {
-		leaves = append(leaves, hashString("account:"+account.Address+":"+u64toa(account.Balance)+":"+u64toa(account.LockedStorage)+":"+u64toa(account.LockedStake)))
+		leaves = append(leaves, hashString("account:"+account.Address+":"+u64toa(account.Balance)+":"+u64toa(account.LockedStorage)+":"+u64toa(account.LockedStake)+":"+u64toa(account.PendingMiningRewards)))
 	}
 	sort.Strings(leaves)
 	return chaincryptoMerkleRoot(leaves)
@@ -169,7 +169,15 @@ func (s *Store) fullStateRootLocked() string {
 	leaves := make([]string, 0)
 
 	for _, account := range s.data.Accounts {
-		leaves = append(leaves, hashString("account:"+account.Address+":"+u64toa(account.Balance)+":"+u64toa(account.LockedStorage)+":"+u64toa(account.LockedStake)))
+		leaves = append(leaves, hashString("account:"+account.Address+":"+u64toa(account.Balance)+":"+u64toa(account.LockedStorage)+":"+u64toa(account.LockedStake)+":"+u64toa(account.PendingMiningRewards)))
+	}
+	for _, bucket := range s.data.MiningRewardVestings {
+		leaves = append(leaves, hashString("mining_vesting:"+bucket.BucketID+":"+bucket.Address+":"+i64toa(bucket.DayUnix)+":"+u64toa(bucket.Total)+":"+u64toa(bucket.Released)))
+	}
+	pool := s.data.StorageFeePool
+	leaves = append(leaves, hashString("storage_fee_pool:"+u64toa(pool.TotalLocked)+":"+u64toa(pool.TotalPaid)+":"+u64toa(pool.TotalRefunded)+":"+u64toa(pool.TransferredToRewardPool)+":"+u64toa(pool.PermanentFundBalance)+":"+u64toa(pool.InsuranceReserve)))
+	for _, escrow := range s.data.DealEscrows {
+		leaves = append(leaves, hashString("deal_escrow:"+escrow.IntentID+":"+escrow.User+":"+u64toa(escrow.LockedFee)+":"+u64toa(escrow.PaidFee)+":"+u64toa(escrow.RefundedFee)+":"+u64toa(escrow.AccruedFee)))
 	}
 	for _, intent := range s.data.Intents {
 		leaves = append(leaves, hashString("intent:"+intent.IntentID+":"+intent.Status+":"+intent.StorageStatus))
@@ -222,6 +230,13 @@ func u64toa(v uint64) string {
 		v /= 10
 	}
 	return string(buf)
+}
+
+func i64toa(v int64) string {
+	if v < 0 {
+		return "-" + u64toa(uint64(-v))
+	}
+	return u64toa(uint64(v))
 }
 
 func hexEncode(data []byte) string {

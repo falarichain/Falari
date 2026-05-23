@@ -16,11 +16,17 @@ func TestDistributeRetrievalPoolRewardsByServiceWeight(t *testing.T) {
 
 	store.distributeRetrievalPoolRewardsLocked(40)
 
-	if got := store.data.Accounts["miner_a"].Balance; got != 10 {
-		t.Fatalf("expected miner_a reward 10, got %d", got)
+	if got := store.data.Accounts["miner_a"].Balance; got != 0 {
+		t.Fatalf("expected miner_a balance 0 before vesting release, got %d", got)
 	}
-	if got := store.data.Accounts["miner_b"].Balance; got != 30 {
-		t.Fatalf("expected miner_b reward 30, got %d", got)
+	if got := store.data.Accounts["miner_a"].PendingMiningRewards; got != 10 {
+		t.Fatalf("expected miner_a pending reward 10, got %d", got)
+	}
+	if got := store.data.Accounts["miner_b"].Balance; got != 0 {
+		t.Fatalf("expected miner_b balance 0 before vesting release, got %d", got)
+	}
+	if got := store.data.Accounts["miner_b"].PendingMiningRewards; got != 30 {
+		t.Fatalf("expected miner_b pending reward 30, got %d", got)
 	}
 }
 
@@ -48,11 +54,17 @@ func TestDistributeValidatorRewardsSharesWithDelegators(t *testing.T) {
 
 	store.distributeValidatorPoolRewardsLocked(100)
 
-	if got := store.data.Accounts["validator_a"].Balance; got != 60 {
-		t.Fatalf("expected validator reward 60 including commission, got %d", got)
+	if got := store.data.Accounts["validator_a"].Balance; got != 0 {
+		t.Fatalf("expected validator balance 0 before vesting release, got %d", got)
 	}
-	if got := store.data.Accounts["delegator_a"].Balance; got != 40 {
-		t.Fatalf("expected delegator reward 40, got %d", got)
+	if got := store.data.Accounts["validator_a"].PendingMiningRewards; got != 60 {
+		t.Fatalf("expected validator pending reward 60 including commission, got %d", got)
+	}
+	if got := store.data.Accounts["delegator_a"].Balance; got != 0 {
+		t.Fatalf("expected delegator balance 0 before vesting release, got %d", got)
+	}
+	if got := store.data.Accounts["delegator_a"].PendingMiningRewards; got != 40 {
+		t.Fatalf("expected delegator pending reward 40, got %d", got)
 	}
 	validator := store.data.Validators["validator_a"]
 	if validator.Rewards != 60 || validator.DelegationRewards != 40 {

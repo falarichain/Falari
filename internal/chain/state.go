@@ -23,25 +23,19 @@ import (
 
 var levelDBStateKey = []byte("state:snapshot")
 
-const defaultStorageProofSamples = 8
 const defaultBaseFee uint64 = 1
 const defaultTargetBlockTxs = 10
 const defaultStorageBasePricePerGiBMonth uint64 = 1
 const defaultStorageMinimumFee uint64 = 1
 const defaultPermanentStorageDuration = int64(10 * 365 * 24 * 60 * 60)
-const defaultRetrievalRewardPerMiB uint64 = 1
 const defaultRetrievalRateWindow = int64(3600)
 const defaultRetrievalRateDecayDivisor uint64 = 2
-const defaultMinerDegradeThreshold uint64 = 3
-const defaultRepairRewardPerShard uint64 = 1
 const defaultRetrievalRewardHoldDuration = int64(3600)
-const defaultMaxRetrievalRewardPerWindow uint64 = 100
 const defaultRetrievalSpeedSampleWindow = int64(60)
 const defaultRetrievalAbuseSpeedMultiplier uint64 = 10
-const defaultMinerStoredBytesWeightBPS uint64 = 4000
-const defaultMinerProofScoreWeightBPS uint64 = 3500
-const defaultMinerAvailabilityWeightBPS uint64 = 1500
-const defaultMinerDecentralizationWeightBPS uint64 = 1000
+const miningRewardVestingDays = int64(90)
+const miningRewardVestingDaySeconds = int64(24 * 60 * 60)
+const defaultPermanentFundAnnualSpendBPS uint64 = 200
 
 type Intent struct {
 	wire.IntentView
@@ -52,50 +46,54 @@ type Intent struct {
 }
 
 type State struct {
-	Intents                 map[string]*Intent                     `json:"intents"`
-	Deals                   map[string]string                      `json:"deals"`
-	Challenges              map[string]wire.StorageChallenge       `json:"challenges"`
-	Proofs                  map[string]wire.StorageProof           `json:"proofs"`
-	Epochs                  map[string]wire.ProofEpoch             `json:"epochs"`
-	Miners                  map[string]wire.MinerStats             `json:"miners"`
-	Accounts                map[string]wire.Account                `json:"accounts"`
-	Blocks                  []wire.Block                           `json:"blocks"`
-	PendingTxs              []wire.Transaction                     `json:"pending_txs"`
-	Receipts                map[string]wire.TransactionReceipt     `json:"receipts"`
-	Validators              map[string]wire.ValidatorInfo          `json:"validators"`
-	ConsensusValidators     map[string]bool                        `json:"consensus_validators"`
-	ValidatorEvidence       map[string]wire.ValidatorEvidence      `json:"validator_evidence"`
-	ConsensusVotes          map[string]wire.ConsensusVote          `json:"consensus_votes"`
-	FeeMarket               wire.FeeMarket                         `json:"fee_market"`
-	FeeChargedTxs           map[string]bool                        `json:"fee_charged_txs"`
-	StoragePricing          wire.StoragePricing                    `json:"storage_pricing"`
-	PermanentStorageFunds   map[string]wire.PermanentStorageFund   `json:"permanent_storage_funds"`
-	RepairTasks             map[string]wire.RepairTask             `json:"repair_tasks"`
-	ProviderRecords         map[string]wire.StorageProviderRecord  `json:"provider_records"`
-	DeleteTasks             map[string]wire.DeleteTask             `json:"delete_tasks"`
-	GovernanceAudits        []wire.GovernanceAuditRecord           `json:"governance_audits"`
-	GovernanceOperators     map[string]wire.GovernanceOperator     `json:"governance_operators"`
-	DeleteReceipts          map[string]wire.DeleteReceipt          `json:"delete_receipts"`
-	RetrievalReceipts       map[string]wire.RetrievalReceipt       `json:"retrieval_receipts"`
-	RetrievalWindows        map[string]wire.RetrievalRateWindow    `json:"retrieval_windows"`
-	PendingRetrievalRewards map[string]wire.PendingRetrievalReward `json:"pending_retrieval_rewards"`
-	StakeDelegations        map[string]wire.StakeDelegation        `json:"stake_delegations"`
-	DealHealths             map[string]wire.DealHealth             `json:"deal_healths"`
-	RewardPools             *reward.Pools                          `json:"reward_pools"`
-	Collections             map[string]wire.DataCollection         `json:"collections"`
-	DataRecords             map[string]wire.DataRecord             `json:"data_records"`
-	CollectionRecords       map[string][]string                    `json:"collection_records"`
-	KeyEnvelopes            map[string]wire.KeyEnvelope            `json:"key_envelopes"`
-	ShareRecords            map[string]wire.ShareRecord            `json:"share_records"`
-	AppliedTxs              map[string]bool                        `json:"applied_txs"`
-	ConfirmedTxs            map[string]bool                        `json:"confirmed_txs"`
-	EpochRound              uint64                                 `json:"epoch_round"`
-	ConsensusHeight         uint64                                 `json:"consensus_height"`
-	ConsensusRound          uint64                                 `json:"consensus_round"`
-	ConsensusPhase          string                                 `json:"consensus_phase"`
-	ConsensusProposer       string                                 `json:"consensus_proposer"`
-	UpgradePlan             consensus.UpgradePlan                  `json:"upgrade_plan"`
-	AgentKeys               map[string]*wire.AgentKey              `json:"agent_keys"`
+	Intents                 map[string]*Intent                        `json:"intents"`
+	Deals                   map[string]string                         `json:"deals"`
+	Challenges              map[string]wire.StorageChallenge          `json:"challenges"`
+	Proofs                  map[string]wire.StorageProof              `json:"proofs"`
+	Epochs                  map[string]wire.ProofEpoch                `json:"epochs"`
+	Miners                  map[string]wire.MinerStats                `json:"miners"`
+	Accounts                map[string]wire.Account                   `json:"accounts"`
+	Blocks                  []wire.Block                              `json:"blocks"`
+	PendingTxs              []wire.Transaction                        `json:"pending_txs"`
+	Receipts                map[string]wire.TransactionReceipt        `json:"receipts"`
+	Validators              map[string]wire.ValidatorInfo             `json:"validators"`
+	ConsensusValidators     map[string]bool                           `json:"consensus_validators"`
+	ValidatorEvidence       map[string]wire.ValidatorEvidence         `json:"validator_evidence"`
+	ConsensusVotes          map[string]wire.ConsensusVote             `json:"consensus_votes"`
+	FeeMarket               wire.FeeMarket                            `json:"fee_market"`
+	FeeChargedTxs           map[string]bool                           `json:"fee_charged_txs"`
+	StoragePricing          wire.StoragePricing                       `json:"storage_pricing"`
+	StorageFeePool          wire.StorageFeePool                       `json:"storage_fee_pool"`
+	DealEscrows             map[string]wire.DealEscrow                `json:"deal_escrows"`
+	PermanentStorageFunds   map[string]wire.PermanentStorageFund      `json:"permanent_storage_funds"`
+	RepairTasks             map[string]wire.RepairTask                `json:"repair_tasks"`
+	ProviderRecords         map[string]wire.StorageProviderRecord     `json:"provider_records"`
+	DeleteTasks             map[string]wire.DeleteTask                `json:"delete_tasks"`
+	GovernanceAudits        []wire.GovernanceAuditRecord              `json:"governance_audits"`
+	GovernanceOperators     map[string]wire.GovernanceOperator        `json:"governance_operators"`
+	DeleteReceipts          map[string]wire.DeleteReceipt             `json:"delete_receipts"`
+	RetrievalReceipts       map[string]wire.RetrievalReceipt          `json:"retrieval_receipts"`
+	RetrievalWindows        map[string]wire.RetrievalRateWindow       `json:"retrieval_windows"`
+	PendingRetrievalRewards map[string]wire.PendingRetrievalReward    `json:"pending_retrieval_rewards"`
+	MiningRewardVestings    map[string]wire.MiningRewardVestingBucket `json:"mining_reward_vestings"`
+	StakeDelegations        map[string]wire.StakeDelegation           `json:"stake_delegations"`
+	DealHealths             map[string]wire.DealHealth                `json:"deal_healths"`
+	RewardPools             *reward.Pools                             `json:"reward_pools"`
+	MiningParams            *MiningParams                             `json:"mining_params"`
+	Collections             map[string]wire.DataCollection            `json:"collections"`
+	DataRecords             map[string]wire.DataRecord                `json:"data_records"`
+	CollectionRecords       map[string][]string                       `json:"collection_records"`
+	KeyEnvelopes            map[string]wire.KeyEnvelope               `json:"key_envelopes"`
+	ShareRecords            map[string]wire.ShareRecord               `json:"share_records"`
+	AppliedTxs              map[string]bool                           `json:"applied_txs"`
+	ConfirmedTxs            map[string]bool                           `json:"confirmed_txs"`
+	EpochRound              uint64                                    `json:"epoch_round"`
+	ConsensusHeight         uint64                                    `json:"consensus_height"`
+	ConsensusRound          uint64                                    `json:"consensus_round"`
+	ConsensusPhase          string                                    `json:"consensus_phase"`
+	ConsensusProposer       string                                    `json:"consensus_proposer"`
+	UpgradePlan             consensus.UpgradePlan                     `json:"upgrade_plan"`
+	AgentKeys               map[string]*wire.AgentKey                 `json:"agent_keys"`
 }
 
 type Store struct {
@@ -122,10 +120,18 @@ func OpenStoreWithGenesis(path string, genesisPath string) (*Store, error) {
 		return store, nil
 	}
 
-	raw, rawErr := readStateFile(path)
+	if isLevelDBPath(path) {
+		db, err := leveldb.OpenFile(strings.TrimPrefix(path, "leveldb://"), nil)
+		if err != nil {
+			return nil, err
+		}
+		store.db = db
+	}
+
+	raw, rawErr := readStateFile(path, store.db)
 	hasGenesis := genesisPath != ""
 
-	if !hasExistingStateFile(path) && hasGenesis {
+	if !hasExistingStateFile(path, store.db) && hasGenesis {
 		data, err := newStateFromGenesisFile(genesisPath)
 		if err != nil {
 			return nil, err
@@ -150,13 +156,8 @@ func OpenStoreWithGenesis(path string, genesisPath string) (*Store, error) {
 	return store, nil
 }
 
-func readStateFile(path string) ([]byte, error) {
-	if isLevelDBPath(path) {
-		db, err := leveldb.OpenFile(strings.TrimPrefix(path, "leveldb://"), nil)
-		if err != nil {
-			return nil, err
-		}
-		defer db.Close()
+func readStateFile(path string, db *leveldb.DB) ([]byte, error) {
+	if db != nil {
 		raw, err := db.Get(levelDBStateKey, nil)
 		if errors.Is(err, leveldb.ErrNotFound) {
 			return nil, nil
@@ -170,17 +171,12 @@ func readStateFile(path string) ([]byte, error) {
 	return raw, err
 }
 
-func hasExistingStateFile(path string) bool {
+func hasExistingStateFile(path string, db *leveldb.DB) bool {
 	if path == "" {
 		return false
 	}
-	if isLevelDBPath(path) {
-		db, err := leveldb.OpenFile(strings.TrimPrefix(path, "leveldb://"), nil)
-		if err != nil {
-			return false
-		}
-		defer db.Close()
-		_, err = db.Get(levelDBStateKey, nil)
+	if db != nil {
+		_, err := db.Get(levelDBStateKey, nil)
 		return err == nil
 	}
 	_, err := os.Stat(path)
@@ -253,39 +249,45 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 
 func newState() State {
 	return State{
-		Intents:               map[string]*Intent{},
-		Deals:                 map[string]string{},
-		Challenges:            map[string]wire.StorageChallenge{},
-		Proofs:                map[string]wire.StorageProof{},
-		Epochs:                map[string]wire.ProofEpoch{},
-		Miners:                map[string]wire.MinerStats{},
-		Accounts:              map[string]wire.Account{},
-		Blocks:                []wire.Block{},
-		PendingTxs:            []wire.Transaction{},
-		Receipts:              map[string]wire.TransactionReceipt{},
-		Validators:            map[string]wire.ValidatorInfo{},
-		ConsensusValidators:   map[string]bool{},
-		ValidatorEvidence:     map[string]wire.ValidatorEvidence{},
-		ConsensusVotes:        map[string]wire.ConsensusVote{},
-		FeeMarket:             defaultFeeMarket(),
-		FeeChargedTxs:         map[string]bool{},
-		StoragePricing:        defaultStoragePricing(),
-		PermanentStorageFunds: map[string]wire.PermanentStorageFund{},
-		RepairTasks:           map[string]wire.RepairTask{},
-		ProviderRecords:       map[string]wire.StorageProviderRecord{},
-		DeleteTasks:           map[string]wire.DeleteTask{},
-		GovernanceAudits:      []wire.GovernanceAuditRecord{},
-		GovernanceOperators:   map[string]wire.GovernanceOperator{},
-		DeleteReceipts:        map[string]wire.DeleteReceipt{},
-		RetrievalReceipts:     map[string]wire.RetrievalReceipt{},
-		Collections:           map[string]wire.DataCollection{},
-		DataRecords:           map[string]wire.DataRecord{},
-		CollectionRecords:     map[string][]string{},
-		KeyEnvelopes:          map[string]wire.KeyEnvelope{},
-		ShareRecords:          map[string]wire.ShareRecord{},
-		AppliedTxs:            map[string]bool{},
-		ConfirmedTxs:          map[string]bool{},
-		AgentKeys:             map[string]*wire.AgentKey{},
+		Intents:                 map[string]*Intent{},
+		Deals:                   map[string]string{},
+		Challenges:              map[string]wire.StorageChallenge{},
+		Proofs:                  map[string]wire.StorageProof{},
+		Epochs:                  map[string]wire.ProofEpoch{},
+		Miners:                  map[string]wire.MinerStats{},
+		Accounts:                map[string]wire.Account{},
+		Blocks:                  []wire.Block{},
+		PendingTxs:              []wire.Transaction{},
+		Receipts:                map[string]wire.TransactionReceipt{},
+		Validators:              map[string]wire.ValidatorInfo{},
+		ConsensusValidators:     map[string]bool{},
+		ValidatorEvidence:       map[string]wire.ValidatorEvidence{},
+		ConsensusVotes:          map[string]wire.ConsensusVote{},
+		FeeMarket:               defaultFeeMarket(),
+		FeeChargedTxs:           map[string]bool{},
+		StoragePricing:          defaultStoragePricing(),
+		DealEscrows:             map[string]wire.DealEscrow{},
+		PermanentStorageFunds:   map[string]wire.PermanentStorageFund{},
+		RepairTasks:             map[string]wire.RepairTask{},
+		ProviderRecords:         map[string]wire.StorageProviderRecord{},
+		DeleteTasks:             map[string]wire.DeleteTask{},
+		GovernanceAudits:        []wire.GovernanceAuditRecord{},
+		GovernanceOperators:     map[string]wire.GovernanceOperator{},
+		DeleteReceipts:          map[string]wire.DeleteReceipt{},
+		RetrievalReceipts:       map[string]wire.RetrievalReceipt{},
+		RetrievalWindows:        map[string]wire.RetrievalRateWindow{},
+		PendingRetrievalRewards: map[string]wire.PendingRetrievalReward{},
+		MiningRewardVestings:    map[string]wire.MiningRewardVestingBucket{},
+		StakeDelegations:        map[string]wire.StakeDelegation{},
+		DealHealths:             map[string]wire.DealHealth{},
+		Collections:             map[string]wire.DataCollection{},
+		DataRecords:             map[string]wire.DataRecord{},
+		CollectionRecords:       map[string][]string{},
+		KeyEnvelopes:            map[string]wire.KeyEnvelope{},
+		ShareRecords:            map[string]wire.ShareRecord{},
+		AppliedTxs:              map[string]bool{},
+		ConfirmedTxs:            map[string]bool{},
+		AgentKeys:               map[string]*wire.AgentKey{},
 	}
 }
 
@@ -350,6 +352,9 @@ func normalizeState(state *State) {
 	if state.StoragePricing.PermanentDuration == 0 {
 		state.StoragePricing.PermanentDuration = defaultPermanentStorageDuration
 	}
+	if state.DealEscrows == nil {
+		state.DealEscrows = map[string]wire.DealEscrow{}
+	}
 	if state.PermanentStorageFunds == nil {
 		state.PermanentStorageFunds = map[string]wire.PermanentStorageFund{}
 	}
@@ -373,6 +378,21 @@ func normalizeState(state *State) {
 	}
 	if state.RetrievalReceipts == nil {
 		state.RetrievalReceipts = map[string]wire.RetrievalReceipt{}
+	}
+	if state.RetrievalWindows == nil {
+		state.RetrievalWindows = map[string]wire.RetrievalRateWindow{}
+	}
+	if state.PendingRetrievalRewards == nil {
+		state.PendingRetrievalRewards = map[string]wire.PendingRetrievalReward{}
+	}
+	if state.MiningRewardVestings == nil {
+		state.MiningRewardVestings = map[string]wire.MiningRewardVestingBucket{}
+	}
+	if state.StakeDelegations == nil {
+		state.StakeDelegations = map[string]wire.StakeDelegation{}
+	}
+	if state.DealHealths == nil {
+		state.DealHealths = map[string]wire.DealHealth{}
 	}
 	if state.Collections == nil {
 		state.Collections = map[string]wire.DataCollection{}
@@ -398,6 +418,10 @@ func normalizeState(state *State) {
 	if state.AgentKeys == nil {
 		state.AgentKeys = map[string]*wire.AgentKey{}
 	}
+	if state.MiningParams == nil {
+		defaults := DefaultMiningParams()
+		state.MiningParams = &defaults
+	}
 	for address, account := range state.Accounts {
 		normalized := wire.NormalizeAddress(address)
 		account.Address = wire.NormalizeAddress(account.Address)
@@ -409,16 +433,55 @@ func normalizeState(state *State) {
 		}
 		state.Accounts[normalized] = account
 	}
+	for key, bucket := range state.MiningRewardVestings {
+		normalized := wire.NormalizeAddress(bucket.Address)
+		if normalized == "" {
+			delete(state.MiningRewardVestings, key)
+			continue
+		}
+		if bucket.Sources == nil {
+			bucket.Sources = map[string]uint64{}
+		}
+		bucket.Address = normalized
+		state.MiningRewardVestings[key] = bucket
+	}
+	pendingMiningByAddress := map[string]uint64{}
+	for _, bucket := range state.MiningRewardVestings {
+		if bucket.Total <= bucket.Released {
+			continue
+		}
+		pendingMiningByAddress[bucket.Address] = saturatingAdd(pendingMiningByAddress[bucket.Address], bucket.Total-bucket.Released)
+	}
+	for address, pending := range pendingMiningByAddress {
+		account := state.Accounts[address]
+		account.Address = address
+		account.PendingMiningRewards = pending
+		state.Accounts[address] = account
+	}
+	for address, account := range state.Accounts {
+		if _, ok := pendingMiningByAddress[address]; !ok {
+			account.PendingMiningRewards = 0
+			state.Accounts[address] = account
+		}
+	}
 	for _, intent := range state.Intents {
 		if intent.Receipts == nil {
 			intent.Receipts = map[int]map[int]wire.MinerReceipt{}
 		}
+		if intent.LockedFee > 0 {
+			ensureDealEscrowForState(state, intent)
+		}
 		if fund, ok := state.PermanentStorageFunds[intent.IntentID]; ok {
+			if fund.SustainableDailyRate == 0 && fund.Balance > 0 {
+				fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
+				state.PermanentStorageFunds[intent.IntentID] = fund
+			}
 			intent.PermanentFundBalance = fund.Balance
 			intent.PermanentFundPaid = fund.Paid
 		}
 		normalizeIntentLifecycle(intent)
 	}
+	rebuildStorageFeePoolForState(state)
 }
 
 func defaultFeeMarket() wire.FeeMarket {
@@ -512,6 +575,7 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 		UpdatedAt:    now,
 	}
 	s.createPermanentFundLocked(s.data.Intents[intentID], now)
+	s.createDealEscrowLocked(s.data.Intents[intentID], now)
 	s.reserveStorageAssignmentsLocked(assignments)
 	s.recordTxLocked("create_intent", req.User, createIntentTxPayload{
 		IntentID:      intentID,
@@ -654,6 +718,7 @@ func (s *Store) Finalize(req wire.FinalizeRequest) (wire.FinalizeResponse, error
 		intent.ExpiresAtUnix = now + intent.Policy.Duration
 	}
 	intent.UpdatedAt = now
+	s.activateDealEscrowLocked(intent, now)
 	s.data.Deals[dealID] = intent.IntentID
 	s.recordTxLocked("finalize_deal", req.User, map[string]any{
 		"intent_id":     intent.IntentID,
@@ -746,6 +811,7 @@ func (s *Store) settleIntentLocked(intent *Intent, now int64) (wire.SettleIntent
 		user.LockedStorage -= refund
 		user.Balance += refund
 		intent.RefundedFee += refund
+		s.recordStorageFeeRefundLocked(intent, refund)
 		s.data.Accounts[user.Address] = user
 	}
 	intent.UpdatedAt = now
@@ -1055,10 +1121,10 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch) wire.FinalizeEpochRes
 		stats := s.minerStatsLocked(challenge.MinerAddress)
 		stats.ProofFailure++
 		stats.ConsecutiveFailures++
-		if stats.Status == wire.MinerStatusActive && stats.ConsecutiveFailures >= defaultMinerDegradeThreshold {
+		if stats.Status == wire.MinerStatusActive && stats.ConsecutiveFailures >= s.miningParamsLocked().MinerDegradeThreshold {
 			stats.Status = wire.MinerStatusDegraded
 		}
-		if stats.Status == wire.MinerStatusDegraded && stats.ConsecutiveFailures >= defaultMinerDegradeThreshold*2 {
+		if stats.Status == wire.MinerStatusDegraded && stats.ConsecutiveFailures >= s.miningParamsLocked().MinerDegradeThreshold*2 {
 			stats.Status = wire.MinerStatusJailed
 		}
 		slash := epoch.SlashPerMissedProof
@@ -1159,6 +1225,7 @@ func (s *Store) MinerStats(minerAddress string) (wire.MinerStats, error) {
 	if !ok {
 		return wire.MinerStats{MinerAddress: minerAddress}, nil
 	}
+	stats.PendingMiningRewards = s.accountLocked(minerAddress).PendingMiningRewards
 	return stats, nil
 }
 
@@ -1304,6 +1371,7 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 	if req.Address == "" || req.PublicKey == "" {
 		return wire.RegisterValidatorResponse{}, errors.New("validator address and public key are required")
 	}
+	req.Address = wire.NormalizeAddress(req.Address)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1555,7 +1623,7 @@ func (s *Store) generateChallengesLocked(intent *Intent, epochID string, count i
 		if err != nil {
 			return nil, err
 		}
-		sampleCount := storageProofSampleCount(receipt.ShardSize, chaincrypto.DefaultLeafSize)
+		sampleCount := storageProofSampleCount(receipt.ShardSize, chaincrypto.DefaultLeafSize, s.miningParamsLocked().StorageProofSamples)
 		leafIndices := challengeLeafIndices(nonce, receipt.ShardHash, receipt.ShardSize, chaincrypto.DefaultLeafSize, sampleCount)
 		leafRanges := challengeLeafRanges(receipt.ShardSize, chaincrypto.DefaultLeafSize, leafIndices)
 		challengeSeed := hashString(intent.IntentID + ":" + receipt.ShardHash + ":" + nonce)
@@ -1683,12 +1751,12 @@ func challengeLeafIndices(nonce string, shardHash string, shardSize int64, leafS
 	return indices
 }
 
-func storageProofSampleCount(shardSize int64, leafSize int) int {
+func storageProofSampleCount(shardSize int64, leafSize int, baseSamples int) int {
 	leafCount := chaincrypto.LeafCount(shardSize, leafSize)
 	if leafCount <= 1 {
 		return 1
 	}
-	samples := defaultStorageProofSamples
+	samples := baseSamples
 	for n := leafCount; n > 1; n >>= 1 {
 		samples += 2
 	}

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"chain/internal/storage"
@@ -75,7 +79,23 @@ func main() {
 
 	log.Printf("storage node %s listening on %s", node.Address(), *addr)
 	server := storage.NewServerWithProviderNetwork(node, providerNetwork)
-	if err := http.ListenAndServe(*addr, server.Routes()); err != nil {
-		log.Fatal(err)
+	httpServer := &http.Server{
+		Addr:    *addr,
+		Handler: server.Routes(),
 	}
+
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("storage node server error: %v", err)
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Println("storage node: shutting down...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	httpServer.Shutdown(shutdownCtx)
 }

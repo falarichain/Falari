@@ -9,12 +9,6 @@ const (
 	RepairPoolInitial  uint64 = 500_000_000
 )
 
-const (
-	StorageReleaseRateBPS   uint64 = 3
-	RetrievalReleaseRateBPS uint64 = 20
-	ValidatorReleaseRateBPS uint64 = 2
-)
-
 type Pools struct {
 	StorageRemaining   uint64 `json:"storage_pool_remaining"`
 	RetrievalRemaining uint64 `json:"retrieval_pool_remaining"`
@@ -32,10 +26,10 @@ func NewPools() *Pools {
 	}
 }
 
-func (p *Pools) ReleaseEpochRewards() (storage, retrieval, validator uint64) {
-	storage = p.releaseFromPool(&p.StorageRemaining, StorageReleaseRateBPS)
-	retrieval = p.releaseFromPool(&p.RetrievalRemaining, RetrievalReleaseRateBPS)
-	validator = p.releaseFromPool(&p.ValidatorRemaining, ValidatorReleaseRateBPS)
+func (p *Pools) ReleaseEpochRewards(storageRateBPS, retrievalRateBPS, validatorRateBPS uint64) (storage, retrieval, validator uint64) {
+	storage = p.releaseFromPool(&p.StorageRemaining, storageRateBPS)
+	retrieval = p.releaseFromPool(&p.RetrievalRemaining, retrievalRateBPS)
+	validator = p.releaseFromPool(&p.ValidatorRemaining, validatorRateBPS)
 	total := storage + retrieval + validator
 	p.TokensReleased = saturatingAdd(p.TokensReleased, total)
 	return

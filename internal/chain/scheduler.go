@@ -42,7 +42,14 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 
 			s.mu.Lock()
 			s.finalizeExitingValidatorsLocked()
+			releasedBuckets, releasedTotal := s.releaseVestedMiningRewardsLocked(time.Now().Unix())
+			if releasedBuckets > 0 {
+				log.Printf("auto released %d mining reward vesting buckets total=%d", releasedBuckets, releasedTotal)
+			}
 			s.releaseEpochRewardsLocked()
+			if err := s.saveLocked(); err != nil {
+				log.Printf("auto save mining reward state failed: %v", err)
+			}
 			s.mu.Unlock()
 
 			released, totalRewards, err := s.ReleasePendingRetrievalRewards()

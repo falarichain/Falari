@@ -53,7 +53,8 @@ func (s *Store) computeMinerAntiSpamScoreLocked(stats *wire.MinerStats) {
 		windowTotalBytes = saturatingAdd(windowTotalBytes, window.BytesSum)
 		if window.SampleCount > 0 && window.SampleBytes > 0 {
 			avgPerSample := window.SampleBytes / window.SampleCount
-			if avgPerSample > defaultMaxRetrievalRewardPerWindow/defaultRetrievalAbuseSpeedMultiplier {
+			maxReward := s.miningParamsLocked().MaxRetrievalRewardPerWindow
+			if avgPerSample > maxReward/defaultRetrievalAbuseSpeedMultiplier {
 				totalAbuseBytes = saturatingAdd(totalAbuseBytes, window.BytesSum)
 			}
 		}
@@ -146,14 +147,14 @@ func (s *Store) submitRetrievalReceiptLocked(req wire.SubmitRetrievalReceiptRequ
 		}, true, nil
 	}
 
-	baseReward := retrievalRewardForBytes(receipt.BytesServed)
+	baseReward := retrievalRewardForBytes(receipt.BytesServed, s.miningParamsLocked().RetrievalRewardPerMiB)
 	decayedReward := s.applyRetrievalRateDecayLocked(receipt.User, receipt.IntentID, receipt.ServedAtUnix, baseReward)
-	heldReward := s.holdRetrievalRewardLocked(receipt.ReceiptID, receipt.MinerAddress, receipt.IntentID, decayedReward)
+	vestedReward := s.payRetrievalRewardLocked(intent, receipt.MinerAddress, decayedReward)
 	stats := s.minerStatsLocked(receipt.MinerAddress)
 	stats.RetrievalSuccess++
 	stats.RetrievalBytes = saturatingAdd(stats.RetrievalBytes, receipt.BytesServed)
-	stats.RetrievalRewards = saturatingAdd(stats.RetrievalRewards, heldReward)
-	stats.Rewards = saturatingAdd(stats.Rewards, heldReward)
+	stats.RetrievalRewards = saturatingAdd(stats.RetrievalRewards, vestedReward)
+	stats.Rewards = saturatingAdd(stats.Rewards, vestedReward)
 	s.computeMinerAntiSpamScoreLocked(&stats)
 	s.data.Miners[receipt.MinerAddress] = stats
 	s.data.RetrievalReceipts[receipt.ReceiptID] = receipt
@@ -162,7 +163,7 @@ func (s *Store) submitRetrievalReceiptLocked(req wire.SubmitRetrievalReceiptRequ
 		IntentID:     receipt.IntentID,
 		MinerAddress: receipt.MinerAddress,
 		BytesServed:  receipt.BytesServed,
-		Reward:       heldReward,
+		Reward:       vestedReward,
 		Status:       "accepted",
 	}, false, nil
 }
@@ -192,7 +193,8 @@ func (s *Store) applyRetrievalRateDecayLocked(user string, intentID string, nowU
 		return baseReward
 	}
 
-	if window.BytesSum >= defaultMaxRetrievalRewardPerWindow {
+	maxWindow := s.miningParamsLocked().MaxRetrievalRewardPerWindow
+	if window.BytesSum >= maxWindow {
 		return 0
 	}
 
@@ -201,8 +203,8 @@ func (s *Store) applyRetrievalRateDecayLocked(user string, intentID string, nowU
 	if decayed == 0 && baseReward > 0 {
 		decayed = 1
 	}
-	if window.BytesSum+decayed > defaultMaxRetrievalRewardPerWindow {
-		decayed = defaultMaxRetrievalRewardPerWindow - window.BytesSum
+	if window.BytesSum+decayed > maxWindow {
+		decayed = maxWindow - window.BytesSum
 	}
 
 	window.BytesSum = saturatingAdd(window.BytesSum, decayed)
@@ -221,7 +223,7 @@ func (s *Store) applyRetrievalRateDecayLocked(user string, intentID string, nowU
 	return decayed
 }
 
-func retrievalRewardForBytes(bytes uint64) uint64 {
+func retrievalRewardForBytes(bytes uint64, rewardPerMiB uint64) uint64 {
 	const mib = uint64(1024 * 1024)
 	units := bytes / mib
 	if bytes%mib != 0 {
@@ -230,33 +232,31 @@ func retrievalRewardForBytes(bytes uint64) uint64 {
 	if units == 0 {
 		units = 1
 	}
-	return units * defaultRetrievalRewardPerMiB
+	return units * rewardPerMiB
 }
 
 func (s *Store) payRetrievalRewardLocked(intent *Intent, minerAddress string, reward uint64) uint64 {
 	if reward == 0 {
 		return 0
 	}
-	remaining := remainingIntentEscrow(intent)
-	if reward > remaining {
-		reward = remaining
+	now := time.Now().Unix()
+	remainingReward := reward
+	paidFromFees := uint64(0)
+	if isPermanentIntent(intent) {
+		paidFromFees = s.spendPermanentFundLocked(intent, remainingReward, now)
+	} else {
+		paidFromFees = s.spendFiniteStorageFeeLocked(intent, remainingReward, now)
 	}
-	if reward > 0 {
-		user := s.accountLocked(intent.User)
-		if user.LockedStorage < reward {
-			reward = user.LockedStorage
-		}
-		user.LockedStorage -= reward
-		s.data.Accounts[intent.User] = user
-		intent.PaidFee += reward
-		s.payToMinerLocked(minerAddress, reward)
-		return reward
+	totalPaid := paidFromFees
+	if paidFromFees > 0 {
+		s.vestMiningRewardLocked(minerAddress, paidFromFees, miningRewardSourceRetrievalReceipt, now)
+		remainingReward -= paidFromFees
 	}
-	if s.payRetrievalRewardFromPoolLocked(minerAddress, reward) {
-		s.payToMinerLocked(minerAddress, reward)
-		return reward
+	if remainingReward > 0 && s.payRetrievalRewardFromPoolLocked(minerAddress, remainingReward) {
+		s.vestMiningRewardLocked(minerAddress, remainingReward, miningRewardSourceRetrievalPool, now)
+		totalPaid = saturatingAdd(totalPaid, remainingReward)
 	}
-	return 0
+	return totalPaid
 }
 
 func (s *Store) holdRetrievalRewardLocked(receiptID string, minerAddress string, intentID string, reward uint64) uint64 {
@@ -339,6 +339,11 @@ func (s *Store) EpochRewards(epochID string) (wire.EpochRewardsResponse, error) 
 		RepairRewardsPaid:    epoch.RepairRewardsPaid,
 		StorageSlashed:       epoch.StorageSlashed,
 		PendingRetrieval:     len(s.data.PendingRetrievalRewards),
+	}
+	for _, bucket := range s.data.MiningRewardVestings {
+		if bucket.Total > bucket.Released {
+			resp.PendingMiningRewards = saturatingAdd(resp.PendingMiningRewards, bucket.Total-bucket.Released)
+		}
 	}
 	return resp, nil
 }
