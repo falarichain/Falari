@@ -132,20 +132,25 @@ func (s *Store) terminateDealLocked(req wire.TerminateDealRequest, now int64) (w
 	intent.TerminatedAtUnix = now
 	intent.UpdatedAt = now
 	s.releaseUncommittedStorageReservationsLocked(intent)
-	refund := remainingIntentEscrow(intent)
+	// Early termination: remaining locked tokens are burned (sent to black-hole
+	// address) rather than refunded to the user.
+	var burned uint64
 	if isPermanentIntent(intent) {
-		s.closePermanentFundLocked(intent, "terminate_deal", now)
-		refund = 0
-	} else if refund > 0 {
-		user := s.accountLocked(intent.User)
-		if user.LockedStorage < refund {
-			refund = user.LockedStorage
+		burned = s.closePermanentFundLocked(intent, "terminate_deal", now)
+	} else {
+		burn := remainingIntentEscrow(intent)
+		if burn > 0 {
+			user := s.accountLocked(intent.User)
+			if user.LockedStorage < burn {
+				burn = user.LockedStorage
+			}
+			if burn > 0 {
+				user.LockedStorage -= burn
+				s.data.Accounts[user.Address] = user
+				s.recordStorageFeeBurnLocked(intent, burn)
+				burned = burn
+			}
 		}
-		user.LockedStorage -= refund
-		user.Balance += refund
-		intent.RefundedFee += refund
-		s.recordStorageFeeRefundLocked(intent, refund)
-		s.data.Accounts[user.Address] = user
 	}
 	var tasks []wire.DeleteTask
 	if intent.Policy.DeletionPolicy != wire.DeletionPolicyRetain {
@@ -156,7 +161,7 @@ func (s *Store) terminateDealLocked(req wire.TerminateDealRequest, now int64) (w
 		Status:           intent.Status,
 		StorageStatus:    intent.StorageStatus,
 		AccessStatus:     intent.AccessStatus,
-		RefundedFee:      refund,
+		BurnedFee:        burned,
 		DeleteTasks:      tasks,
 		TerminatedAtUnix: now,
 	}, nil
@@ -205,72 +210,6 @@ func (s *Store) setAccessPolicyLocked(req wire.SetAccessPolicyRequest, now int64
 	}, nil
 }
 
-func (s *Store) GovernanceDealAction(req wire.GovernanceDealActionRequest) (wire.GovernanceDealActionResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.validateGovernanceOperatorLocked(req.Operator, req.Action); err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	resp, err := s.governanceDealActionLocked(req, time.Now().Unix())
-	if err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	s.recordTxLocked("governance_deal_action", req.Operator, governanceDealActionTxPayload{Request: req, Response: resp})
-	if err := s.saveLocked(); err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	return resp, nil
-}
-
-func (s *Store) CommitteeFreezeDeal(req wire.CommitteeFreezeDealRequest) (wire.GovernanceDealActionResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.validateGovernanceOperatorLocked(req.Operator, "freeze"); err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	now := time.Now().Unix()
-	resp, err := s.governanceDealActionLocked(wire.GovernanceDealActionRequest{
-		IntentID:      req.IntentID,
-		Operator:      req.Operator,
-		Action:        "freeze",
-		ReasonHash:    req.ReasonHash,
-		ExpiresAtUnix: req.ExpiresAtUnix,
-	}, now)
-	if err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	s.recordTxLocked("committee_freeze_deal", req.Operator, committeeFreezeDealTxPayload{Request: req, Response: resp})
-	if err := s.saveLocked(); err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	return resp, nil
-}
-
-func (s *Store) GovernanceBlockDeal(req wire.GovernanceBlockDealRequest) (wire.GovernanceDealActionResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.validateGovernanceOperatorLocked(req.Operator, "block"); err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	now := time.Now().Unix()
-	resp, err := s.governanceDealActionLocked(wire.GovernanceDealActionRequest{
-		IntentID:           req.IntentID,
-		Operator:           req.Operator,
-		Action:             "block",
-		ReasonHash:         req.ReasonHash,
-		AppealDeadlineUnix: req.AppealDeadlineUnix,
-		PreserveStorage:    req.PreserveStorage,
-	}, now)
-	if err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	s.recordTxLocked("governance_block_deal", req.Operator, governanceBlockDealTxPayload{Request: req, Response: resp})
-	if err := s.saveLocked(); err != nil {
-		return wire.GovernanceDealActionResponse{}, err
-	}
-	return resp, nil
-}
-
 func (s *Store) governanceDealActionLocked(req wire.GovernanceDealActionRequest, now int64) (wire.GovernanceDealActionResponse, error) {
 	if req.IntentID == "" {
 		return wire.GovernanceDealActionResponse{}, errors.New("intent is required")
@@ -292,6 +231,7 @@ func (s *Store) governanceDealActionLocked(req wire.GovernanceDealActionRequest,
 		intent.ModerationStatus = wire.ModerationStatusFrozen
 		intent.ModerationExpiresAtUnix = req.ExpiresAtUnix
 		intent.AppealDeadlineUnix = 0
+		s.addBlacklistForIntent(intent, req.ReasonHash, req.Operator, "freeze", req.ExpiresAtUnix, now)
 	case "block":
 		if req.AppealDeadlineUnix > 0 && req.AppealDeadlineUnix <= now {
 			return wire.GovernanceDealActionResponse{}, errors.New("block action requires appeal_deadline_unix to be in the future")
@@ -300,6 +240,7 @@ func (s *Store) governanceDealActionLocked(req wire.GovernanceDealActionRequest,
 		intent.ModerationStatus = wire.ModerationStatusBlocked
 		intent.ModerationExpiresAtUnix = 0
 		intent.AppealDeadlineUnix = req.AppealDeadlineUnix
+		s.addBlacklistForIntent(intent, req.ReasonHash, req.Operator, "block", 0, now)
 		if !req.PreserveStorage {
 			intent.StorageStatus = wire.StorageStatusTerminating
 			intent.TerminatedAtUnix = now
@@ -312,9 +253,11 @@ func (s *Store) governanceDealActionLocked(req wire.GovernanceDealActionRequest,
 		intent.StorageStatus = wire.StorageStatusActive
 		intent.ModerationExpiresAtUnix = 0
 		intent.AppealDeadlineUnix = 0
+		s.addBlacklistForIntent(intent, req.ReasonHash, req.Operator, "legal_hold", 0, now)
 	case "appeal":
 		intent.ModerationStatus = wire.ModerationStatusAppealed
 		intent.ModerationExpiresAtUnix = 0
+		s.removeBlacklistForIntent(intent)
 	default:
 		return wire.GovernanceDealActionResponse{}, errors.New("invalid governance action")
 	}
@@ -334,6 +277,82 @@ func (s *Store) governanceDealActionLocked(req wire.GovernanceDealActionRequest,
 	}
 	s.appendGovernanceAuditLocked(req, resp, now)
 	return resp, nil
+}
+
+// addBlacklistForIntent adds blacklist entries for all shard hashes of an intent.
+func (s *Store) addBlacklistForIntent(intent *Intent, reasonHash, operator, reason string, expiresAtUnix, now int64) {
+	if s.data.BlacklistedShards == nil {
+		s.data.BlacklistedShards = make(map[string]wire.BlacklistEntry)
+	}
+	for _, hash := range intentShardHashes(intent) {
+		s.data.BlacklistedShards[hash] = wire.BlacklistEntry{
+			ShardHash:     hash,
+			IntentID:      intent.IntentID,
+			Reason:        reason,
+			ReasonHash:    reasonHash,
+			Operator:      operator,
+			BlockedAtUnix: now,
+			ExpiresAtUnix: expiresAtUnix,
+		}
+	}
+}
+
+// removeBlacklistForIntent removes all blacklist entries for an intent's shards.
+func (s *Store) removeBlacklistForIntent(intent *Intent) {
+	for _, hash := range intentShardHashes(intent) {
+		delete(s.data.BlacklistedShards, hash)
+	}
+}
+
+// intentShardHashes extracts all shard hashes from an intent's segments.
+func intentShardHashes(intent *Intent) []string {
+	var hashes []string
+	for _, seg := range intent.Segments {
+		hashes = append(hashes, seg.ShardHashes...)
+	}
+	return hashes
+}
+
+// Blacklist returns all current blacklist entries, automatically cleaning up
+// expired entries.
+func (s *Store) Blacklist() wire.BlacklistResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().Unix()
+	entries := make([]wire.BlacklistEntry, 0, len(s.data.BlacklistedShards))
+	for hash, e := range s.data.BlacklistedShards {
+		// Skip and clean up expired entries.
+		if e.ExpiresAtUnix > 0 && e.ExpiresAtUnix < now {
+			delete(s.data.BlacklistedShards, hash)
+			continue
+		}
+		entries = append(entries, e)
+	}
+	var height uint64
+	if len(s.data.Blocks) > 0 {
+		height = s.data.Blocks[len(s.data.Blocks)-1].Height
+	}
+	return wire.BlacklistResponse{
+		Entries:       entries,
+		CurrentHeight: height,
+	}
+}
+
+// IsShardBlacklisted checks whether a shard hash is currently blacklisted.
+// Returns false for entries that have passed their expiration time.
+func (s *Store) IsShardBlacklisted(shardHash string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.data.BlacklistedShards[shardHash]
+	if !ok {
+		return false
+	}
+	// Permanent entries (ExpiresAtUnix == 0) are always blocked.
+	// Temporary entries are blocked only until ExpiresAtUnix.
+	if entry.ExpiresAtUnix > 0 && entry.ExpiresAtUnix < time.Now().Unix() {
+		return false
+	}
+	return true
 }
 
 func (s *Store) SubmitDeleteReceipt(req wire.SubmitDeleteReceiptRequest) (wire.SubmitDeleteReceiptResponse, error) {
@@ -589,6 +608,10 @@ func (s *Store) validateGovernanceOperatorLocked(operator string, action string)
 	record, ok := s.data.GovernanceOperators[operator]
 	if !ok || !record.Enabled {
 		return errors.New("governance operator is not authorized")
+	}
+	// Operator management and config actions are allowed by any enabled operator (BFT voting ensures consensus).
+	if isOperatorManagementAction(action) || isConfigAction(action) {
+		return nil
 	}
 	if len(record.Permissions) == 0 {
 		return nil

@@ -48,6 +48,9 @@ func (s *Store) TopUpPermanentFund(req wire.PermanentFundTopUpRequest) (wire.Per
 	fund.Balance = saturatingAdd(fund.Balance, req.Amount)
 	fund.Contributed = saturatingAdd(fund.Contributed, req.Amount)
 	fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
+	// Reset the baseline rate on top-up so the ratio-based takeover
+	// threshold is measured against the new (higher) daily rate.
+	fund.InitialDailyRate = fund.SustainableDailyRate
 	fund.UpdatedAtUnix = now
 	fund.Closed = false
 	fund.ClosedReason = ""
@@ -101,6 +104,7 @@ func (s *Store) applyPermanentFundTopUpLocked(payload permanentFundTopUpTxPayloa
 		fund.UpdatedAtUnix = payload.ToppedUpAtUnix
 	}
 	fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
+	fund.InitialDailyRate = fund.SustainableDailyRate
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
 	intent.LockedFee = saturatingAdd(intent.LockedFee, req.Amount)
 	s.addDealEscrowFundsLocked(intent, req.Amount, payload.ToppedUpAtUnix)
@@ -115,13 +119,15 @@ func (s *Store) ensurePermanentFundLocked(intent *Intent, now int64) wire.Perman
 	fund, ok := s.data.PermanentStorageFunds[intent.IntentID]
 	if !ok {
 		remaining := remainingIntentEscrow(intent)
+		dailyRate := permanentFundDailyRate(remaining)
 		fund = wire.PermanentStorageFund{
 			IntentID:             intent.IntentID,
 			User:                 intent.User,
 			Balance:              remaining,
 			Contributed:          intent.LockedFee,
 			Paid:                 intent.PaidFee,
-			SustainableDailyRate: permanentFundDailyRate(remaining),
+			SustainableDailyRate: dailyRate,
+			InitialDailyRate:     dailyRate,
 			CreatedAtUnix:        firstNonZero(intent.CreatedAt, now),
 			UpdatedAtUnix:        now,
 		}
@@ -134,6 +140,10 @@ func (s *Store) ensurePermanentFundLocked(intent *Intent, now int64) wire.Perman
 	}
 	if fund.UpdatedAtUnix == 0 {
 		fund.UpdatedAtUnix = now
+	}
+	// Ensure InitialDailyRate is set for funds created before this field existed.
+	if fund.InitialDailyRate == 0 && fund.SustainableDailyRate > 0 {
+		fund.InitialDailyRate = fund.SustainableDailyRate
 	}
 	return fund
 }
@@ -224,24 +234,26 @@ func (s *Store) closePermanentFundLocked(intent *Intent, reason string, now int6
 		if user.LockedStorage < remaining {
 			remaining = user.LockedStorage
 		}
+		// Burn: deduct from user's LockedStorage but do NOT credit to any address.
+		// This is a deflationary mechanism — tokens are permanently removed from
+		// circulation (sent to the black-hole address).
 		user.LockedStorage -= remaining
 		s.data.Accounts[intent.User] = user
-		s.initRewardPoolsLocked()
-		s.data.RewardPools.StorageRemaining = saturatingAdd(s.data.RewardPools.StorageRemaining, remaining)
+		fund.Burned = saturatingAdd(fund.Burned, remaining)
+		intent.BurnedFee = saturatingAdd(intent.BurnedFee, remaining)
+		s.data.StorageFeePool.TotalBurned = saturatingAdd(s.data.StorageFeePool.TotalBurned, remaining)
 	}
 	fund.Balance = 0
 	fund.Closed = true
 	fund.ClosedReason = reason
 	fund.ClosedAtUnix = now
 	fund.UpdatedAtUnix = now
-	fund.TransferredToPool = saturatingAdd(fund.TransferredToPool, remaining)
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
 	if s.data.StorageFeePool.PermanentFundBalance >= remaining {
 		s.data.StorageFeePool.PermanentFundBalance -= remaining
 	} else {
 		s.data.StorageFeePool.PermanentFundBalance = 0
 	}
-	s.data.StorageFeePool.TransferredToRewardPool = saturatingAdd(s.data.StorageFeePool.TransferredToRewardPool, remaining)
 	intent.PermanentFundBalance = 0
 	intent.PermanentFundPaid = fund.Paid
 	return remaining

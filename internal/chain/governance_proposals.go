@@ -1,0 +1,823 @@
+package chain
+
+import (
+	"errors"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"chain/internal/wire"
+)
+
+// Transaction payload types for governance proposal operations.
+
+type governanceCreateProposalTxPayload struct {
+	Request  wire.CreateGovernanceProposalRequest  `json:"request"`
+	Response wire.CreateGovernanceProposalResponse `json:"response"`
+}
+
+type governanceCastVoteTxPayload struct {
+	Request  wire.CastGovernanceVoteRequest  `json:"request"`
+	Response wire.CastGovernanceVoteResponse `json:"response"`
+}
+
+type governanceExecuteProposalTxPayload struct {
+	Request  wire.ExecuteGovernanceProposalRequest  `json:"request"`
+	Response wire.ExecuteGovernanceProposalResponse `json:"response"`
+}
+
+// governanceProposalTTLSeconds is the default time-to-live for pending proposals (7 days).
+const governanceProposalTTLSeconds = 7 * 24 * 60 * 60
+
+// governanceClockSkewSeconds is the maximum allowed clock skew for signed timestamps.
+const governanceClockSkewSeconds = 5 * 60
+
+// CreateGovernanceProposal creates a new signed governance proposal.
+func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalRequest) (wire.CreateGovernanceProposalResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	proposer := normalizeGovernanceOperator(req.Proposer)
+	if proposer == "" {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("proposer is required")
+	}
+
+	// Look up proposer in governance operators.
+	operator, ok := s.data.GovernanceOperators[proposer]
+	if !ok || !operator.Enabled {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("governance operator is not authorized")
+	}
+
+	// Check permission.
+	if err := s.validateGovernanceOperatorLocked(proposer, req.Action); err != nil {
+		return wire.CreateGovernanceProposalResponse{}, err
+	}
+
+	// Check public key exists.
+	if operator.PublicKey == "" {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("governance operator has no public key registered")
+	}
+
+	// Verify signature by recovering signer and comparing to proposer address.
+	if err := wire.VerifyGovernanceProposal(req, proposer); err != nil {
+		return wire.CreateGovernanceProposalResponse{}, err
+	}
+
+	// Validate clock skew.
+	now := time.Now().Unix()
+	if abs64(req.CreatedAtUnix-now) > governanceClockSkewSeconds {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("proposal timestamp outside acceptable clock skew")
+	}
+
+	// Validate action.
+	if !validGovernanceAction(req.Action) {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("invalid governance action")
+	}
+
+	// Validate action-specific fields.
+	if err := validateGovernanceActionFields(req.Action, req.ExpiresAtUnix, req.AppealDeadlineUnix, now); err != nil {
+		return wire.CreateGovernanceProposalResponse{}, err
+	}
+
+	if isOperatorManagementAction(req.Action) {
+		// Validate operator management fields.
+		if err := validateOperatorManagementFields(req.Action, req.TargetOperator, req.TargetPublicKey, req.TargetPermissions, s.data.GovernanceOperators); err != nil {
+			return wire.CreateGovernanceProposalResponse{}, err
+		}
+	} else if isConfigAction(req.Action) {
+		// Validate config change fields.
+		if err := validateConfigChangeFields(req); err != nil {
+			return wire.CreateGovernanceProposalResponse{}, err
+		}
+	} else if isMiningParamsAction(req.Action) {
+		// Validate mining params change fields.
+		if err := validateMiningParamsChangeFields(req); err != nil {
+			return wire.CreateGovernanceProposalResponse{}, err
+		}
+	} else {
+		// Validate intent exists for deal actions.
+		if _, ok := s.data.Intents[req.IntentID]; !ok {
+			return wire.CreateGovernanceProposalResponse{}, errors.New("intent not found")
+		}
+	}
+
+	// Expire stale proposals.
+	s.expireGovernanceProposalsLocked(now)
+
+	// Generate proposal ID.
+	proposalID, err := randomID("gov_proposal")
+	if err != nil {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("failed to generate proposal id")
+	}
+
+	proposal := wire.GovernanceProposal{
+		ProposalID:                         proposalID,
+		Proposer:                           proposer,
+		ProposerSignature:                  req.Signature,
+		IntentID:                           req.IntentID,
+		Action:                             req.Action,
+		ReasonHash:                         req.ReasonHash,
+		ExpiresAtUnix:                      req.ExpiresAtUnix,
+		PreserveStorage:                    req.PreserveStorage,
+		AppealDeadlineUnix:                 req.AppealDeadlineUnix,
+		TargetOperator:                     req.TargetOperator,
+		TargetPublicKey:                    req.TargetPublicKey,
+		TargetPermissions:                  req.TargetPermissions,
+		TargetDataModerationThresholdNum:   req.TargetDataModerationThresholdNum,
+		TargetDataModerationThresholdDen:   req.TargetDataModerationThresholdDen,
+		TargetOperatorChangeThresholdNum:   req.TargetOperatorChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:   req.TargetOperatorChangeThresholdDen,
+		TargetStorageReleaseRateBPS:        req.TargetStorageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:      req.TargetRetrievalReleaseRateBPS,
+		TargetValidatorReleaseRateBPS:      req.TargetValidatorReleaseRateBPS,
+		TargetStoredBytesWeightBPS:         req.TargetStoredBytesWeightBPS,
+		TargetProofScoreWeightBPS:          req.TargetProofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:        req.TargetAvailabilityWeightBPS,
+		TargetDecentralizationWeightBPS:    req.TargetDecentralizationWeightBPS,
+		TargetRetrievalRewardPerMiB:        req.TargetRetrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow:  req.TargetMaxRetrievalRewardPerWindow,
+		TargetRepairRewardPerShard:         req.TargetRepairRewardPerShard,
+		TargetRepairPoolTakeoverBPS:        req.TargetRepairPoolTakeoverBPS,
+		TargetRepairPoolSubsidyBPS:         req.TargetRepairPoolSubsidyBPS,
+		TargetMinerDegradeThreshold:        req.TargetMinerDegradeThreshold,
+		TargetStorageProofSamples:          req.TargetStorageProofSamples,
+		TargetValidatorCommissionBPS:       req.TargetValidatorCommissionBPS,
+		TargetRetrievalWeightBPS:           req.TargetRetrievalWeightBPS,
+		Status:                             wire.GovProposalPending,
+		CreatedAtUnix:                      now,
+	}
+
+	s.data.GovernanceProposals[proposalID] = proposal
+	s.data.GovernanceVotes[proposalID] = []wire.GovernanceVote{}
+
+	resp := wire.CreateGovernanceProposalResponse{Proposal: proposal}
+	s.recordTxLocked("governance_create_proposal", proposer, governanceCreateProposalTxPayload{Request: req, Response: resp})
+	if err := s.saveLocked(); err != nil {
+		return wire.CreateGovernanceProposalResponse{}, err
+	}
+	return resp, nil
+}
+
+// CastGovernanceVote casts a signed vote on a pending governance proposal.
+func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.CastGovernanceVoteResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	voter := normalizeGovernanceOperator(req.Voter)
+	if voter == "" {
+		return wire.CastGovernanceVoteResponse{}, errors.New("voter is required")
+	}
+
+	// Look up proposal.
+	proposal, ok := s.data.GovernanceProposals[req.ProposalID]
+	if !ok {
+		return wire.CastGovernanceVoteResponse{}, errors.New("proposal not found")
+	}
+	if proposal.Status != wire.GovProposalPending {
+		return wire.CastGovernanceVoteResponse{}, errors.New("proposal is not pending")
+	}
+
+	now := time.Now().Unix()
+
+	// Check proposal expiration (7-day TTL).
+	if proposal.CreatedAtUnix+governanceProposalTTLSeconds < now {
+		proposal.Status = wire.GovProposalExpired
+		s.data.GovernanceProposals[req.ProposalID] = proposal
+		return wire.CastGovernanceVoteResponse{}, errors.New("proposal has expired")
+	}
+
+	// Look up voter.
+	operator, ok := s.data.GovernanceOperators[voter]
+	if !ok || !operator.Enabled {
+		return wire.CastGovernanceVoteResponse{}, errors.New("voter is not an enabled governance operator")
+	}
+	if operator.PublicKey == "" {
+		return wire.CastGovernanceVoteResponse{}, errors.New("voter has no public key registered")
+	}
+
+	// Verify signature by recovering signer and comparing to voter address.
+	if err := wire.VerifyGovernanceVote(req, voter); err != nil {
+		return wire.CastGovernanceVoteResponse{}, err
+	}
+
+	// Validate clock skew.
+	if abs64(req.CreatedAtUnix-now) > governanceClockSkewSeconds {
+		return wire.CastGovernanceVoteResponse{}, errors.New("vote timestamp outside acceptable clock skew")
+	}
+
+	// Check double voting.
+	votes := s.data.GovernanceVotes[req.ProposalID]
+	for _, v := range votes {
+		if normalizeGovernanceOperator(v.Voter) == voter {
+			return wire.CastGovernanceVoteResponse{}, errors.New("voter has already voted on this proposal")
+		}
+	}
+
+	// Record vote.
+	vote := wire.GovernanceVote{
+		ProposalID:     req.ProposalID,
+		Voter:          voter,
+		VoterSignature: req.Signature,
+		Approve:        req.Approve,
+		CreatedAtUnix:  now,
+	}
+	s.data.GovernanceVotes[req.ProposalID] = append(s.data.GovernanceVotes[req.ProposalID], vote)
+
+	// Count votes.
+	approveCount, rejectCount := s.countGovernanceVotesLocked(req.ProposalID)
+	threshold := s.governanceThresholdLocked(proposal.Action)
+
+	// Auto-reject if threshold unreachable.
+	totalEnabled := s.countEnabledOperatorsLocked()
+	remaining := totalEnabled - approveCount - rejectCount
+	executed := false
+	if approveCount >= threshold {
+		// Threshold met — auto-execute.
+		execResult, err := s.executeGovernanceProposalLocked(proposal, now)
+		if err == nil {
+			executed = true
+			_ = execResult // recorded via governanceDealActionLocked
+		}
+	} else if approveCount+remaining < threshold {
+		// Threshold unreachable — auto-reject.
+		proposal.Status = wire.GovProposalRejected
+		s.data.GovernanceProposals[req.ProposalID] = proposal
+	}
+
+	resp := wire.CastGovernanceVoteResponse{
+		Vote:         vote,
+		ApproveCount: approveCount,
+		RejectCount:  rejectCount,
+		Threshold:    threshold,
+		Executed:     executed,
+	}
+	s.recordTxLocked("governance_cast_vote", voter, governanceCastVoteTxPayload{Request: req, Response: resp})
+	if err := s.saveLocked(); err != nil {
+		return wire.CastGovernanceVoteResponse{}, err
+	}
+	return resp, nil
+}
+
+// ExecuteGovernanceProposal executes a proposal that has reached the approval threshold.
+func (s *Store) ExecuteGovernanceProposal(req wire.ExecuteGovernanceProposalRequest) (wire.ExecuteGovernanceProposalResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	proposal, ok := s.data.GovernanceProposals[req.ProposalID]
+	if !ok {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("proposal not found")
+	}
+	if proposal.Status != wire.GovProposalPending {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("proposal is not pending")
+	}
+
+	now := time.Now().Unix()
+
+	// Check expiration.
+	if proposal.CreatedAtUnix+governanceProposalTTLSeconds < now {
+		proposal.Status = wire.GovProposalExpired
+		s.data.GovernanceProposals[req.ProposalID] = proposal
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("proposal has expired")
+	}
+
+	execResult, err := s.executeGovernanceProposalLocked(proposal, now)
+	if err != nil {
+		return wire.ExecuteGovernanceProposalResponse{}, err
+	}
+
+	resp := wire.ExecuteGovernanceProposalResponse{
+		Proposal:         s.data.GovernanceProposals[req.ProposalID],
+		GovernanceResult: execResult,
+	}
+	s.recordTxLocked("governance_execute_proposal", proposal.Proposer, governanceExecuteProposalTxPayload{Request: req, Response: resp})
+	if err := s.saveLocked(); err != nil {
+		return wire.ExecuteGovernanceProposalResponse{}, err
+	}
+	return resp, nil
+}
+
+// executeGovernanceProposalLocked is the internal helper that validates threshold and
+// executes the governance action. Must be called with s.mu held.
+func (s *Store) executeGovernanceProposalLocked(proposal wire.GovernanceProposal, now int64) (wire.GovernanceDealActionResponse, error) {
+	// Re-validate each voter is still an enabled operator.
+	approveCount := 0
+	votes := s.data.GovernanceVotes[proposal.ProposalID]
+	for _, v := range votes {
+		if !v.Approve {
+			continue
+		}
+		voterAddr := normalizeGovernanceOperator(v.Voter)
+		op, ok := s.data.GovernanceOperators[voterAddr]
+		if !ok || !op.Enabled {
+			continue // voter no longer enabled, exclude
+		}
+		approveCount++
+	}
+
+	threshold := s.governanceThresholdLocked(proposal.Action)
+	if approveCount < threshold {
+		return wire.GovernanceDealActionResponse{}, errors.New("insufficient approval votes: have " +
+			strconv.Itoa(approveCount) + " need " + strconv.Itoa(threshold))
+	}
+
+	// Mark proposal as executed.
+	proposal.Status = wire.GovProposalExecuted
+	s.data.GovernanceProposals[proposal.ProposalID] = proposal
+
+	// Route operator management actions to dedicated handler.
+	if isOperatorManagementAction(proposal.Action) {
+		return s.executeOperatorManagementLocked(proposal, now)
+	}
+
+	// Route config change actions to dedicated handler.
+	if isConfigAction(proposal.Action) {
+		return s.executeConfigChangeLocked(proposal, now)
+	}
+
+	// Route mining params change actions to dedicated handler.
+	if isMiningParamsAction(proposal.Action) {
+		return s.executeMiningParamsChangeLocked(proposal, now)
+	}
+
+	// Execute the deal action using the existing internal engine.
+	govReq := wire.GovernanceDealActionRequest{
+		IntentID:           proposal.IntentID,
+		Operator:           proposal.Proposer,
+		Action:             proposal.Action,
+		ReasonHash:         proposal.ReasonHash,
+		ExpiresAtUnix:      proposal.ExpiresAtUnix,
+		PreserveStorage:    proposal.PreserveStorage,
+		AppealDeadlineUnix: proposal.AppealDeadlineUnix,
+	}
+	return s.governanceDealActionLocked(govReq, now)
+}
+
+// executeOperatorManagementLocked handles add/remove/update operator actions.
+// Must be called with s.mu held.
+func (s *Store) executeOperatorManagementLocked(proposal wire.GovernanceProposal, now int64) (wire.GovernanceDealActionResponse, error) {
+	switch proposal.Action {
+	case "add_operator":
+		// Derive operator address from ECDSA public key.
+		key := wire.GovernanceOperatorAddress(proposal.TargetPublicKey)
+		if key == "" {
+			return wire.GovernanceDealActionResponse{}, errors.New("invalid target public key")
+		}
+		// If TargetOperator was provided, validate it matches the derived address.
+		if proposal.TargetOperator != "" {
+			specified := normalizeGovernanceOperator(proposal.TargetOperator)
+			if specified != "" && !strings.EqualFold(specified, key) {
+				return wire.GovernanceDealActionResponse{}, errors.New("target_operator does not match derived address from public key")
+			}
+		}
+		permissions := proposal.TargetPermissions
+		if permissions == nil {
+			permissions = []string{}
+		}
+		s.data.GovernanceOperators[key] = wire.GovernanceOperator{
+			Operator:      key,
+			PublicKey:     proposal.TargetPublicKey,
+			Permissions:   permissions,
+			Enabled:       true,
+			CreatedAtUnix: now,
+		}
+	case "remove_operator":
+		key := normalizeGovernanceOperator(proposal.TargetOperator)
+		if key == "" {
+			return wire.GovernanceDealActionResponse{}, errors.New("invalid target operator")
+		}
+		op, ok := s.data.GovernanceOperators[key]
+		if !ok || !op.Enabled {
+			return wire.GovernanceDealActionResponse{}, errors.New("operator not found or already disabled")
+		}
+		op.Enabled = false
+		s.data.GovernanceOperators[key] = op
+	case "update_operator":
+		key := normalizeGovernanceOperator(proposal.TargetOperator)
+		if key == "" {
+			return wire.GovernanceDealActionResponse{}, errors.New("invalid target operator")
+		}
+		op, ok := s.data.GovernanceOperators[key]
+		if !ok || !op.Enabled {
+			return wire.GovernanceDealActionResponse{}, errors.New("operator not found or not enabled")
+		}
+		// Key rotation is not allowed via update_operator because address = f(pubkey).
+		// Use remove_operator + add_operator for key rotation.
+		if proposal.TargetPublicKey != "" && proposal.TargetPublicKey != op.PublicKey {
+			return wire.GovernanceDealActionResponse{}, errors.New("key rotation requires remove_operator + add_operator")
+		}
+		if len(proposal.TargetPermissions) > 0 {
+			op.Permissions = append([]string(nil), proposal.TargetPermissions...)
+		}
+		s.data.GovernanceOperators[key] = op
+	default:
+		return wire.GovernanceDealActionResponse{}, errors.New("invalid operator management action")
+	}
+
+	return wire.GovernanceDealActionResponse{
+		GovernanceType: "governance_" + proposal.Action,
+		UpdatedAtUnix:  now,
+	}, nil
+}
+
+// executeConfigChangeLocked handles update_config actions.
+// Must be called with s.mu held.
+func (s *Store) executeConfigChangeLocked(proposal wire.GovernanceProposal, now int64) (wire.GovernanceDealActionResponse, error) {
+	if proposal.TargetDataModerationThresholdNum > 0 && proposal.TargetDataModerationThresholdDen > 0 {
+		s.data.DataModerationThresholdNum = proposal.TargetDataModerationThresholdNum
+		s.data.DataModerationThresholdDen = proposal.TargetDataModerationThresholdDen
+	}
+	if proposal.TargetOperatorChangeThresholdNum > 0 && proposal.TargetOperatorChangeThresholdDen > 0 {
+		s.data.OperatorChangeThresholdNum = proposal.TargetOperatorChangeThresholdNum
+		s.data.OperatorChangeThresholdDen = proposal.TargetOperatorChangeThresholdDen
+	}
+
+	return wire.GovernanceDealActionResponse{
+		GovernanceType: "governance_update_config",
+		UpdatedAtUnix:  now,
+	}, nil
+}
+
+// executeMiningParamsChangeLocked handles update_mining_params actions.
+// Must be called with s.mu held.
+func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal, now int64) (wire.GovernanceDealActionResponse, error) {
+	if s.data.MiningParams == nil {
+		defaults := DefaultMiningParams()
+		s.data.MiningParams = &defaults
+	}
+	p := s.data.MiningParams
+
+	applyIfNonZero(&p.StorageReleaseRateBPS, proposal.TargetStorageReleaseRateBPS)
+	applyIfNonZero(&p.RetrievalReleaseRateBPS, proposal.TargetRetrievalReleaseRateBPS)
+	applyIfNonZero(&p.ValidatorReleaseRateBPS, proposal.TargetValidatorReleaseRateBPS)
+	applyIfNonZero(&p.StoredBytesWeightBPS, proposal.TargetStoredBytesWeightBPS)
+	applyIfNonZero(&p.ProofScoreWeightBPS, proposal.TargetProofScoreWeightBPS)
+	applyIfNonZero(&p.AvailabilityWeightBPS, proposal.TargetAvailabilityWeightBPS)
+	applyIfNonZero(&p.DecentralizationWeightBPS, proposal.TargetDecentralizationWeightBPS)
+	applyIfNonZero(&p.RetrievalRewardPerMiB, proposal.TargetRetrievalRewardPerMiB)
+	applyIfNonZero(&p.MaxRetrievalRewardPerWindow, proposal.TargetMaxRetrievalRewardPerWindow)
+	applyIfNonZero(&p.RepairRewardPerShard, proposal.TargetRepairRewardPerShard)
+	applyIfNonZero(&p.RepairPoolTakeoverBPS, proposal.TargetRepairPoolTakeoverBPS)
+	applyIfNonZero(&p.RepairPoolSubsidyBPS, proposal.TargetRepairPoolSubsidyBPS)
+	applyIfNonZero(&p.MinerDegradeThreshold, proposal.TargetMinerDegradeThreshold)
+	if proposal.TargetStorageProofSamples > 0 {
+		p.StorageProofSamples = proposal.TargetStorageProofSamples
+	}
+	applyIfNonZero(&p.ValidatorCommissionBPS, proposal.TargetValidatorCommissionBPS)
+	applyIfNonZero(&p.RetrievalWeightBPS, proposal.TargetRetrievalWeightBPS)
+
+	return wire.GovernanceDealActionResponse{
+		GovernanceType: "governance_update_mining_params",
+		UpdatedAtUnix:  now,
+	}, nil
+}
+
+// CancelGovernanceProposal allows the proposer to cancel their own pending proposal.
+func (s *Store) CancelGovernanceProposal(req wire.CreateGovernanceProposalRequest) (wire.CreateGovernanceProposalResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	proposer := normalizeGovernanceOperator(req.Proposer)
+	if proposer == "" {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("proposer is required")
+	}
+
+	// Look up the proposal by matching fields (find pending proposal by proposer).
+	var proposalID string
+	for id, p := range s.data.GovernanceProposals {
+		if p.Status != wire.GovProposalPending || normalizeGovernanceOperator(p.Proposer) != proposer {
+			continue
+		}
+		if p.Action != req.Action {
+			continue
+		}
+		if isOperatorManagementAction(p.Action) {
+			// Match operator management proposals by target_operator.
+			if normalizeGovernanceOperator(p.TargetOperator) == normalizeGovernanceOperator(req.TargetOperator) {
+				proposalID = id
+				break
+			}
+		} else if isConfigAction(p.Action) || isMiningParamsAction(p.Action) {
+			// Config and mining params proposals have no intent_id; match by action.
+			proposalID = id
+			break
+		} else {
+			// Match deal action proposals by intent_id.
+			if p.IntentID == req.IntentID {
+				proposalID = id
+				break
+			}
+		}
+	}
+	if proposalID == "" {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("no matching pending proposal found")
+	}
+
+	proposal := s.data.GovernanceProposals[proposalID]
+
+	// Verify the cancellation signature (same key as creation).
+	if _, ok := s.data.GovernanceOperators[proposer]; !ok {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("proposer is not a governance operator")
+	}
+	if err := wire.VerifyGovernanceProposal(req, proposer); err != nil {
+		return wire.CreateGovernanceProposalResponse{}, err
+	}
+
+	proposal.Status = wire.GovProposalCancelled
+	s.data.GovernanceProposals[proposalID] = proposal
+
+	resp := wire.CreateGovernanceProposalResponse{Proposal: proposal}
+	if err := s.saveLocked(); err != nil {
+		return wire.CreateGovernanceProposalResponse{}, err
+	}
+	return resp, nil
+}
+
+// GovernanceProposals lists proposals with optional status and intent filtering.
+func (s *Store) GovernanceProposals(status, intentID string) wire.GovernanceProposalListResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().Unix()
+	var proposals []wire.GovernanceProposal
+	votesMap := make(map[string][]wire.GovernanceVote)
+
+	// Collect proposal IDs for sorted iteration.
+	ids := make([]string, 0, len(s.data.GovernanceProposals))
+	for id := range s.data.GovernanceProposals {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		p := s.data.GovernanceProposals[id]
+
+		// Apply filters.
+		if status != "" && p.Status != status {
+			continue
+		}
+		if intentID != "" && p.IntentID != intentID {
+			continue
+		}
+
+		// Lazy expiration check for pending proposals.
+		if p.Status == wire.GovProposalPending && p.CreatedAtUnix+governanceProposalTTLSeconds < now {
+			p.Status = wire.GovProposalExpired
+			s.data.GovernanceProposals[id] = p
+		}
+
+		proposals = append(proposals, p)
+		if v, ok := s.data.GovernanceVotes[id]; ok && len(v) > 0 {
+			votesMap[id] = v
+		}
+	}
+
+	if proposals == nil {
+		proposals = []wire.GovernanceProposal{}
+	}
+	return wire.GovernanceProposalListResponse{
+		Proposals: proposals,
+		Votes:     votesMap,
+	}
+}
+
+// GovernanceOperators lists all governance operators and the current threshold.
+func (s *Store) GovernanceOperators() wire.GovernanceOperatorListResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	operators := make([]wire.GovernanceOperator, 0, len(s.data.GovernanceOperators))
+	for _, op := range s.data.GovernanceOperators {
+		operators = append(operators, op)
+	}
+	sort.Slice(operators, func(i, j int) bool {
+		return operators[i].Operator < operators[j].Operator
+	})
+
+	return wire.GovernanceOperatorListResponse{
+		Operators:                     operators,
+		DataModerationThreshold:       s.governanceThresholdLocked("freeze"),
+		OperatorChangeThreshold:       s.governanceThresholdLocked("add_operator"),
+		DataModerationThresholdNum:    s.data.DataModerationThresholdNum,
+		DataModerationThresholdDen:    s.data.DataModerationThresholdDen,
+		OperatorChangeThresholdNum:    s.data.OperatorChangeThresholdNum,
+		OperatorChangeThresholdDen:    s.data.OperatorChangeThresholdDen,
+	}
+}
+
+// ── Internal helpers ──
+
+// expireGovernanceProposalsLocked marks expired pending proposals.
+func (s *Store) expireGovernanceProposalsLocked(now int64) {
+	for id, p := range s.data.GovernanceProposals {
+		if p.Status == wire.GovProposalPending && p.CreatedAtUnix+governanceProposalTTLSeconds < now {
+			p.Status = wire.GovProposalExpired
+			s.data.GovernanceProposals[id] = p
+		}
+	}
+}
+
+// countGovernanceVotesLocked counts valid approval and rejection votes for a proposal.
+// Only votes from currently enabled operators are counted.
+func (s *Store) countGovernanceVotesLocked(proposalID string) (approve, reject int) {
+	votes := s.data.GovernanceVotes[proposalID]
+	for _, v := range votes {
+		voterAddr := normalizeGovernanceOperator(v.Voter)
+		op, ok := s.data.GovernanceOperators[voterAddr]
+		if !ok || !op.Enabled {
+			continue
+		}
+		if v.Approve {
+			approve++
+		} else {
+			reject++
+		}
+	}
+	return
+}
+
+// countEnabledOperatorsLocked returns the number of enabled governance operators.
+func (s *Store) countEnabledOperatorsLocked() int {
+	count := 0
+	for _, op := range s.data.GovernanceOperators {
+		if op.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+// governanceThresholdLocked computes the BFT threshold for enabled operators based on action type.
+// Data moderation actions use DataModerationThreshold (default 1/3).
+// Operator/config changes use OperatorChangeThreshold (default 2/3).
+func (s *Store) governanceThresholdLocked(action string) int {
+	n := s.countEnabledOperatorsLocked()
+	if n == 0 {
+		return 0
+	}
+	num := s.data.DataModerationThresholdNum
+	den := s.data.DataModerationThresholdDen
+	if isOperatorManagementAction(action) || isConfigAction(action) || isMiningParamsAction(action) {
+		num = s.data.OperatorChangeThresholdNum
+		den = s.data.OperatorChangeThresholdDen
+	}
+	if den <= 0 {
+		return n // fallback: require unanimous
+	}
+	// ceiling(n * num / den)
+	return (n*num + den - 1) / den
+}
+
+// validGovernanceAction checks if the action string is valid.
+func validGovernanceAction(action string) bool {
+	switch action {
+	case "freeze", "block", "legal_hold", "appeal",
+		"add_operator", "remove_operator", "update_operator",
+		"update_config", "update_mining_params":
+		return true
+	}
+	return false
+}
+
+// isOperatorManagementAction returns true for actions that manage governance operators.
+func isOperatorManagementAction(action string) bool {
+	switch action {
+	case "add_operator", "remove_operator", "update_operator":
+		return true
+	}
+	return false
+}
+
+// isConfigAction returns true for actions that change governance configuration.
+func isConfigAction(action string) bool {
+	return action == "update_config"
+}
+
+// isMiningParamsAction returns true for actions that change mining parameters.
+func isMiningParamsAction(action string) bool {
+	return action == "update_mining_params"
+}
+
+// validateGovernanceActionFields validates action-specific fields.
+func validateGovernanceActionFields(action string, expiresAtUnix, appealDeadlineUnix, now int64) error {
+	switch action {
+	case "freeze":
+		if expiresAtUnix <= now {
+			return errors.New("freeze action requires a future expires_at_unix")
+		}
+	case "block":
+		if appealDeadlineUnix > 0 && appealDeadlineUnix <= now {
+			return errors.New("block action requires appeal_deadline_unix to be in the future")
+		}
+	}
+	return nil
+}
+
+// validateOperatorManagementFields validates fields specific to operator management actions.
+func validateOperatorManagementFields(action string, targetOperator, targetPublicKey string, targetPermissions []string, operators map[string]wire.GovernanceOperator) error {
+	switch action {
+	case "add_operator":
+		if targetPublicKey == "" {
+			return errors.New("add_operator requires target_public_key")
+		}
+		// Derive address from ECDSA public key and check for duplicates.
+		derivedAddr := wire.GovernanceOperatorAddress(targetPublicKey)
+		if derivedAddr == "" {
+			return errors.New("add_operator target_public_key is not a valid ECDSA public key")
+		}
+		if existing, ok := operators[derivedAddr]; ok && existing.Enabled {
+			return errors.New("operator already exists and is enabled")
+		}
+		// If TargetOperator was provided, validate it matches the derived address.
+		if targetOperator != "" {
+			specified := normalizeGovernanceOperator(targetOperator)
+			if specified != "" && !strings.EqualFold(specified, derivedAddr) {
+				return errors.New("target_operator does not match derived address from public key")
+			}
+		}
+	case "remove_operator":
+		if targetOperator == "" {
+			return errors.New("remove_operator requires target_operator")
+		}
+		key := normalizeGovernanceOperator(targetOperator)
+		existing, ok := operators[key]
+		if !ok || !existing.Enabled {
+			return errors.New("operator not found or already disabled")
+		}
+	case "update_operator":
+		if targetOperator == "" {
+			return errors.New("update_operator requires target_operator")
+		}
+		if len(targetPermissions) == 0 {
+			return errors.New("update_operator requires target_permissions (key rotation requires remove_operator + add_operator)")
+		}
+		key := normalizeGovernanceOperator(targetOperator)
+		existing, ok := operators[key]
+		if !ok || !existing.Enabled {
+			return errors.New("operator not found or not enabled")
+		}
+		// Reject key rotation via update_operator.
+		if targetPublicKey != "" && targetPublicKey != existing.PublicKey {
+			return errors.New("key rotation requires remove_operator + add_operator")
+		}
+	}
+	return nil
+}
+
+// validateConfigChangeFields validates fields specific to update_config actions.
+func validateConfigChangeFields(req wire.CreateGovernanceProposalRequest) error {
+	hasDataMod := req.TargetDataModerationThresholdNum > 0 && req.TargetDataModerationThresholdDen > 0
+	hasOpChange := req.TargetOperatorChangeThresholdNum > 0 && req.TargetOperatorChangeThresholdDen > 0
+	if !hasDataMod && !hasOpChange {
+		return errors.New("update_config requires at least one threshold pair (num/den)")
+	}
+	if hasDataMod {
+		if req.TargetDataModerationThresholdNum > req.TargetDataModerationThresholdDen {
+			return errors.New("data moderation threshold numerator cannot exceed denominator")
+		}
+		if req.TargetDataModerationThresholdDen <= 0 {
+			return errors.New("data moderation threshold denominator must be positive")
+		}
+	}
+	if hasOpChange {
+		if req.TargetOperatorChangeThresholdNum > req.TargetOperatorChangeThresholdDen {
+			return errors.New("operator change threshold numerator cannot exceed denominator")
+		}
+		if req.TargetOperatorChangeThresholdDen <= 0 {
+			return errors.New("operator change threshold denominator must be positive")
+		}
+	}
+	return nil
+}
+
+// validateMiningParamsChangeFields validates fields specific to update_mining_params actions.
+// At least one target field must be non-zero.
+func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest) error {
+	if req.TargetStorageReleaseRateBPS != 0 ||
+		req.TargetRetrievalReleaseRateBPS != 0 ||
+		req.TargetValidatorReleaseRateBPS != 0 ||
+		req.TargetStoredBytesWeightBPS != 0 ||
+		req.TargetProofScoreWeightBPS != 0 ||
+		req.TargetAvailabilityWeightBPS != 0 ||
+		req.TargetDecentralizationWeightBPS != 0 ||
+		req.TargetRetrievalRewardPerMiB != 0 ||
+		req.TargetMaxRetrievalRewardPerWindow != 0 ||
+		req.TargetRepairRewardPerShard != 0 ||
+		req.TargetRepairPoolTakeoverBPS != 0 ||
+		req.TargetRepairPoolSubsidyBPS != 0 ||
+		req.TargetMinerDegradeThreshold != 0 ||
+		req.TargetStorageProofSamples != 0 ||
+		req.TargetValidatorCommissionBPS != 0 ||
+		req.TargetRetrievalWeightBPS != 0 {
+		return nil
+	}
+	return errors.New("update_mining_params requires at least one non-zero target field")
+}
+
+// abs64 returns the absolute value of an int64.
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}

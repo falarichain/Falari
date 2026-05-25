@@ -57,6 +57,7 @@ func (s *Store) CreateAddressShare(req wire.CreateAddressShareRequest) (wire.Cre
 		Algorithm:        req.Algorithm,
 		EncryptedDataKey: req.EncryptedDataKey,
 		Nonce:            req.Nonce,
+		KDF:              req.KDF,
 		ExpiresAtUnix:    req.ExpiresAtUnix,
 	}
 	return s.createShare(envelopeReq, wire.ShareModeAddress, recipient)

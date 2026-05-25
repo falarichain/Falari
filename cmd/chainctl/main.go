@@ -15,9 +15,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	chainpkg "chain/internal/chain"
@@ -70,12 +72,18 @@ func main() {
 		listDeleteTasks(os.Args[2:])
 	case "access-policy":
 		setAccessPolicy(os.Args[2:])
-	case "committee-freeze-deal":
-		committeeFreezeDeal(os.Args[2:])
-	case "governance-block-deal":
-		governanceBlockDeal(os.Args[2:])
-	case "governance-deal":
-		governanceDeal(os.Args[2:])
+	case "governance-keygen":
+		governanceKeygen(os.Args[2:])
+	case "governance-propose":
+		governancePropose(os.Args[2:])
+	case "governance-vote":
+		governanceVote(os.Args[2:])
+	case "governance-execute":
+		governanceExecute(os.Args[2:])
+	case "governance-proposals":
+		governanceProposals(os.Args[2:])
+	case "governance-operators":
+		governanceOperatorsList(os.Args[2:])
 	case "governance-audit":
 		listGovernanceAudit(os.Args[2:])
 	case "consensus":
@@ -124,6 +132,8 @@ func main() {
 		listPeers(os.Args[2:])
 	case "storage-providers":
 		storageProviders(os.Args[2:])
+	case "mine":
+		mine(os.Args[2:])
 	case "genesis":
 		genesisCommand(os.Args[2:])
 	default:
@@ -663,6 +673,89 @@ func finalize(args []string) {
 	fmt.Printf("finalized deal %s for intent %s\n", resp.DealID, resp.IntentID)
 }
 
+func mine(args []string) {
+	fs := flag.NewFlagSet("mine", flag.ExitOnError)
+	addr := fs.String("addr", ":9090", "HTTP listen address for upload/download service")
+	data := fs.String("data", "./data/miner1", "storage data directory")
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL for miner registration")
+	endpoint := fs.String("endpoint", "", "public endpoint registered on chain")
+	capacity := fs.Uint64("capacity", 1<<40, "declared storage capacity in bytes")
+	stake := fs.Uint64("stake", 1000, "declared miner stake")
+	faucet := fs.Bool("faucet", true, "request dev faucet funds for stake before registration")
+	autoProve := fs.Bool("auto-prove", true, "poll chain node and automatically submit storage proofs")
+	proveInterval := fs.Duration("prove-interval", 2*time.Second, "automatic proof polling interval")
+	autoRepair := fs.Bool("auto-repair", true, "poll chain node and automatically execute repair tasks")
+	repairInterval := fs.Duration("repair-interval", 10*time.Second, "automatic repair polling interval")
+	autoDelete := fs.Bool("auto-delete", true, "poll chain node and automatically execute delete tasks")
+	deleteInterval := fs.Duration("delete-interval", 10*time.Second, "automatic delete polling interval")
+	p2pListen := fs.String("p2p-listen", "", "comma-separated libp2p provider listen multiaddrs")
+	p2pPeers := fs.String("p2p-peers", "", "comma-separated libp2p provider peer multiaddrs")
+	p2pTopic := fs.String("p2p-topic", "storage-chain/providers/devnet", "libp2p provider discovery topic")
+	fs.Parse(args)
+
+	node, err := storage.OpenNode(*data)
+	if err != nil {
+		log.Fatalf("open mining node: %v", err)
+	}
+	registeredEndpoint := *endpoint
+	if registeredEndpoint == "" {
+		registeredEndpoint = "http://localhost" + *addr
+	}
+	if *chainURL == "" {
+		log.Fatal("-chain is required to enable mining")
+	}
+	if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake, *faucet); err != nil {
+		log.Fatalf("register miner: %v", err)
+	}
+	fmt.Printf("mining enabled address=%s endpoint=%s capacity=%d stake=%d\n", node.Address(), registeredEndpoint, *capacity, *stake)
+	fmt.Println("upload/download access service is mandatory while mining is enabled")
+
+	if *autoProve {
+		node.StartAutoProver(*chainURL, *proveInterval)
+	}
+	if *autoRepair {
+		node.StartAutoRepairer(*chainURL, *repairInterval)
+	}
+	if *autoDelete {
+		node.StartAutoDeleter(*chainURL, *deleteInterval)
+	}
+
+	var providerNetwork *storage.ProviderNetwork
+	if *p2pListen != "" || *p2pPeers != "" {
+		providerNetwork, err = storage.StartProviderNetwork(node, *p2pListen, *p2pPeers, *p2pTopic, registeredEndpoint, *capacity)
+		if err != nil {
+			log.Fatalf("start provider discovery: %v", err)
+		}
+		defer providerNetwork.Close()
+		fmt.Printf("provider discovery enabled peer_id=%s addrs=%v\n", providerNetwork.PeerID(), providerNetwork.Addrs())
+	}
+	node.StartProviderReporter(*chainURL, registeredEndpoint, *capacity, 30*time.Second, func() (string, []string) {
+		if providerNetwork == nil {
+			return "", nil
+		}
+		return providerNetwork.PeerID(), providerNetwork.Addrs()
+	})
+
+	server := storage.NewServerWithProviderNetwork(node, providerNetwork)
+	httpServer := &http.Server{
+		Addr:    *addr,
+		Handler: server.Routes(),
+	}
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("mining access service error: %v", err)
+		}
+	}()
+	fmt.Printf("mining access service listening on %s\n", *addr)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	_ = httpServer.Shutdown(shutdownCtx)
+}
+
 func settleIntent(args []string) {
 	fs := flag.NewFlagSet("settle-intent", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
@@ -902,85 +995,284 @@ func setAccessPolicy(args []string) {
 	fmt.Printf("access updated intent=%s access=%s moderation=%s\n", resp.IntentID, resp.AccessStatus, resp.ModerationStatus)
 }
 
-func governanceDeal(args []string) {
-	fs := flag.NewFlagSet("governance-deal", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	intentID := fs.String("intent", "", "intent id")
-	operator := fs.String("operator", "committee", "operator identity")
-	action := fs.String("action", "freeze", "action: freeze, block, legal_hold, appeal")
-	reasonHash := fs.String("reason-hash", "", "required reason hash")
-	expiresAtUnix := fs.Int64("expires-at-unix", 0, "required future unix timestamp for temporary freeze")
-	preserveStorage := fs.Bool("preserve-storage", true, "keep storage responsibility active")
+func governanceKeygen(args []string) {
+	fs := flag.NewFlagSet("governance-keygen", flag.ExitOnError)
+	out := fs.String("out", "", "output key file path")
 	fs.Parse(args)
 
-	if *intentID == "" || *reasonHash == "" {
-		log.Fatal("-intent and -reason-hash are required")
+	if *out == "" {
+		log.Fatal("-out is required")
 	}
-	var resp wire.GovernanceDealActionResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/governance", wire.GovernanceDealActionRequest{
-		IntentID:        *intentID,
-		Operator:        *operator,
-		Action:          *action,
-		ReasonHash:      *reasonHash,
-		ExpiresAtUnix:   *expiresAtUnix,
-		PreserveStorage: *preserveStorage,
-	}, &resp); err != nil {
-		log.Fatal(err)
+	privateKey, err := ethcrypto.GenerateKey()
+	if err != nil {
+		log.Fatalf("failed to generate key: %v", err)
 	}
-	fmt.Printf("governance action intent=%s access=%s moderation=%s storage=%s expires=%d\n",
-		resp.IntentID, resp.AccessStatus, resp.ModerationStatus, resp.StorageStatus, resp.ModerationExpiresAtUnix)
+	keyFile := struct {
+		Address    string `json:"address"`
+		PublicKey  string `json:"public_key"`
+		PrivateKey string `json:"private_key"`
+	}{
+		Address:    wire.AccountAddress(&privateKey.PublicKey),
+		PublicKey:  encodeHex(ethcrypto.FromECDSAPub(&privateKey.PublicKey)),
+		PrivateKey: encodeHex(ethcrypto.FromECDSA(privateKey)),
+	}
+	data, err := json.MarshalIndent(keyFile, "", "  ")
+	if err != nil {
+		log.Fatalf("failed to marshal key: %v", err)
+	}
+	if err := os.WriteFile(*out, data, 0600); err != nil {
+		log.Fatalf("failed to write key file: %v", err)
+	}
+	fmt.Printf("governance key generated: address=%s public_key=%s\n", keyFile.Address, keyFile.PublicKey)
 }
 
-func committeeFreezeDeal(args []string) {
-	fs := flag.NewFlagSet("committee-freeze-deal", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	intentID := fs.String("intent", "", "intent id")
-	operator := fs.String("operator", "committee", "operator identity")
-	reasonHash := fs.String("reason-hash", "", "required reason hash")
-	expiresAtUnix := fs.Int64("expires-at-unix", 0, "required future unix timestamp for temporary freeze")
-	fs.Parse(args)
-
-	if *intentID == "" || *reasonHash == "" || *expiresAtUnix == 0 {
-		log.Fatal("-intent, -reason-hash, and -expires-at-unix are required")
-	}
-	var resp wire.GovernanceDealActionResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/governance/freeze", wire.CommitteeFreezeDealRequest{
-		IntentID:      *intentID,
-		Operator:      *operator,
-		ReasonHash:    *reasonHash,
-		ExpiresAtUnix: *expiresAtUnix,
-	}, &resp); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("committee freeze intent=%s type=%s moderation=%s access=%s expires=%d\n",
-		resp.IntentID, resp.GovernanceType, resp.ModerationStatus, resp.AccessStatus, resp.ModerationExpiresAtUnix)
+type governanceKeyFile struct {
+	Address    string `json:"address"`
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
 }
 
-func governanceBlockDeal(args []string) {
-	fs := flag.NewFlagSet("governance-block-deal", flag.ExitOnError)
+func loadGovernanceKey(path string) governanceKeyFile {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("failed to read key file: %v", err)
+	}
+	var key governanceKeyFile
+	if err := json.Unmarshal(data, &key); err != nil {
+		log.Fatalf("failed to parse key file: %v", err)
+	}
+	return key
+}
+
+func loadGovernanceECDSAKey(path string) *ecdsa.PrivateKey {
+	keyFile := loadGovernanceKey(path)
+	privateKey, err := ethcrypto.HexToECDSA(trimHexPrefix(keyFile.PrivateKey))
+	if err != nil {
+		log.Fatalf("failed to parse ECDSA private key: %v", err)
+	}
+	return privateKey
+}
+
+func governancePropose(args []string) {
+	fs := flag.NewFlagSet("governance-propose", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	intentID := fs.String("intent", "", "intent id")
-	operator := fs.String("operator", "committee", "operator identity")
+	keyPath := fs.String("key", "", "path to governance operator key file")
+	intentID := fs.String("intent", "", "intent id (required for deal actions)")
+	action := fs.String("action", "freeze", "action: freeze, block, legal_hold, appeal, add_operator, remove_operator, update_operator, update_config, update_mining_params")
 	reasonHash := fs.String("reason-hash", "", "required reason hash")
+	expiresAtUnix := fs.Int64("expires-at-unix", 0, "future unix timestamp for freeze expiration")
 	preserveStorage := fs.Bool("preserve-storage", true, "keep storage responsibility active")
-	appealDeadlineUnix := fs.Int64("appeal-deadline-unix", 0, "optional appeal deadline unix timestamp")
+	appealDeadlineUnix := fs.Int64("appeal-deadline-unix", 0, "appeal deadline unix timestamp")
+	targetOperator := fs.String("target-operator", "", "target operator address (for add/remove/update_operator)")
+	targetPublicKey := fs.String("target-public-key", "", "target operator public key (for add/update_operator)")
+	targetPermissions := fs.String("target-permissions", "", "comma-separated permissions (for add/update_operator)")
+	dataModThresholdNum := fs.Int("data-mod-threshold-num", 0, "data moderation threshold numerator (for update_config)")
+	dataModThresholdDen := fs.Int("data-mod-threshold-den", 0, "data moderation threshold denominator (for update_config)")
+	opChangeThresholdNum := fs.Int("op-change-threshold-num", 0, "operator change threshold numerator (for update_config)")
+	opChangeThresholdDen := fs.Int("op-change-threshold-den", 0, "operator change threshold denominator (for update_config)")
+	// Mining params flags.
+	storageReleaseRateBPS := fs.Uint64("storage-release-rate-bps", 0, "storage pool release rate BPS (for update_mining_params)")
+	retrievalReleaseRateBPS := fs.Uint64("retrieval-release-rate-bps", 0, "retrieval pool release rate BPS (for update_mining_params)")
+	validatorReleaseRateBPS := fs.Uint64("validator-release-rate-bps", 0, "validator pool release rate BPS (for update_mining_params)")
+	storedBytesWeightBPS := fs.Uint64("stored-bytes-weight-bps", 0, "stored bytes weight factor BPS (for update_mining_params)")
+	proofScoreWeightBPS := fs.Uint64("proof-score-weight-bps", 0, "proof score weight factor BPS (for update_mining_params)")
+	availabilityWeightBPS := fs.Uint64("availability-weight-bps", 0, "availability weight factor BPS (for update_mining_params)")
+	decentralizationWeightBPS := fs.Uint64("decentralization-weight-bps", 0, "decentralization weight factor BPS (for update_mining_params)")
+	retrievalRewardPerMiB := fs.Uint64("retrieval-reward-per-mib", 0, "retrieval reward per MiB (for update_mining_params)")
+	maxRetrievalRewardPerWindow := fs.Uint64("max-retrieval-reward-per-window", 0, "max retrieval reward per window (for update_mining_params)")
+	repairRewardPerShard := fs.Uint64("repair-reward-per-shard", 0, "repair reward per shard (for update_mining_params)")
+	minerDegradeThreshold := fs.Uint64("miner-degrade-threshold", 0, "miner degrade threshold (for update_mining_params)")
+	storageProofSamples := fs.Int("storage-proof-samples", 0, "storage proof samples count (for update_mining_params)")
+	validatorCommissionBPS := fs.Uint64("validator-commission-bps", 0, "validator commission BPS (for update_mining_params)")
+	retrievalWeightBPS := fs.Uint64("retrieval-weight-bps", 0, "retrieval weight BPS (for update_mining_params)")
 	fs.Parse(args)
 
-	if *intentID == "" || *reasonHash == "" {
-		log.Fatal("-intent and -reason-hash are required")
+	if *keyPath == "" || *reasonHash == "" {
+		log.Fatal("-key and -reason-hash are required")
 	}
-	var resp wire.GovernanceDealActionResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/governance/block", wire.GovernanceBlockDealRequest{
-		IntentID:           *intentID,
-		Operator:           *operator,
-		ReasonHash:         *reasonHash,
-		PreserveStorage:    *preserveStorage,
-		AppealDeadlineUnix: *appealDeadlineUnix,
+
+	isOpMgmt := *action == "add_operator" || *action == "remove_operator" || *action == "update_operator"
+	isConfig := *action == "update_config"
+	isMiningParams := *action == "update_mining_params"
+	if !isOpMgmt && !isConfig && !isMiningParams && *intentID == "" {
+		log.Fatal("-intent is required for deal actions")
+	}
+
+	key := loadGovernanceKey(*keyPath)
+	privKey := loadGovernanceECDSAKey(*keyPath)
+
+	var permissions []string
+	if *targetPermissions != "" {
+		for _, p := range strings.Split(*targetPermissions, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				permissions = append(permissions, p)
+			}
+		}
+	}
+
+	now := time.Now().Unix()
+	req := wire.CreateGovernanceProposalRequest{
+		Proposer:                           key.Address,
+		IntentID:                           *intentID,
+		Action:                             *action,
+		ReasonHash:                         *reasonHash,
+		ExpiresAtUnix:                      *expiresAtUnix,
+		PreserveStorage:                    *preserveStorage,
+		AppealDeadlineUnix:                 *appealDeadlineUnix,
+		TargetOperator:                     *targetOperator,
+		TargetPublicKey:                    *targetPublicKey,
+		TargetPermissions:                  permissions,
+		TargetDataModerationThresholdNum:   *dataModThresholdNum,
+		TargetDataModerationThresholdDen:   *dataModThresholdDen,
+		TargetOperatorChangeThresholdNum:   *opChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:   *opChangeThresholdDen,
+		TargetStorageReleaseRateBPS:        *storageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:      *retrievalReleaseRateBPS,
+		TargetValidatorReleaseRateBPS:      *validatorReleaseRateBPS,
+		TargetStoredBytesWeightBPS:         *storedBytesWeightBPS,
+		TargetProofScoreWeightBPS:          *proofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:        *availabilityWeightBPS,
+		TargetDecentralizationWeightBPS:    *decentralizationWeightBPS,
+		TargetRetrievalRewardPerMiB:        *retrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow:  *maxRetrievalRewardPerWindow,
+		TargetRepairRewardPerShard:         *repairRewardPerShard,
+		TargetMinerDegradeThreshold:        *minerDegradeThreshold,
+		TargetStorageProofSamples:          *storageProofSamples,
+		TargetValidatorCommissionBPS:       *validatorCommissionBPS,
+		TargetRetrievalWeightBPS:           *retrievalWeightBPS,
+		CreatedAtUnix:                      now,
+	}
+	if err := wire.SignGovernanceProposal(&req, privKey); err != nil {
+		log.Fatalf("failed to sign proposal: %v", err)
+	}
+	var resp wire.CreateGovernanceProposalResponse
+	if err := client.NewHTTP(*chainURL).Post("/governance/proposals", req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	if isOpMgmt {
+		fmt.Printf("proposal created: id=%s action=%s target=%s status=%s\n",
+			resp.Proposal.ProposalID, resp.Proposal.Action, resp.Proposal.TargetOperator, resp.Proposal.Status)
+	} else if isConfig {
+		fmt.Printf("proposal created: id=%s action=%s data_mod=%d/%d op_change=%d/%d status=%s\n",
+			resp.Proposal.ProposalID, resp.Proposal.Action,
+			resp.Proposal.TargetDataModerationThresholdNum, resp.Proposal.TargetDataModerationThresholdDen,
+			resp.Proposal.TargetOperatorChangeThresholdNum, resp.Proposal.TargetOperatorChangeThresholdDen,
+			resp.Proposal.Status)
+	} else if isMiningParams {
+		fmt.Printf("proposal created: id=%s action=%s status=%s\n",
+			resp.Proposal.ProposalID, resp.Proposal.Action, resp.Proposal.Status)
+	} else {
+		fmt.Printf("proposal created: id=%s action=%s intent=%s status=%s\n",
+			resp.Proposal.ProposalID, resp.Proposal.Action, resp.Proposal.IntentID, resp.Proposal.Status)
+	}
+}
+
+func governanceVote(args []string) {
+	fs := flag.NewFlagSet("governance-vote", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	keyPath := fs.String("key", "", "path to governance operator key file")
+	proposalID := fs.String("proposal", "", "proposal id")
+	approve := fs.Bool("approve", true, "approve or reject the proposal")
+	fs.Parse(args)
+
+	if *keyPath == "" || *proposalID == "" {
+		log.Fatal("-key and -proposal are required")
+	}
+	key := loadGovernanceKey(*keyPath)
+	privKey := loadGovernanceECDSAKey(*keyPath)
+
+	now := time.Now().Unix()
+	req := wire.CastGovernanceVoteRequest{
+		ProposalID:    *proposalID,
+		Voter:         key.Address,
+		Approve:       *approve,
+		CreatedAtUnix: now,
+	}
+	if err := wire.SignGovernanceVote(&req, privKey); err != nil {
+		log.Fatalf("failed to sign vote: %v", err)
+	}
+	var resp wire.CastGovernanceVoteResponse
+	if err := client.NewHTTP(*chainURL).Post("/governance/votes", req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("vote cast: proposal=%s voter=%s approve=%v approvals=%d rejects=%d threshold=%d executed=%v\n",
+		resp.Vote.ProposalID, resp.Vote.Voter, resp.Vote.Approve, resp.ApproveCount, resp.RejectCount, resp.Threshold, resp.Executed)
+}
+
+func governanceExecute(args []string) {
+	fs := flag.NewFlagSet("governance-execute", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	proposalID := fs.String("proposal", "", "proposal id")
+	fs.Parse(args)
+
+	if *proposalID == "" {
+		log.Fatal("-proposal is required")
+	}
+	var resp wire.ExecuteGovernanceProposalResponse
+	if err := client.NewHTTP(*chainURL).Post("/governance/execute", wire.ExecuteGovernanceProposalRequest{
+		ProposalID: *proposalID,
 	}, &resp); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("governance block intent=%s type=%s moderation=%s access=%s storage=%s appeal=%d\n",
-		resp.IntentID, resp.GovernanceType, resp.ModerationStatus, resp.AccessStatus, resp.StorageStatus, resp.AppealDeadlineUnix)
+	fmt.Printf("proposal executed: id=%s status=%s action=%s access=%s moderation=%s storage=%s\n",
+		resp.Proposal.ProposalID, resp.Proposal.Status, resp.Proposal.Action,
+		resp.GovernanceResult.AccessStatus, resp.GovernanceResult.ModerationStatus, resp.GovernanceResult.StorageStatus)
+}
+
+func governanceProposals(args []string) {
+	fs := flag.NewFlagSet("governance-proposals", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	status := fs.String("status", "", "filter by status: pending, executed, rejected, expired, cancelled")
+	intentID := fs.String("intent", "", "filter by intent id")
+	fs.Parse(args)
+
+	var resp wire.GovernanceProposalListResponse
+	query := url.Values{}
+	if *status != "" {
+		query.Set("status", *status)
+	}
+	if *intentID != "" {
+		query.Set("intent", *intentID)
+	}
+	path := "/governance/proposals"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	if err := client.NewHTTP(*chainURL).Get(path, &resp); err != nil {
+		log.Fatal(err)
+	}
+	for _, p := range resp.Proposals {
+		votes := resp.Votes[p.ProposalID]
+		fmt.Printf("proposal=%s proposer=%s action=%s intent=%s status=%s votes=%d created=%d\n",
+			p.ProposalID, p.Proposer, p.Action, p.IntentID, p.Status, len(votes), p.CreatedAtUnix)
+		for _, v := range votes {
+			fmt.Printf("  vote: voter=%s approve=%v at=%d\n", v.Voter, v.Approve, v.CreatedAtUnix)
+		}
+	}
+}
+
+func governanceOperatorsList(args []string) {
+	fs := flag.NewFlagSet("governance-operators", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	fs.Parse(args)
+
+	var resp wire.GovernanceOperatorListResponse
+	if err := client.NewHTTP(*chainURL).Get("/governance/operators", &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("data moderation threshold: %d/%d (num=%d den=%d)\n",
+		resp.DataModerationThreshold, len(resp.Operators), resp.DataModerationThresholdNum, resp.DataModerationThresholdDen)
+	fmt.Printf("operator change threshold: %d/%d (num=%d den=%d)\n\n",
+		resp.OperatorChangeThreshold, len(resp.Operators), resp.OperatorChangeThresholdNum, resp.OperatorChangeThresholdDen)
+	for _, op := range resp.Operators {
+		hasKey := "no"
+		if op.PublicKey != "" {
+			hasKey = "yes"
+		}
+		fmt.Printf("operator=%s enabled=%v key=%s permissions=%v\n",
+			op.Operator, op.Enabled, hasKey, op.Permissions)
+	}
 }
 
 func listDeleteTasks(args []string) {
@@ -2940,10 +3232,10 @@ func genesisInit(args []string) {
 		ChainID:     *chainID,
 		GenesisTime: now,
 		RewardPools: &wire.GenesisRewardPools{
-			StoragePoolRemaining:   6_300_000_000,
-			RetrievalPoolRemaining: 1_200_000_000,
+			StoragePoolRemaining:   6_000_000_000,
+			RetrievalPoolRemaining: 1_000_000_000,
 			ValidatorPoolRemaining: 1_000_000_000,
-			RepairPoolRemaining:    500_000_000,
+			RepairPoolRemaining:    1_000_000_000,
 		},
 	}
 
@@ -2980,15 +3272,20 @@ func usage() {
   chainctl terminate-deal -chain http://localhost:8080 -plan ./upload-plan.json
   chainctl delete-tasks  -chain http://localhost:8080 -intent intent_xxx
   chainctl access-policy -chain http://localhost:8080 -intent intent_xxx -user user_demo -status blocked -reason-hash hash
-  chainctl committee-freeze-deal -chain http://localhost:8080 -intent intent_xxx -reason-hash hash -expires-at-unix 1893456000
-  chainctl governance-block-deal -chain http://localhost:8080 -intent intent_xxx -reason-hash hash -appeal-deadline-unix 1893542400
-  chainctl governance-deal -chain http://localhost:8080 -intent intent_xxx -action freeze -reason-hash hash -expires-at-unix 1893456000
+  chainctl governance-keygen -out ./governance-key.json
+  chainctl governance-propose -chain http://localhost:8080 -key ./governance-key.json -intent intent_xxx -action freeze -reason-hash hash -expires-at-unix 1893456000
+  chainctl governance-propose -chain http://localhost:8080 -key ./governance-key.json -action add_operator -reason-hash hash -target-operator addr -target-public-key base64key -target-permissions freeze,block
+  chainctl governance-vote -chain http://localhost:8080 -key ./governance-key.json -proposal gov_proposal_xxx -approve
+  chainctl governance-execute -chain http://localhost:8080 -proposal gov_proposal_xxx
+  chainctl governance-proposals -chain http://localhost:8080 -status pending
+  chainctl governance-operators -chain http://localhost:8080
   chainctl governance-audit -chain http://localhost:8080 -intent intent_xxx
   chainctl retrieval-receipt -chain http://localhost:8080 -storage http://localhost:9090 -intent intent_xxx -shard shard_hash -key ./alice.json
   chainctl download      -plan ./upload-plan.json -out ./restored.bin
   chainctl download      -chain http://localhost:8080 -intent intent_xxx -out ./restored.bin
   chainctl download      -chain http://localhost:8080 -record record_xxx -out ./restored.bin
   chainctl download      -chain http://localhost:8080 -intent intent_xxx -out ./restored.bin -key ./storage.key
+  chainctl mine          -chain http://localhost:8080 -addr :9090 -data ./data/miner1 -endpoint http://localhost:9090
   chainctl repair        -chain http://localhost:8080 -storage http://localhost:9090,http://localhost:9091 -plan ./upload-plan.json -unavailable miner_xxx
   chainctl prove         -chain http://localhost:8080 -intent intent_xxx -count 3
   chainctl storage-providers -chain http://localhost:8080 -shard shard_hash

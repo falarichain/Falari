@@ -30,7 +30,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /upgrade", s.setUpgrade)
 	mux.HandleFunc("GET /upgrade", s.getUpgrade)
 	mux.HandleFunc("GET /admin/mining-params", s.getMiningParams)
-	mux.HandleFunc("POST /admin/mining-params", s.updateMiningParams)
 	mux.HandleFunc("GET /intents/{id}/health", s.intentHealth)
 	mux.HandleFunc("GET /intents/health", s.allDealHealth)
 	mux.HandleFunc("POST /storage/quote", s.storageQuote)
@@ -43,11 +42,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /intents/{id}/renew", s.renewDeal)
 	mux.HandleFunc("POST /intents/terminate", s.terminateDeal)
 	mux.HandleFunc("POST /intents/access", s.setAccessPolicy)
-	mux.HandleFunc("POST /intents/governance", s.governanceDealAction)
-	mux.HandleFunc("POST /intents/governance/freeze", s.committeeFreezeDeal)
-	mux.HandleFunc("POST /intents/governance/block", s.governanceBlockDeal)
+	mux.HandleFunc("POST /governance/proposals", s.createGovernanceProposal)
+	mux.HandleFunc("POST /governance/votes", s.castGovernanceVote)
+	mux.HandleFunc("POST /governance/execute", s.executeGovernanceProposal)
+	mux.HandleFunc("POST /governance/cancel", s.cancelGovernanceProposal)
+	mux.HandleFunc("GET /governance/proposals", s.listGovernanceProposals)
+	mux.HandleFunc("GET /governance/operators", s.listGovernanceOperators)
 	mux.HandleFunc("GET /intents/delete-tasks", s.listDeleteTasks)
 	mux.HandleFunc("GET /intents/governance/audit", s.listGovernanceAudit)
+	mux.HandleFunc("GET /governance/blacklist", s.getBlacklist)
 	mux.HandleFunc("GET /manifests/", s.getManifest)
 	mux.HandleFunc("POST /collections", s.createCollection)
 	mux.HandleFunc("GET /collections/", s.getCollection)
@@ -315,12 +318,12 @@ func (s *Server) setAccessPolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) governanceDealAction(w http.ResponseWriter, r *http.Request) {
-	var req wire.GovernanceDealActionRequest
+func (s *Server) createGovernanceProposal(w http.ResponseWriter, r *http.Request) {
+	var req wire.CreateGovernanceProposalRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	resp, err := s.store.GovernanceDealAction(req)
+	resp, err := s.store.CreateGovernanceProposal(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -328,12 +331,12 @@ func (s *Server) governanceDealAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) committeeFreezeDeal(w http.ResponseWriter, r *http.Request) {
-	var req wire.CommitteeFreezeDealRequest
+func (s *Server) castGovernanceVote(w http.ResponseWriter, r *http.Request) {
+	var req wire.CastGovernanceVoteRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	resp, err := s.store.CommitteeFreezeDeal(req)
+	resp, err := s.store.CastGovernanceVote(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -341,16 +344,44 @@ func (s *Server) committeeFreezeDeal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) governanceBlockDeal(w http.ResponseWriter, r *http.Request) {
-	var req wire.GovernanceBlockDealRequest
+func (s *Server) executeGovernanceProposal(w http.ResponseWriter, r *http.Request) {
+	var req wire.ExecuteGovernanceProposalRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	resp, err := s.store.GovernanceBlockDeal(req)
+	resp, err := s.store.ExecuteGovernanceProposal(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) cancelGovernanceProposal(w http.ResponseWriter, r *http.Request) {
+	var req wire.CreateGovernanceProposalRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.CancelGovernanceProposal(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) listGovernanceProposals(w http.ResponseWriter, r *http.Request) {
+	resp := s.store.GovernanceProposals(r.URL.Query().Get("status"), r.URL.Query().Get("intent"))
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) listGovernanceOperators(w http.ResponseWriter, r *http.Request) {
+	resp := s.store.GovernanceOperators()
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) getBlacklist(w http.ResponseWriter, r *http.Request) {
+	resp := s.store.Blacklist()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -976,19 +1007,6 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getMiningParams(w http.ResponseWriter, _ *http.Request) {
 	params := s.store.GetMiningParams()
 	writeJSON(w, http.StatusOK, params)
-}
-
-func (s *Server) updateMiningParams(w http.ResponseWriter, r *http.Request) {
-	var req MiningParams
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	updated, err := s.store.UpdateMiningParams(req)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {

@@ -25,9 +25,10 @@ var levelDBStateKey = []byte("state:snapshot")
 
 const defaultBaseFee uint64 = 1
 const defaultTargetBlockTxs = 10
-const defaultStorageBasePricePerGiBMonth uint64 = 1
+const defaultStorageBasePrice uint64 = 1
 const defaultStorageMinimumFee uint64 = 1
-const defaultPermanentStorageDuration = int64(10 * 365 * 24 * 60 * 60)
+const defaultStorageBurnBPS uint64 = 300
+const defaultPermanentStorageDuration = int64(100 * 365 * 24 * 60 * 60)
 const defaultRetrievalRateWindow = int64(3600)
 const defaultRetrievalRateDecayDivisor uint64 = 2
 const defaultRetrievalRewardHoldDuration = int64(3600)
@@ -94,6 +95,17 @@ type State struct {
 	ConsensusProposer       string                                    `json:"consensus_proposer"`
 	UpgradePlan             consensus.UpgradePlan                     `json:"upgrade_plan"`
 	AgentKeys               map[string]*wire.AgentKey                 `json:"agent_keys"`
+	BlacklistedShards       map[string]wire.BlacklistEntry            `json:"blacklisted_shards"`
+	GovernanceProposals     map[string]wire.GovernanceProposal        `json:"governance_proposals"`
+	GovernanceVotes         map[string][]wire.GovernanceVote          `json:"governance_votes"`
+
+	// Governance threshold configuration (numerator/denominator).
+	// DataModerationThreshold applies to freeze/block/legal_hold/appeal.
+	// OperatorChangeThreshold applies to add/remove/update_operator and update_config.
+	DataModerationThresholdNum   int `json:"data_moderation_threshold_num"`
+	DataModerationThresholdDen   int `json:"data_moderation_threshold_den"`
+	OperatorChangeThresholdNum   int `json:"operator_change_threshold_num"`
+	OperatorChangeThresholdDen   int `json:"operator_change_threshold_den"`
 }
 
 type Store struct {
@@ -229,7 +241,14 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 		}
 	}
 	for _, operator := range doc.GovernanceOperators {
-		key := normalizeGovernanceOperator(operator.Operator)
+		key := ""
+		// Derive operator address from ECDSA public key when available.
+		if operator.PublicKey != "" {
+			key = wire.GovernanceOperatorAddress(operator.PublicKey)
+		}
+		if key == "" {
+			key = normalizeGovernanceOperator(operator.Operator)
+		}
 		if key == "" {
 			continue
 		}
@@ -239,11 +258,17 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 		}
 		state.GovernanceOperators[key] = wire.GovernanceOperator{
 			Operator:      key,
+			PublicKey:     operator.PublicKey,
 			Permissions:   append([]string(nil), operator.Permissions...),
 			Enabled:       enabled,
 			CreatedAtUnix: doc.GenesisTime,
 		}
 	}
+	// Load governance threshold configuration from genesis.
+	state.DataModerationThresholdNum = doc.DataModerationThresholdNum
+	state.DataModerationThresholdDen = doc.DataModerationThresholdDen
+	state.OperatorChangeThresholdNum = doc.OperatorChangeThresholdNum
+	state.OperatorChangeThresholdDen = doc.OperatorChangeThresholdDen
 	return state
 }
 
@@ -288,6 +313,13 @@ func newState() State {
 		AppliedTxs:              map[string]bool{},
 		ConfirmedTxs:            map[string]bool{},
 		AgentKeys:               map[string]*wire.AgentKey{},
+		GovernanceProposals:     map[string]wire.GovernanceProposal{},
+		GovernanceVotes:         map[string][]wire.GovernanceVote{},
+		// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
+		DataModerationThresholdNum: 1,
+		DataModerationThresholdDen: 3,
+		OperatorChangeThresholdNum: 2,
+		OperatorChangeThresholdDen: 3,
 	}
 }
 
@@ -343,7 +375,7 @@ func normalizeState(state *State) {
 	if state.FeeChargedTxs == nil {
 		state.FeeChargedTxs = map[string]bool{}
 	}
-	if state.StoragePricing.BasePricePerGiBMonth == 0 {
+	if state.StoragePricing.BasePrice == 0 {
 		state.StoragePricing = defaultStoragePricing()
 	}
 	if state.StoragePricing.MinimumFee == 0 {
@@ -418,9 +450,34 @@ func normalizeState(state *State) {
 	if state.AgentKeys == nil {
 		state.AgentKeys = map[string]*wire.AgentKey{}
 	}
+	if state.GovernanceProposals == nil {
+		state.GovernanceProposals = map[string]wire.GovernanceProposal{}
+	}
+	if state.GovernanceVotes == nil {
+		state.GovernanceVotes = map[string][]wire.GovernanceVote{}
+	}
+	// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
+	if state.DataModerationThresholdNum == 0 || state.DataModerationThresholdDen == 0 {
+		state.DataModerationThresholdNum = 1
+		state.DataModerationThresholdDen = 3
+	}
+	if state.OperatorChangeThresholdNum == 0 || state.OperatorChangeThresholdDen == 0 {
+		state.OperatorChangeThresholdNum = 2
+		state.OperatorChangeThresholdDen = 3
+	}
 	if state.MiningParams == nil {
 		defaults := DefaultMiningParams()
 		state.MiningParams = &defaults
+	}
+	for address, miner := range state.Miners {
+		if miner.Status == wire.MinerStatusActive || miner.Status == wire.MinerStatusDegraded || miner.Status == wire.MinerStatusJailed {
+			miner.AccessServiceRequired = true
+			if !miner.UploadServiceEnabled && !miner.DownloadServiceEnabled {
+				miner.UploadServiceEnabled = true
+				miner.DownloadServiceEnabled = true
+			}
+			state.Miners[address] = miner
+		}
 	}
 	for address, account := range state.Accounts {
 		normalized := wire.NormalizeAddress(address)
@@ -493,9 +550,9 @@ func defaultFeeMarket() wire.FeeMarket {
 
 func defaultStoragePricing() wire.StoragePricing {
 	return wire.StoragePricing{
-		BasePricePerGiBMonth: defaultStorageBasePricePerGiBMonth,
-		MinimumFee:           defaultStorageMinimumFee,
-		PermanentDuration:    defaultPermanentStorageDuration,
+		BasePrice:         defaultStorageBasePrice,
+		MinimumFee:        defaultStorageMinimumFee,
+		PermanentDuration: defaultPermanentStorageDuration,
 	}
 }
 
@@ -540,8 +597,10 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 	if userAccount.Balance < req.LockedFee {
 		return wire.CreateIntentResponse{}, errors.New("insufficient balance for storage fee")
 	}
+	burnAmount := req.LockedFee * defaultStorageBurnBPS / 10_000
+	minerPortion := req.LockedFee - burnAmount
 	userAccount.Balance -= req.LockedFee
-	userAccount.LockedStorage += req.LockedFee
+	userAccount.LockedStorage += minerPortion
 	s.data.Accounts[userAccount.Address] = userAccount
 
 	intentID, err := randomID("intent")
@@ -563,7 +622,7 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 			Erasure:          req.Erasure,
 			Encryption:       req.Encryption,
 			Policy:           req.Policy,
-			LockedFee:        req.LockedFee,
+			LockedFee:        minerPortion,
 			Status:           wire.StatusUploading,
 			StorageStatus:    wire.StorageStatusPending,
 			AccessStatus:     defaultAccessStatus(wire.IntentView{Encryption: req.Encryption}),
@@ -576,6 +635,13 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 	}
 	s.createPermanentFundLocked(s.data.Intents[intentID], now)
 	s.createDealEscrowLocked(s.data.Intents[intentID], now)
+	if burnAmount > 0 {
+		s.data.Intents[intentID].BurnedFee = burnAmount
+		escrow := s.dealEscrowLocked(s.data.Intents[intentID])
+		escrow.BurnedFee = burnAmount
+		s.data.DealEscrows[intentID] = escrow
+		s.data.StorageFeePool.TotalBurned = saturatingAdd(s.data.StorageFeePool.TotalBurned, burnAmount)
+	}
 	s.reserveStorageAssignmentsLocked(assignments)
 	s.recordTxLocked("create_intent", req.User, createIntentTxPayload{
 		IntentID:      intentID,
@@ -585,7 +651,7 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 	if err := s.saveLocked(); err != nil {
 		return wire.CreateIntentResponse{}, err
 	}
-	return wire.CreateIntentResponse{IntentID: intentID, Status: wire.StatusUploading, RequiredFee: quote.RequiredFee, LockedFee: req.LockedFee, Assignments: assignments}, nil
+	return wire.CreateIntentResponse{IntentID: intentID, Status: wire.StatusUploading, RequiredFee: quote.RequiredFee, LockedFee: req.LockedFee, BurnedFee: burnAmount, Assignments: assignments}, nil
 }
 
 func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitResponse, error) {
@@ -1149,6 +1215,8 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch) wire.FinalizeEpochRes
 			}
 		}
 	}
+	// Check DHT/retrieval obligations before finalizing.
+	s.checkDHTObligationsLocked()
 	epoch.Status = "finalized"
 	epoch.StorageSlashed = totalSlashed
 	epoch.RepairTasksCreated = len(repairTasks)
@@ -1317,8 +1385,12 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 	existing.PublicKey = req.PublicKey
 	existing.Endpoint = req.Endpoint
 	existing.CapacityBytes = req.CapacityBytes
+	existing.AccessServiceRequired = true
+	existing.UploadServiceEnabled = true
+	existing.DownloadServiceEnabled = true
 	existing.Stake = req.Stake
 	existing.Status = wire.MinerStatusActive
+	existing.RetrievalObligMet = true
 	if existing.RegisteredAtUnix == 0 {
 		existing.RegisteredAtUnix = time.Now().Unix()
 	}
@@ -1670,6 +1742,7 @@ func (s *Store) minerStatsLocked(minerAddress string) wire.MinerStats {
 }
 
 func (s *Store) validatorLocked(address string) wire.ValidatorInfo {
+	address = wire.NormalizeAddress(address)
 	validator, ok := s.data.Validators[address]
 	if !ok {
 		return wire.ValidatorInfo{Address: address}

@@ -109,23 +109,22 @@ func (s *Store) RenewDeal(req wire.RenewDealRequest) (wire.RenewDealResponse, er
 }
 
 func (s *Store) estimateRenewalPriceLocked(intent *Intent, duration int64) uint64 {
-	storageDays := duration / 86400
-	if storageDays <= 0 {
-		storageDays = 1
+	basePrice := s.data.StoragePricing.BasePrice
+	if basePrice == 0 {
+		basePrice = defaultStorageBasePrice
 	}
-	pricePerGiBMonth := s.data.StoragePricing.BasePricePerGiBMonth
-	if pricePerGiBMonth == 0 {
-		pricePerGiBMonth = defaultStorageBasePricePerGiBMonth
+	redundantBytes, err := redundantStorageBytes(intent.FileSize, intent.Erasure)
+	if err != nil {
+		redundantBytes = uint64(intent.FileSize)
 	}
-	gibTotal := uint64(intent.FileSize) / (1024 * 1024 * 1024)
-	if gibTotal == 0 {
-		gibTotal = 1
+	fee, err := quoteTieredFee(redundantBytes, duration, basePrice)
+	if err != nil || fee == 0 {
+		return defaultStorageMinimumFee
 	}
-	price := gibTotal * pricePerGiBMonth * uint64(storageDays) / 30
-	if price < defaultStorageMinimumFee {
-		price = defaultStorageMinimumFee
+	if fee < defaultStorageMinimumFee {
+		fee = defaultStorageMinimumFee
 	}
-	return price
+	return fee
 }
 
 func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {

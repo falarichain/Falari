@@ -95,16 +95,23 @@ func (n *Node) PublicKeyBase64() string {
 	return base64.StdEncoding.EncodeToString(n.publicKey)
 }
 
+func (n *Node) PrivateKey() ed25519.PrivateKey {
+	return n.privateKey
+}
+
 func (n *Node) Blockstore() Blockstore {
 	return n.blockstore
 }
 
 func (n *Node) Status() wire.StorageNodeStatusResponse {
 	resp := wire.StorageNodeStatusResponse{
-		Status:    "ok",
-		Address:   n.address,
-		PublicKey: n.PublicKeyBase64(),
-		DataDir:   n.dataDir,
+		Status:                 "ok",
+		Address:                n.address,
+		PublicKey:              n.PublicKeyBase64(),
+		DataDir:                n.dataDir,
+		AccessServiceRequired:  true,
+		UploadServiceEnabled:   true,
+		DownloadServiceEnabled: true,
 	}
 	blocks, _ := n.backend.ListBlocks()
 	for _, block := range blocks {
@@ -184,17 +191,20 @@ func (n *Node) ProviderRecord(endpoint string, capacityBytes uint64, peerID stri
 	status := n.Status()
 	now := time.Now().Unix()
 	record := wire.StorageProviderRecord{
-		MinerAddress:  n.address,
-		PublicKey:     n.PublicKeyBase64(),
-		Endpoint:      endpoint,
-		PeerID:        peerID,
-		PeerAddrs:     append([]string(nil), peerAddrs...),
-		CapacityBytes: capacityBytes,
-		StoredBytes:   status.StoredBytes,
-		ShardCount:    status.ShardCount,
-		ShardHashes:   n.ShardHashes(),
-		LastSeenUnix:  now,
-		ExpiresAtUnix: now + int64(ttl.Seconds()),
+		MinerAddress:           n.address,
+		PublicKey:              n.PublicKeyBase64(),
+		Endpoint:               endpoint,
+		PeerID:                 peerID,
+		PeerAddrs:              append([]string(nil), peerAddrs...),
+		CapacityBytes:          capacityBytes,
+		StoredBytes:            status.StoredBytes,
+		ShardCount:             status.ShardCount,
+		AccessServiceRequired:  true,
+		UploadServiceEnabled:   true,
+		DownloadServiceEnabled: true,
+		ShardHashes:            n.ShardHashes(),
+		LastSeenUnix:           now,
+		ExpiresAtUnix:          now + int64(ttl.Seconds()),
 	}
 	record.Shards = make([]wire.ProviderShard, 0, len(record.ShardHashes))
 	blocks, _ := n.backend.ListBlocks()
@@ -304,6 +314,17 @@ func (n *Node) DeleteShard(hash string) error {
 
 func (n *Node) DeleteShardByCID(cid string) error {
 	return n.backend.DeleteByCID(cid)
+}
+
+// ShardHashForCID returns the shard hash for a given block CID.
+func (n *Node) ShardHashForCID(blockCID string) string {
+	blocks, _ := n.backend.ListBlocks()
+	for _, block := range blocks {
+		if block.CID == blockCID {
+			return block.Hash
+		}
+	}
+	return ""
 }
 
 func (n *Node) SignRetrievalReceipt(receipt wire.RetrievalReceipt) (wire.RetrievalReceipt, error) {

@@ -1,8 +1,15 @@
 package chain
 
 import (
+	"time"
+
 	"chain/internal/wire"
 )
+
+// DHTStalenessSeconds is the maximum age (in seconds) of a miner's last DHT
+// publish before it is considered stale. Miners with stale DHT records have
+// their RetrievalObligMet flag cleared at epoch finalization.
+const DHTStalenessSeconds = 900 // 15 minutes (~3 epochs at 5 min)
 
 func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 {
 	if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited {
@@ -55,6 +62,12 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 
 	weight += storedBytes * decentralizationScore / 10000 * params.DecentralizationWeightBPS / 10000
 	weight += storedBytes * params.ProofScoreWeightBPS / 10000
 
+	// Retrieval obligation penalty: miners who don't participate in
+	// retrieval+DHT lose a portion of their weight.
+	if !stats.RetrievalObligMet && stats.DHTLastPublishUnix > 0 && params.RetrievalWeightBPS > 0 {
+		weight = weight * (10000 - params.RetrievalWeightBPS) / 10000
+	}
+
 	return weight
 }
 
@@ -62,5 +75,20 @@ func (s *Store) RecomputeAllMinerWeightsLocked() {
 	for addr, stats := range s.data.Miners {
 		stats.EffectiveWeight = s.computeMinerEffectiveWeightLocked(stats)
 		s.data.Miners[addr] = stats
+	}
+}
+
+// checkDHTObligationsLocked clears RetrievalObligMet for miners whose DHT
+// publish records have gone stale. Called during epoch finalization.
+func (s *Store) checkDHTObligationsLocked() {
+	cutoff := time.Now().Unix() - DHTStalenessSeconds
+	for addr, stats := range s.data.Miners {
+		if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited {
+			continue
+		}
+		if stats.DHTLastPublishUnix > 0 && stats.DHTLastPublishUnix < cutoff {
+			stats.RetrievalObligMet = false
+			s.data.Miners[addr] = stats
+		}
 	}
 }

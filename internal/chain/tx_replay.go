@@ -231,6 +231,24 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyGovernanceBlockDealLocked(payload)
+	case "governance_create_proposal":
+		var payload governanceCreateProposalTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyGovernanceCreateProposalLocked(payload)
+	case "governance_cast_vote":
+		var payload governanceCastVoteTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyGovernanceCastVoteLocked(payload)
+	case "governance_execute_proposal":
+		var payload governanceExecuteProposalTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyGovernanceExecuteProposalLocked(payload)
 	case "submit_delete_receipt":
 		var payload submitDeleteReceiptTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -406,6 +424,9 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest) erro
 	existing.PublicKey = req.PublicKey
 	existing.Endpoint = req.Endpoint
 	existing.CapacityBytes = req.CapacityBytes
+	existing.AccessServiceRequired = true
+	existing.UploadServiceEnabled = true
+	existing.DownloadServiceEnabled = true
 	existing.Stake = req.Stake
 	existing.Status = "active"
 	if existing.RegisteredAtUnix == 0 {
@@ -677,6 +698,51 @@ func (s *Store) applyGovernanceBlockDealLocked(payload governanceBlockDealTxPayl
 	return nil
 }
 
+func (s *Store) applyGovernanceCreateProposalLocked(payload governanceCreateProposalTxPayload) error {
+	proposal := payload.Response.Proposal
+	s.data.GovernanceProposals[proposal.ProposalID] = proposal
+	s.data.GovernanceVotes[proposal.ProposalID] = []wire.GovernanceVote{}
+	return nil
+}
+
+func (s *Store) applyGovernanceCastVoteLocked(payload governanceCastVoteTxPayload) error {
+	vote := payload.Response.Vote
+	s.data.GovernanceVotes[vote.ProposalID] = append(s.data.GovernanceVotes[vote.ProposalID], vote)
+	return nil
+}
+
+func (s *Store) applyGovernanceExecuteProposalLocked(payload governanceExecuteProposalTxPayload) error {
+	proposal := payload.Response.Proposal
+	s.data.GovernanceProposals[proposal.ProposalID] = proposal
+
+	now := payload.Response.GovernanceResult.UpdatedAtUnix
+
+	// Route operator management actions to dedicated handler.
+	if isOperatorManagementAction(proposal.Action) {
+		_, err := s.executeOperatorManagementLocked(proposal, now)
+		return err
+	}
+
+	// Route config change actions to dedicated handler.
+	if isConfigAction(proposal.Action) {
+		_, err := s.executeConfigChangeLocked(proposal, now)
+		return err
+	}
+
+	// Re-execute the deal action.
+	govReq := wire.GovernanceDealActionRequest{
+		IntentID:           proposal.IntentID,
+		Operator:           proposal.Proposer,
+		Action:             proposal.Action,
+		ReasonHash:         proposal.ReasonHash,
+		ExpiresAtUnix:      proposal.ExpiresAtUnix,
+		PreserveStorage:    proposal.PreserveStorage,
+		AppealDeadlineUnix: proposal.AppealDeadlineUnix,
+	}
+	_, err := s.governanceDealActionLocked(govReq, now)
+	return err
+}
+
 func (s *Store) applySubmitDeleteReceiptLocked(payload submitDeleteReceiptTxPayload) error {
 	if err := wire.VerifyDeleteReceipt(payload.Request.Receipt); err != nil {
 		return err
@@ -877,6 +943,8 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 			}
 		}
 	}
+	// Check DHT/retrieval obligations before finalizing.
+	s.checkDHTObligationsLocked()
 	epoch.Status = "finalized"
 	epoch.StorageSlashed = totalSlashed
 	epoch.RepairTasksCreated = len(repairTasks)

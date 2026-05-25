@@ -106,5 +106,6 @@ func createValidatorIdentity(path string) (*ValidatorIdentity, error) {
 
 func validatorAddress(pub ed25519.PublicKey) string {
 	sum := sha256.Sum256(pub)
-	return "0x" + hex.EncodeToString(sum[:20])
+	addr := "0x" + hex.EncodeToString(sum[:20])
+	return wire.NormalizeAddress(addr)
 }

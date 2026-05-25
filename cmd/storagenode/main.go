@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	falaridht "chain/internal/dht"
 	"chain/internal/storage"
 )
 
@@ -30,6 +32,10 @@ func main() {
 	p2pListen := flag.String("p2p-listen", "", "comma-separated libp2p provider discovery listen multiaddrs, disabled when empty")
 	p2pPeers := flag.String("p2p-peers", "", "comma-separated libp2p provider peer multiaddrs")
 	p2pTopic := flag.String("p2p-topic", "storage-chain/providers/devnet", "libp2p provider discovery topic")
+	dhtEnabled := flag.Bool("dht", false, "enable Kademlia DHT for shard discovery")
+	dhtBootstrap := flag.String("dht-bootstrap", "", "comma-separated DHT bootstrap peer multiaddrs")
+	dhtNamespace := flag.String("dht-namespace", falaridht.DefaultProtocolPrefix, "DHT protocol namespace prefix")
+	dhtRepublish := flag.Duration("dht-republish", falaridht.DefaultRepublishInterval, "DHT provider record republish interval")
 	flag.Parse()
 
 	node, err := storage.OpenNode(*data)
@@ -59,13 +65,29 @@ func main() {
 		log.Printf("auto delete enabled interval=%s", *deleteInterval)
 	}
 	var providerNetwork *storage.ProviderNetwork
-	if *p2pListen != "" || *p2pPeers != "" {
-		providerNetwork, err = storage.StartProviderNetwork(node, *p2pListen, *p2pPeers, *p2pTopic, registeredEndpoint, *capacity)
+	if *p2pListen != "" || *p2pPeers != "" || *dhtEnabled {
+		var dhtCfg *falaridht.Config
+		if *dhtEnabled {
+			cfg := falaridht.DefaultConfig()
+			cfg.ProtocolPrefix = *dhtNamespace
+			cfg.RepublishInterval = *dhtRepublish
+			cfg.ChainURL = *chainURL
+			if *dhtBootstrap != "" {
+				for _, addr := range strings.Split(*dhtBootstrap, ",") {
+					addr = strings.TrimSpace(addr)
+					if addr != "" {
+						cfg.BootstrapPeers = append(cfg.BootstrapPeers, addr)
+					}
+				}
+			}
+			dhtCfg = &cfg
+		}
+		providerNetwork, err = storage.StartProviderNetworkWithDHT(node, *p2pListen, *p2pPeers, *p2pTopic, registeredEndpoint, *capacity, dhtCfg)
 		if err != nil {
 			log.Fatalf("start storage provider discovery: %v", err)
 		}
 		defer providerNetwork.Close()
-		log.Printf("provider discovery enabled peer_id=%s addrs=%v topic=%s", providerNetwork.PeerID(), providerNetwork.Addrs(), *p2pTopic)
+		log.Printf("provider discovery enabled peer_id=%s addrs=%v topic=%s dht=%v", providerNetwork.PeerID(), providerNetwork.Addrs(), *p2pTopic, *dhtEnabled)
 	}
 	if *chainURL != "" {
 		node.StartProviderReporter(*chainURL, registeredEndpoint, *capacity, 30*time.Second, func() (string, []string) {

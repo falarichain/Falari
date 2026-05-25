@@ -23,6 +23,7 @@ func NewServerWithProviderNetwork(node *Node, provider *ProviderNetwork) *Server
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("OPTIONS /", s.options)
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("GET /identity", s.identity)
@@ -33,11 +34,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /retrieval-receipts/sign", s.signRetrievalReceipt)
 	mux.HandleFunc("GET /blocks/", s.getBlock)
 	mux.HandleFunc("GET /shards/", s.getShard)
-	return mux
+	return withCORS(mux)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) options(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
@@ -45,6 +50,14 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	if s.provider != nil {
 		status.PeerID = s.provider.PeerID()
 		status.PeerAddrs = s.provider.Addrs()
+		if dhtSvc := s.provider.DHTService(); dhtSvc != nil {
+			status.DHTEnabled = true
+			status.DHTPeers = dhtSvc.RoutingTableSize()
+			status.DHTShardCount = dhtSvc.ShardCount()
+			if bl := dhtSvc.Blacklist(); bl != nil {
+				status.BlacklistCount = bl.Count()
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -116,6 +129,10 @@ func (s *Server) signRetrievalReceipt(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getShard(w http.ResponseWriter, r *http.Request) {
 	hash := strings.TrimPrefix(r.URL.Path, "/shards/")
 	hash = strings.TrimSuffix(hash, ".bin")
+	if s.isShardBlacklisted(hash) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "shard is blacklisted"})
+		return
+	}
 	data, err := s.node.ReadShard(hash)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -128,6 +145,10 @@ func (s *Server) getShard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getBlock(w http.ResponseWriter, r *http.Request) {
 	cid := strings.TrimPrefix(r.URL.Path, "/blocks/")
+	if shardHash := s.node.ShardHashForCID(cid); s.isShardBlacklisted(shardHash) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "shard is blacklisted"})
+		return
+	}
 	data, err := s.node.ReadShardByCID(cid)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -136,6 +157,23 @@ func (s *Server) getBlock(w http.ResponseWriter, r *http.Request) {
 	s.node.recordHTTPBlockServeHit()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(data)
+}
+
+// isShardBlacklisted checks if a shard hash is on the blacklist.
+// Returns false if blacklist is not available or shardHash is empty.
+func (s *Server) isShardBlacklisted(shardHash string) bool {
+	if shardHash == "" || s.provider == nil {
+		return false
+	}
+	dhtSvc := s.provider.DHTService()
+	if dhtSvc == nil {
+		return false
+	}
+	bl := dhtSvc.Blacklist()
+	if bl == nil {
+		return false
+	}
+	return bl.IsBlocked(shardHash)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
@@ -155,4 +193,17 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

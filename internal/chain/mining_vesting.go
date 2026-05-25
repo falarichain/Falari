@@ -8,13 +8,14 @@ import (
 )
 
 const (
-	miningRewardSourceStorageProof     = "storage_proof"
-	miningRewardSourceStoragePool      = "storage_pool"
-	miningRewardSourceRetrievalReceipt = "retrieval_receipt"
-	miningRewardSourceRetrievalPool    = "retrieval_pool"
-	miningRewardSourceRepair           = "repair"
-	miningRewardSourceValidatorPool    = "validator_pool"
-	miningRewardSourceDelegation       = "validator_delegation"
+	miningRewardSourceStorageProof      = "storage_proof"
+	miningRewardSourceStoragePool       = "storage_pool"
+	miningRewardSourceRetrievalReceipt  = "retrieval_receipt"
+	miningRewardSourceRetrievalPool     = "retrieval_pool"
+	miningRewardSourceRepair            = "repair"
+	miningRewardSourceRepairPoolSubsidy = "repair_pool_subsidy"
+	miningRewardSourceValidatorPool     = "validator_pool"
+	miningRewardSourceDelegation        = "validator_delegation"
 )
 
 func (s *Store) vestMiningRewardLocked(address string, amount uint64, source string, now int64) uint64 {

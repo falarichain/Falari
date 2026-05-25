@@ -9,18 +9,21 @@ import (
 )
 
 type storageProviderSigningPayload struct {
-	MinerAddress  string          `json:"miner_address"`
-	PublicKey     string          `json:"public_key"`
-	Endpoint      string          `json:"endpoint,omitempty"`
-	PeerID        string          `json:"peer_id,omitempty"`
-	PeerAddrs     []string        `json:"peer_addrs,omitempty"`
-	CapacityBytes uint64          `json:"capacity_bytes,omitempty"`
-	StoredBytes   uint64          `json:"stored_bytes,omitempty"`
-	ShardCount    int             `json:"shard_count,omitempty"`
-	ShardHashes   []string        `json:"shard_hashes,omitempty"`
-	Shards        []ProviderShard `json:"shards,omitempty"`
-	LastSeenUnix  int64           `json:"last_seen_unix"`
-	ExpiresAtUnix int64           `json:"expires_at_unix"`
+	MinerAddress           string          `json:"miner_address"`
+	PublicKey              string          `json:"public_key"`
+	Endpoint               string          `json:"endpoint,omitempty"`
+	PeerID                 string          `json:"peer_id,omitempty"`
+	PeerAddrs              []string        `json:"peer_addrs,omitempty"`
+	CapacityBytes          uint64          `json:"capacity_bytes,omitempty"`
+	StoredBytes            uint64          `json:"stored_bytes,omitempty"`
+	ShardCount             int             `json:"shard_count,omitempty"`
+	AccessServiceRequired  bool            `json:"access_service_required,omitempty"`
+	UploadServiceEnabled   bool            `json:"upload_service_enabled,omitempty"`
+	DownloadServiceEnabled bool            `json:"download_service_enabled,omitempty"`
+	ShardHashes            []string        `json:"shard_hashes,omitempty"`
+	Shards                 []ProviderShard `json:"shards,omitempty"`
+	LastSeenUnix           int64           `json:"last_seen_unix"`
+	ExpiresAtUnix          int64           `json:"expires_at_unix"`
 }
 
 func StorageProviderPayload(record StorageProviderRecord) ([]byte, error) {
@@ -33,18 +36,21 @@ func StorageProviderPayload(record StorageProviderRecord) ([]byte, error) {
 		return record.Shards[i].ShardHash < record.Shards[j].ShardHash
 	})
 	payload := storageProviderSigningPayload{
-		MinerAddress:  record.MinerAddress,
-		PublicKey:     record.PublicKey,
-		Endpoint:      record.Endpoint,
-		PeerID:        record.PeerID,
-		PeerAddrs:     record.PeerAddrs,
-		CapacityBytes: record.CapacityBytes,
-		StoredBytes:   record.StoredBytes,
-		ShardCount:    record.ShardCount,
-		ShardHashes:   record.ShardHashes,
-		Shards:        record.Shards,
-		LastSeenUnix:  record.LastSeenUnix,
-		ExpiresAtUnix: record.ExpiresAtUnix,
+		MinerAddress:           record.MinerAddress,
+		PublicKey:              record.PublicKey,
+		Endpoint:               record.Endpoint,
+		PeerID:                 record.PeerID,
+		PeerAddrs:              record.PeerAddrs,
+		CapacityBytes:          record.CapacityBytes,
+		StoredBytes:            record.StoredBytes,
+		ShardCount:             record.ShardCount,
+		AccessServiceRequired:  record.AccessServiceRequired,
+		UploadServiceEnabled:   record.UploadServiceEnabled,
+		DownloadServiceEnabled: record.DownloadServiceEnabled,
+		ShardHashes:            record.ShardHashes,
+		Shards:                 record.Shards,
+		LastSeenUnix:           record.LastSeenUnix,
+		ExpiresAtUnix:          record.ExpiresAtUnix,
 	}
 	return json.Marshal(payload)
 }

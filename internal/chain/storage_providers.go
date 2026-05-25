@@ -20,6 +20,9 @@ func (s *Store) AcceptStorageProviderAnnouncement(announcement wire.StorageProvi
 	if record.ExpiresAtUnix > 0 && record.ExpiresAtUnix < now {
 		return errors.New("provider record expired")
 	}
+	if record.AccessServiceRequired && (!record.UploadServiceEnabled || !record.DownloadServiceEnabled) {
+		return errors.New("mining provider must keep upload and download access service enabled")
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -34,11 +37,32 @@ func (s *Store) AcceptStorageProviderAnnouncement(announcement wire.StorageProvi
 		if record.CapacityBytes == 0 {
 			record.CapacityBytes = miner.CapacityBytes
 		}
+		if miner.AccessServiceRequired {
+			record.AccessServiceRequired = true
+			if !record.UploadServiceEnabled && !record.DownloadServiceEnabled {
+				record.UploadServiceEnabled = miner.UploadServiceEnabled
+				record.DownloadServiceEnabled = miner.DownloadServiceEnabled
+			}
+			if !record.UploadServiceEnabled || !record.DownloadServiceEnabled {
+				return errors.New("mining provider must keep upload and download access service enabled")
+			}
+		}
 	}
 	if record.LastSeenUnix == 0 {
 		record.LastSeenUnix = now
 	}
 	s.data.ProviderRecords[record.MinerAddress] = record
+
+	// Update DHT/retrieval obligation tracking for the miner.
+	if miner, ok := s.data.Miners[record.MinerAddress]; ok {
+		if record.PeerID != "" && len(record.PeerAddrs) > 0 && record.DownloadServiceEnabled {
+			miner.DHTLastPublishUnix = now
+			miner.DHTPublishCount++
+			miner.RetrievalObligMet = true
+		}
+		s.data.Miners[record.MinerAddress] = miner
+	}
+
 	return s.saveLocked()
 }
 
@@ -96,6 +120,11 @@ func (s *Store) StorageProviders(shardHash string, shardCID string, intentID str
 				}
 				if record.CapacityBytes == 0 {
 					record.CapacityBytes = miner.CapacityBytes
+				}
+				if miner.AccessServiceRequired {
+					record.AccessServiceRequired = true
+					record.UploadServiceEnabled = miner.UploadServiceEnabled
+					record.DownloadServiceEnabled = miner.DownloadServiceEnabled
 				}
 				record.ShardHashes = appendUnique(record.ShardHashes, receipt.ShardHash)
 				record.Shards = appendProviderShard(record.Shards, wire.ProviderShard{
@@ -207,6 +236,13 @@ func (s *Store) enrichProviderRecordLocked(record wire.StorageProviderRecord, li
 	if record.PublicKey == "" {
 		record.PublicKey = miner.PublicKey
 	}
+	if miner.AccessServiceRequired {
+		record.AccessServiceRequired = true
+		if !record.UploadServiceEnabled && !record.DownloadServiceEnabled {
+			record.UploadServiceEnabled = miner.UploadServiceEnabled
+			record.DownloadServiceEnabled = miner.DownloadServiceEnabled
+		}
+	}
 	record.ProofSuccess = miner.ProofSuccess
 	record.ProofFailure = miner.ProofFailure
 	record.ProviderRecordLive = live
@@ -217,17 +253,20 @@ func (s *Store) enrichProviderRecordLocked(record wire.StorageProviderRecord, li
 
 func storageRouteFromProvider(provider wire.StorageProviderRecord, shardHash string, shardCID string, transport string, priority int) wire.StorageRoute {
 	return wire.StorageRoute{
-		MinerAddress:       provider.MinerAddress,
-		ShardHash:          shardHash,
-		ShardCID:           shardCID,
-		Transport:          transport,
-		Endpoint:           provider.Endpoint,
-		PeerID:             provider.PeerID,
-		PeerAddrs:          append([]string(nil), provider.PeerAddrs...),
-		HealthScoreBPS:     provider.HealthScoreBPS,
-		ProviderRecordLive: provider.ProviderRecordLive,
-		ProviderSource:     provider.ProviderSource,
-		Priority:           priority,
+		MinerAddress:           provider.MinerAddress,
+		ShardHash:              shardHash,
+		ShardCID:               shardCID,
+		Transport:              transport,
+		Endpoint:               provider.Endpoint,
+		PeerID:                 provider.PeerID,
+		PeerAddrs:              append([]string(nil), provider.PeerAddrs...),
+		AccessServiceRequired:  provider.AccessServiceRequired,
+		UploadServiceEnabled:   provider.UploadServiceEnabled,
+		DownloadServiceEnabled: provider.DownloadServiceEnabled,
+		HealthScoreBPS:         provider.HealthScoreBPS,
+		ProviderRecordLive:     provider.ProviderRecordLive,
+		ProviderSource:         provider.ProviderSource,
+		Priority:               priority,
 	}
 }
 
@@ -277,6 +316,9 @@ func providerHealthScore(record wire.StorageProviderRecord, miner wire.MinerStat
 	}
 	if record.PeerID != "" || len(record.PeerAddrs) > 0 {
 		score += 500
+	}
+	if record.AccessServiceRequired && (!record.UploadServiceEnabled || !record.DownloadServiceEnabled) {
+		score /= 4
 	}
 	if miner.EffectiveWeight > 0 {
 		if miner.EffectiveWeight >= miner.CapacityBytes/2 {

@@ -17,6 +17,7 @@ func ensureDealEscrowForState(state *State, intent *Intent) {
 			LockedFee:   intent.LockedFee,
 			PaidFee:     intent.PaidFee,
 			RefundedFee: intent.RefundedFee,
+			BurnedFee:   intent.BurnedFee,
 			Status:      intent.StorageStatus,
 			Permanent:   isPermanentIntent(intent),
 		}
@@ -25,6 +26,7 @@ func ensureDealEscrowForState(state *State, intent *Intent) {
 	escrow.LockedFee = intent.LockedFee
 	escrow.PaidFee = intent.PaidFee
 	escrow.RefundedFee = intent.RefundedFee
+	escrow.BurnedFee = intent.BurnedFee
 	escrow.Status = intent.StorageStatus
 	escrow.Permanent = isPermanentIntent(intent)
 	if intent.Status == wire.StatusFinalized {
@@ -49,12 +51,14 @@ func rebuildStorageFeePoolForState(state *State) {
 		pool.TotalLocked = saturatingAdd(pool.TotalLocked, escrow.LockedFee)
 		pool.TotalPaid = saturatingAdd(pool.TotalPaid, escrow.PaidFee)
 		pool.TotalRefunded = saturatingAdd(pool.TotalRefunded, escrow.RefundedFee)
+		pool.TotalBurned = saturatingAdd(pool.TotalBurned, escrow.BurnedFee)
 	}
 	for _, fund := range state.PermanentStorageFunds {
 		if !fund.Closed {
 			pool.PermanentFundBalance = saturatingAdd(pool.PermanentFundBalance, fund.Balance)
 		}
 		pool.TransferredToRewardPool = saturatingAdd(pool.TransferredToRewardPool, fund.TransferredToPool)
+		pool.TotalBurned = saturatingAdd(pool.TotalBurned, fund.Burned)
 	}
 	pool.InsuranceReserve = state.StorageFeePool.InsuranceReserve
 	state.StorageFeePool = pool
@@ -158,6 +162,21 @@ func (s *Store) recordStorageFeeRefundLocked(intent *Intent, amount uint64) {
 	escrow.Status = intent.StorageStatus
 	s.data.DealEscrows[intent.IntentID] = escrow
 	s.data.StorageFeePool.TotalRefunded = saturatingAdd(s.data.StorageFeePool.TotalRefunded, amount)
+}
+
+// recordStorageFeeBurnLocked records tokens burned to the black-hole address
+// when a deal is terminated early. Burned tokens are deducted from the user's
+// LockedStorage but never credited to any account.
+func (s *Store) recordStorageFeeBurnLocked(intent *Intent, amount uint64) {
+	if intent == nil || amount == 0 {
+		return
+	}
+	intent.BurnedFee = saturatingAdd(intent.BurnedFee, amount)
+	escrow := s.dealEscrowLocked(intent)
+	escrow.BurnedFee = saturatingAdd(escrow.BurnedFee, amount)
+	escrow.Status = intent.StorageStatus
+	s.data.DealEscrows[intent.IntentID] = escrow
+	s.data.StorageFeePool.TotalBurned = saturatingAdd(s.data.StorageFeePool.TotalBurned, amount)
 }
 
 func finiteDealEscrowAvailable(escrow wire.DealEscrow, intent *Intent, now int64) uint64 {

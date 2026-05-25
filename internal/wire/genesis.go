@@ -1,12 +1,16 @@
 package wire
 
 type GenesisDoc struct {
-	ChainID             string                      `json:"chain_id"`
-	GenesisTime         int64                       `json:"genesis_time_unix"`
-	Accounts            []GenesisAccount            `json:"accounts,omitempty"`
-	Validators          []GenesisValidator          `json:"validators,omitempty"`
-	GovernanceOperators []GenesisGovernanceOperator `json:"governance_operators,omitempty"`
-	RewardPools         *GenesisRewardPools         `json:"reward_pools,omitempty"`
+	ChainID                      string                      `json:"chain_id"`
+	GenesisTime                  int64                       `json:"genesis_time_unix"`
+	Accounts                     []GenesisAccount            `json:"accounts,omitempty"`
+	Validators                   []GenesisValidator          `json:"validators,omitempty"`
+	GovernanceOperators          []GenesisGovernanceOperator `json:"governance_operators,omitempty"`
+	RewardPools                  *GenesisRewardPools         `json:"reward_pools,omitempty"`
+	DataModerationThresholdNum   int                         `json:"data_moderation_threshold_num,omitempty"`
+	DataModerationThresholdDen   int                         `json:"data_moderation_threshold_den,omitempty"`
+	OperatorChangeThresholdNum   int                         `json:"operator_change_threshold_num,omitempty"`
+	OperatorChangeThresholdDen   int                         `json:"operator_change_threshold_den,omitempty"`
 }
 
 type GenesisAccount struct {
@@ -30,6 +34,7 @@ type GenesisRewardPools struct {
 
 type GenesisGovernanceOperator struct {
 	Operator    string   `json:"operator"`
+	PublicKey   string   `json:"public_key,omitempty"`
 	Permissions []string `json:"permissions"`
 	Enabled     *bool    `json:"enabled,omitempty"`
 }

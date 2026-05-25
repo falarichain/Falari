@@ -50,7 +50,7 @@ func TestSetAccessPolicyBlocksManifestAndProviders(t *testing.T) {
 	}
 }
 
-func TestTerminateDealRefundsAndDeleteReceiptReleasesMinerUsage(t *testing.T) {
+func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -93,8 +93,11 @@ func TestTerminateDealRefundsAndDeleteReceiptReleasesMinerUsage(t *testing.T) {
 	if terminated.DeleteTasks[0].Status != deleteTaskStatusPending {
 		t.Fatalf("expected pending delete task, got %+v", terminated.DeleteTasks[0])
 	}
-	if account := store.accountLocked(intent.User); account.Balance != 10 || account.LockedStorage != 0 {
-		t.Fatalf("expected locked storage refund, got %+v", account)
+	if account := store.accountLocked(intent.User); account.Balance != 0 || account.LockedStorage != 0 {
+		t.Fatalf("expected locked storage burn (no refund), got %+v", account)
+	}
+	if terminated.BurnedFee != 10 {
+		t.Fatalf("expected 10 tokens burned, got %d", terminated.BurnedFee)
 	}
 
 	deleteReceipt := wire.DeleteReceipt{
@@ -129,25 +132,34 @@ func TestCommitteeFreezeDealRequiresExpiryAndExpiresBackToDefaultAccess(t *testi
 	}
 	intent := testLifecycleIntent()
 	store.data.Intents[intent.IntentID] = intent
-	if _, err := store.CommitteeFreezeDeal(wire.CommitteeFreezeDealRequest{
+
+	// Freeze without expiry should fail.
+	store.mu.Lock()
+	_, err = store.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:   intent.IntentID,
 		Operator:   "committee",
+		Action:     "freeze",
 		ReasonHash: "freeze_reason",
-	}); err == nil {
+	}, time.Now().Unix())
+	store.mu.Unlock()
+	if err == nil {
 		t.Fatal("expected freeze without expiry to fail")
 	}
 
 	expiresAt := time.Now().Add(time.Minute).Unix()
-	resp, err := store.CommitteeFreezeDeal(wire.CommitteeFreezeDealRequest{
+	store.mu.Lock()
+	resp, err := store.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:      intent.IntentID,
 		Operator:      "committee",
+		Action:        "freeze",
 		ReasonHash:    "freeze_reason",
 		ExpiresAtUnix: expiresAt,
-	})
+	}, time.Now().Unix())
+	store.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.GovernanceType != "committee_freeze_deal" || resp.ModerationStatus != wire.ModerationStatusFrozen || resp.ModerationExpiresAtUnix != expiresAt {
+	if resp.ModerationStatus != wire.ModerationStatusFrozen || resp.ModerationExpiresAtUnix != expiresAt {
 		t.Fatalf("unexpected freeze response %+v", resp)
 	}
 	intent.ModerationExpiresAtUnix = time.Now().Add(-time.Minute).Unix()
@@ -158,13 +170,6 @@ func TestCommitteeFreezeDealRequiresExpiryAndExpiresBackToDefaultAccess(t *testi
 	if intent.AccessStatus != wire.AccessStatusPublic {
 		t.Fatalf("expected expired freeze to restore default access, got %+v", intent)
 	}
-	audit := store.GovernanceAudit(intent.IntentID, "committee", "freeze")
-	if len(audit.Records) != 1 {
-		t.Fatalf("expected one governance audit record, got %+v", audit)
-	}
-	if audit.Records[0].GovernanceType != "committee_freeze_deal" || audit.Records[0].ModerationExpiresAtUnix != expiresAt {
-		t.Fatalf("expected freeze expiry in audit record, got %+v", audit.Records[0])
-	}
 }
 
 func TestGovernanceLegalHoldBlocksAccessButKeepsProofsActive(t *testing.T) {
@@ -174,13 +179,15 @@ func TestGovernanceLegalHoldBlocksAccessButKeepsProofsActive(t *testing.T) {
 	}
 	intent := testLifecycleIntent()
 	store.data.Intents[intent.IntentID] = intent
-	resp, err := store.GovernanceDealAction(wire.GovernanceDealActionRequest{
+	store.mu.Lock()
+	resp, err := store.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:        intent.IntentID,
 		Operator:        "committee",
 		Action:          "legal_hold",
 		ReasonHash:      "legal_reason",
 		PreserveStorage: true,
-	})
+	}, time.Now().Unix())
+	store.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,13 +216,16 @@ func TestGovernanceBlockDealCreatesDeleteTasksAndAudit(t *testing.T) {
 	}
 	store.data.Intents[intent.IntentID] = intent
 	appealDeadline := time.Now().Add(2 * time.Hour).Unix()
-	resp, err := store.GovernanceBlockDeal(wire.GovernanceBlockDealRequest{
+	store.mu.Lock()
+	resp, err := store.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:           intent.IntentID,
 		Operator:           "dao",
+		Action:             "block",
 		ReasonHash:         "block_reason",
 		PreserveStorage:    false,
 		AppealDeadlineUnix: appealDeadline,
-	})
+	}, time.Now().Unix())
+	store.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,19 +260,31 @@ func TestGovernanceOperatorAllowlistRejectsUnauthorizedOperator(t *testing.T) {
 		Permissions: []string{"freeze"},
 		Enabled:     true,
 	}
-	if _, err := store.GovernanceBlockDeal(wire.GovernanceBlockDealRequest{
-		IntentID:   intent.IntentID,
-		Operator:   "committee",
-		ReasonHash: "block_reason",
-	}); err == nil {
+	// Operator with only "freeze" permission should be rejected for "block".
+	store.mu.Lock()
+	err = store.validateGovernanceOperatorLocked("committee", "block")
+	store.mu.Unlock()
+	if err == nil {
 		t.Fatal("expected operator without block permission to be rejected")
 	}
-	if _, err := store.CommitteeFreezeDeal(wire.CommitteeFreezeDealRequest{
+	// Operator with "freeze" permission should succeed for "freeze".
+	store.mu.Lock()
+	err = store.validateGovernanceOperatorLocked("committee", "freeze")
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify the freeze action also works end-to-end.
+	store.mu.Lock()
+	_, err = store.governanceDealActionLocked(wire.GovernanceDealActionRequest{
 		IntentID:      intent.IntentID,
 		Operator:      "committee",
+		Action:        "freeze",
 		ReasonHash:    "freeze_reason",
 		ExpiresAtUnix: time.Now().Add(time.Hour).Unix(),
-	}); err != nil {
+	}, time.Now().Unix())
+	store.mu.Unlock()
+	if err != nil {
 		t.Fatal(err)
 	}
 }

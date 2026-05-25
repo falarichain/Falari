@@ -83,6 +83,54 @@ func TestCreateAddressAndPasscodeShares(t *testing.T) {
 	}
 }
 
+func TestAddressShareRecipientIsCaseInsensitive(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := testLifecycleIntent()
+	intent.Encryption = &wire.EncryptionMetadata{
+		Algorithm:            "AES-256-GCM/segment-v1",
+		KeyHash:              "key_hash",
+		NonceBase64:          "nonce",
+		PlaintextSize:        32,
+		PlaintextSegmentSize: 32,
+	}
+	intent.AccessStatus = wire.AccessStatusPrivate
+	store.data.Intents[intent.IntentID] = intent
+
+	mixedCaseRecipient := "0xAbCDEFabcdefABCDefabCDefABcdefabCDEFABCD"
+	addressShare, err := store.CreateAddressShare(wire.CreateAddressShareRequest{
+		IntentID:         intent.IntentID,
+		Owner:            intent.User,
+		Recipient:        mixedCaseRecipient,
+		Algorithm:        "AES-256-GCM/address-link-wrap-v1",
+		EncryptedDataKey: "encrypted_for_address",
+		Nonce:            "nonce_address",
+		KDF: &wire.PasscodeKDFParams{
+			Name:       "PBKDF2-SHA256/address-link-v1",
+			Salt:       "salt",
+			Iterations: 310000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRecipient := wire.NormalizeAddress(mixedCaseRecipient)
+	if addressShare.Share.Recipient != expectedRecipient {
+		t.Fatalf("expected normalized recipient %s, got %s", expectedRecipient, addressShare.Share.Recipient)
+	}
+
+	upperCaseRecipient := "0XABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"
+	listed, err := store.ListShares(intent.IntentID, "", upperCaseRecipient, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Shares) != 1 {
+		t.Fatalf("expected mixed-case recipient lookup to find one share, got %+v", listed)
+	}
+}
+
 func TestCreateShareRejectsNonOwnerAndPlainIntent(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {

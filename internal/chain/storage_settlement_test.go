@@ -148,7 +148,7 @@ func TestSettlePermanentFinalizedIntentIsRejected(t *testing.T) {
 	}
 }
 
-func TestPermanentFundTopUpAndTerminateTransfersDonationToStoragePool(t *testing.T) {
+func TestPermanentFundTopUpAndTerminateBurnsRemainingDonation(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -187,17 +187,20 @@ func TestPermanentFundTopUpAndTerminateTransfersDonationToStoragePool(t *testing
 		t.Fatal(err)
 	}
 	if resp.RefundedFee != 0 {
-		t.Fatalf("permanent fund donation should not refund, got %+v", resp)
+		t.Fatalf("permanent fund termination should not refund, got %+v", resp)
+	}
+	if resp.BurnedFee != 13 {
+		t.Fatalf("expected 13 tokens burned, got %d", resp.BurnedFee)
 	}
 	account = store.accountLocked(intent.User)
 	if account.LockedStorage != 0 {
 		t.Fatalf("expected permanent donation to leave user locked storage, got %+v", account)
 	}
 	fund := store.data.PermanentStorageFunds[intent.IntentID]
-	if !fund.Closed || fund.TransferredToPool != 13 || fund.Balance != 0 {
+	if !fund.Closed || fund.Burned != 13 || fund.Balance != 0 {
 		t.Fatalf("unexpected closed permanent fund %+v", fund)
 	}
-	if store.data.RewardPools == nil || store.data.RewardPools.StorageRemaining < 13 {
-		t.Fatalf("expected remaining donation transferred to storage pool, pools=%+v", store.data.RewardPools)
+	if store.data.StorageFeePool.TotalBurned != 13 {
+		t.Fatalf("expected 13 tokens in TotalBurned, got %d", store.data.StorageFeePool.TotalBurned)
 	}
 }

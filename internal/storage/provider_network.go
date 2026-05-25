@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	falaridht "chain/internal/dht"
 	"chain/internal/wire"
 
 	libp2p "github.com/libp2p/go-libp2p"
@@ -31,9 +32,16 @@ type ProviderNetwork struct {
 	sub           *pubsub.Subscription
 	mu            sync.RWMutex
 	providers     map[string]wire.StorageProviderRecord
+	dhtService    *falaridht.Service
 }
 
 func StartProviderNetwork(node *Node, listenAddrs string, rawPeers string, topicName string, endpoint string, capacityBytes uint64) (*ProviderNetwork, error) {
+	return StartProviderNetworkWithDHT(node, listenAddrs, rawPeers, topicName, endpoint, capacityBytes, nil)
+}
+
+// StartProviderNetworkWithDHT creates a provider network with optional DHT support.
+// If dhtCfg is non-nil, DHT-based discovery is enabled alongside GossipSub.
+func StartProviderNetworkWithDHT(node *Node, listenAddrs string, rawPeers string, topicName string, endpoint string, capacityBytes uint64, dhtCfg *falaridht.Config) (*ProviderNetwork, error) {
 	if strings.TrimSpace(listenAddrs) == "" {
 		listenAddrs = "/ip4/0.0.0.0/tcp/0"
 	}
@@ -45,7 +53,10 @@ func StartProviderNetwork(node *Node, listenAddrs string, rawPeers string, topic
 	if len(addrs) == 0 {
 		addrs = []string{"/ip4/0.0.0.0/tcp/0"}
 	}
-	h, err := libp2p.New(libp2p.ListenAddrStrings(addrs...))
+	h, err := libp2p.New(
+		libp2p.ListenAddrStrings(addrs...),
+		libp2p.EnableHolePunching(),
+	)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -82,11 +93,39 @@ func StartProviderNetwork(node *Node, listenAddrs string, rawPeers string, topic
 		providers:     map[string]wire.StorageProviderRecord{},
 	}
 	network.host.SetStreamHandler(blockProtocolID, network.handleBlockStream)
+
+	// Start DHT service if configured.
+	if dhtCfg != nil {
+		dhtService, dhtErr := falaridht.New(h, *dhtCfg)
+		if dhtErr != nil {
+			log.Printf("provider: DHT init failed (continuing without DHT): %v", dhtErr)
+		} else {
+			network.dhtService = dhtService
+			if err := dhtService.Start(); err != nil {
+				log.Printf("provider: DHT start failed: %v", err)
+			} else {
+				log.Printf("provider: DHT enabled (protocol=%s)", dhtCfg.ProtocolPrefix)
+				// Start DHT publish loop.
+				dhtService.StartPublishLoop(func(shardHash string) (wire.DHTProviderRecord, error) {
+					return network.buildDHTRecord(shardHash)
+				})
+			}
+		}
+	}
+
 	go network.readLoop()
 	network.connectPeers(rawPeers)
 	network.AnnounceOnce()
 	go network.announceLoop()
 	return network, nil
+}
+
+// DHTService returns the DHT service (may be nil if DHT is not enabled).
+func (p *ProviderNetwork) DHTService() *falaridht.Service {
+	if p == nil {
+		return nil
+	}
+	return p.dhtService
 }
 
 func (p *ProviderNetwork) Close() error {
@@ -101,6 +140,9 @@ func (p *ProviderNetwork) Close() error {
 	}
 	if p.topic != nil {
 		_ = p.topic.Close()
+	}
+	if p.dhtService != nil {
+		_ = p.dhtService.Close()
 	}
 	if p.host != nil {
 		return p.host.Close()
@@ -164,6 +206,27 @@ func (p *ProviderNetwork) AnnounceOnce() {
 	if err := p.topic.Publish(p.ctx, raw); err != nil {
 		log.Printf("provider announce publish failed: %v", err)
 	}
+	// Also publish to DHT if available.
+	if p.dhtService != nil {
+		for _, shard := range record.Shards {
+			dhtRecord, buildErr := p.buildDHTRecord(shard.ShardHash)
+			if buildErr != nil {
+				continue
+			}
+			if pubErr := p.dhtService.PublishShard(dhtRecord); pubErr != nil {
+				log.Printf("provider: DHT publish shard %s failed: %v", shard.ShardHash, pubErr)
+			}
+		}
+		for _, hash := range record.ShardHashes {
+			dhtRecord, buildErr := p.buildDHTRecord(hash)
+			if buildErr != nil {
+				continue
+			}
+			if pubErr := p.dhtService.PublishShard(dhtRecord); pubErr != nil {
+				log.Printf("provider: DHT publish shard %s failed: %v", hash, pubErr)
+			}
+		}
+	}
 }
 
 func (p *ProviderNetwork) announceLoop() {
@@ -223,6 +286,24 @@ func (p *ProviderNetwork) connectPeers(rawPeers string) {
 			log.Printf("connect provider peer %s failed: %v", rawPeer, err)
 		}
 	}
+}
+
+// buildDHTRecord constructs a DHT provider record for a shard.
+func (p *ProviderNetwork) buildDHTRecord(shardHash string) (wire.DHTProviderRecord, error) {
+	record := wire.DHTProviderRecord{
+		MinerAddress:   p.node.Address(),
+		PublicKey:      p.node.PublicKeyBase64(),
+		Endpoint:       p.endpoint,
+		PeerID:         p.PeerID(),
+		PeerAddrs:      p.Addrs(),
+		ShardHash:      shardHash,
+		HealthScoreBPS: 10000,
+		ExpiresAtUnix:  time.Now().Add(falaridht.DefaultProviderTTL).Unix(),
+	}
+	if err := wire.SignDHTProvider(&record, p.node.PrivateKey()); err != nil {
+		return wire.DHTProviderRecord{}, err
+	}
+	return record, nil
 }
 
 func splitCSV(raw string) []string {

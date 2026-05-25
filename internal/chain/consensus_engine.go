@@ -183,7 +183,7 @@ func (s *Store) fullStateRootLocked() string {
 		leaves = append(leaves, hashString("intent:"+intent.IntentID+":"+intent.Status+":"+intent.StorageStatus))
 	}
 	for _, miner := range s.data.Miners {
-		leaves = append(leaves, hashString("miner:"+miner.MinerAddress+":"+miner.Status+":"+u64toa(miner.ProofSuccess)+":"+u64toa(miner.ProofFailure)+":"+u64toa(miner.Stake)))
+		leaves = append(leaves, hashString("miner:"+miner.MinerAddress+":"+miner.Status+":"+u64toa(miner.ProofSuccess)+":"+u64toa(miner.ProofFailure)+":"+u64toa(miner.Stake)+":"+booltoa(miner.AccessServiceRequired)+":"+booltoa(miner.UploadServiceEnabled)+":"+booltoa(miner.DownloadServiceEnabled)))
 	}
 	for _, validator := range s.data.Validators {
 		leaves = append(leaves, hashString("validator:"+validator.Address+":"+validator.Status+":"+u64toa(validatorPower(validator))))
@@ -237,6 +237,13 @@ func i64toa(v int64) string {
 		return "-" + u64toa(uint64(-v))
 	}
 	return u64toa(uint64(v))
+}
+
+func booltoa(v bool) string {
+	if v {
+		return "1"
+	}
+	return "0"
 }
 
 func hexEncode(data []byte) string {

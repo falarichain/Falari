@@ -6,7 +6,7 @@ import (
 	"chain/internal/wire"
 )
 
-func TestDistributeRetrievalPoolRewardsByServiceWeight(t *testing.T) {
+func TestRetrievalPoolIsReservedForGatewaySettlement(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -19,14 +19,17 @@ func TestDistributeRetrievalPoolRewardsByServiceWeight(t *testing.T) {
 	if got := store.data.Accounts["miner_a"].Balance; got != 0 {
 		t.Fatalf("expected miner_a balance 0 before vesting release, got %d", got)
 	}
-	if got := store.data.Accounts["miner_a"].PendingMiningRewards; got != 10 {
-		t.Fatalf("expected miner_a pending reward 10, got %d", got)
+	if got := store.data.Accounts["miner_a"].PendingMiningRewards; got != 0 {
+		t.Fatalf("expected miner_a pending reward 0, got %d", got)
 	}
 	if got := store.data.Accounts["miner_b"].Balance; got != 0 {
 		t.Fatalf("expected miner_b balance 0 before vesting release, got %d", got)
 	}
-	if got := store.data.Accounts["miner_b"].PendingMiningRewards; got != 30 {
-		t.Fatalf("expected miner_b pending reward 30, got %d", got)
+	if got := store.data.Accounts["miner_b"].PendingMiningRewards; got != 0 {
+		t.Fatalf("expected miner_b pending reward 0, got %d", got)
+	}
+	if got := store.data.RewardPools.RetrievalRemaining; got != wire.TokenRetrievalPoolInitial {
+		t.Fatalf("expected retrieval pool to remain reserved, got %d", got)
 	}
 }
 

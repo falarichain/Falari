@@ -1,12 +1,12 @@
 package reward
 
 const (
-	TotalSupply        uint64 = 10_000_000_000
-	MiningSupply       uint64 = 9_000_000_000
-	StoragePoolInitial uint64 = 6_300_000_000
-	RetrievalPoolInitial uint64 = 1_200_000_000
+	TotalSupply          uint64 = 10_000_000_000
+	MiningSupply         uint64 = 9_000_000_000
+	StoragePoolInitial   uint64 = 6_000_000_000
+	RetrievalPoolInitial uint64 = 1_000_000_000
 	ValidatorPoolInitial uint64 = 1_000_000_000
-	RepairPoolInitial  uint64 = 500_000_000
+	RepairPoolInitial    uint64 = 1_000_000_000
 )
 
 type Pools struct {

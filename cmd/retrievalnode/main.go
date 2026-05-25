@@ -4,8 +4,10 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	falaridht "chain/internal/dht"
 	"chain/internal/gateway"
 	"chain/internal/storage"
 )
@@ -24,6 +26,10 @@ func main() {
 	p2pListen := flag.String("p2p-listen", "", "libp2p provider discovery listen addrs")
 	p2pPeers := flag.String("p2p-peers", "", "libp2p provider discovery peer addrs")
 	p2pTopic := flag.String("p2p-topic", "storage-chain/providers/devnet", "libp2p provider discovery topic")
+	dhtEnabled := flag.Bool("dht", false, "enable Kademlia DHT for shard discovery")
+	dhtBootstrap := flag.String("dht-bootstrap", "", "comma-separated DHT bootstrap peer multiaddrs")
+	dhtNamespace := flag.String("dht-namespace", falaridht.DefaultProtocolPrefix, "DHT protocol namespace prefix")
+	dhtRepublish := flag.Duration("dht-republish", falaridht.DefaultRepublishInterval, "DHT provider record republish interval")
 
 	gatewayEnabled := flag.Bool("gateway", false, "enable upload gateway (erasure coding + miner dispatch)")
 	gatewayStorage := flag.String("gateway-storage", "", "comma-separated storage miner endpoints for gateway uploads")
@@ -50,13 +56,29 @@ func main() {
 	}
 
 	var providerNetwork *storage.ProviderNetwork
-	if *p2pListen != "" || *p2pPeers != "" {
-		providerNetwork, err = storage.StartProviderNetwork(node, *p2pListen, *p2pPeers, *p2pTopic, registeredEndpoint, *capacity)
+	if *p2pListen != "" || *p2pPeers != "" || *dhtEnabled {
+		var dhtCfg *falaridht.Config
+		if *dhtEnabled {
+			cfg := falaridht.DefaultConfig()
+			cfg.ProtocolPrefix = *dhtNamespace
+			cfg.RepublishInterval = *dhtRepublish
+			cfg.ChainURL = *chainURL
+			if *dhtBootstrap != "" {
+				for _, addr := range strings.Split(*dhtBootstrap, ",") {
+					addr = strings.TrimSpace(addr)
+					if addr != "" {
+						cfg.BootstrapPeers = append(cfg.BootstrapPeers, addr)
+					}
+				}
+			}
+			dhtCfg = &cfg
+		}
+		providerNetwork, err = storage.StartProviderNetworkWithDHT(node, *p2pListen, *p2pPeers, *p2pTopic, registeredEndpoint, *capacity, dhtCfg)
 		if err != nil {
 			log.Fatalf("start provider discovery: %v", err)
 		}
 		defer providerNetwork.Close()
-		log.Printf("provider discovery enabled peer_id=%s addrs=%v topic=%s", providerNetwork.PeerID(), providerNetwork.Addrs(), *p2pTopic)
+		log.Printf("provider discovery enabled peer_id=%s addrs=%v topic=%s dht=%v", providerNetwork.PeerID(), providerNetwork.Addrs(), *p2pTopic, *dhtEnabled)
 	}
 
 	if *chainURL != "" {
@@ -102,6 +124,10 @@ func main() {
 			log.Fatalf("start gateway: %v", err)
 		}
 		log.Printf("gateway enabled (upload+download) storage=%v data-shards=%d parity-shards=%d", storageEndpoints, *dataShards, *parityShards)
+		// Wire DHT service to gateway for fallback shard discovery.
+		if providerNetwork != nil {
+			gwHandler.SetDHTService(providerNetwork.DHTService())
+		}
 	}
 
 	log.Printf("retrieval node %s listening on %s", node.Address(), *addr)

@@ -12,7 +12,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
-func TestSubmitRetrievalReceiptPaysAccessMiner(t *testing.T) {
+func TestSubmitRetrievalReceiptRecordsAccessTelemetryWithoutPayingStorageMiner(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -85,43 +85,26 @@ func TestSubmitRetrievalReceiptPaysAccessMiner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != "accepted" || resp.Reward != 3 {
+	if resp.Status != "accepted" || resp.Reward != 0 {
 		t.Fatalf("unexpected retrieval response %+v", resp)
 	}
-	if account := store.accountLocked(user); account.LockedStorage != 2 {
-		t.Fatalf("expected user locked storage 2 after reward vesting, got %d", account.LockedStorage)
+	if account := store.accountLocked(user); account.LockedStorage != 5 {
+		t.Fatalf("expected user locked storage unchanged, got %d", account.LockedStorage)
 	}
 	if account := store.accountLocked(minerAddress); account.Balance != 0 {
 		t.Fatalf("expected miner balance unchanged (0) before release, got %d", account.Balance)
-	} else if account.PendingMiningRewards != 3 {
-		t.Fatalf("expected miner pending mining rewards 3, got %d", account.PendingMiningRewards)
+	} else if account.PendingMiningRewards != 0 {
+		t.Fatalf("expected miner pending mining rewards 0, got %d", account.PendingMiningRewards)
 	}
 	stats := store.minerStatsLocked(minerAddress)
-	if stats.RetrievalSuccess != 1 || stats.RetrievalBytes != receipt.BytesServed || stats.RetrievalRewards != 3 || stats.Rewards != 3 {
+	if stats.RetrievalSuccess != 1 || stats.RetrievalBytes != receipt.BytesServed || stats.RetrievalRewards != 0 || stats.Rewards != 0 {
 		t.Fatalf("unexpected retrieval miner stats %+v", stats)
 	}
 	if len(store.data.PendingRetrievalRewards) != 0 {
 		t.Fatalf("expected no legacy pending retrieval reward, got %d", len(store.data.PendingRetrievalRewards))
 	}
-	if len(store.data.MiningRewardVestings) != 1 {
-		t.Fatalf("expected 1 mining vesting bucket, got %d", len(store.data.MiningRewardVestings))
-	}
-
-	for key, bucket := range store.data.MiningRewardVestings {
-		if bucket.Total != 3 || bucket.Address != minerAddress {
-			t.Fatalf("unexpected mining vesting bucket: %+v", bucket)
-		}
-		bucket.DayUnix = time.Now().Unix() - miningRewardVestingDays*miningRewardVestingDaySeconds
-		store.data.MiningRewardVestings[key] = bucket
-	}
-	released, total := store.releaseVestedMiningRewardsLocked(time.Now().Unix())
-	if released != 1 || total != 3 {
-		t.Fatalf("expected 1 release total=3, got released=%d total=%d", released, total)
-	}
-	if account := store.accountLocked(minerAddress); account.Balance != 3 {
-		t.Fatalf("expected miner balance 3 after release, got %d", account.Balance)
-	} else if account.PendingMiningRewards != 0 {
-		t.Fatalf("expected miner pending mining rewards 0 after release, got %d", account.PendingMiningRewards)
+	if len(store.data.MiningRewardVestings) != 0 {
+		t.Fatalf("expected no mining vesting bucket for raw retrieval telemetry, got %d", len(store.data.MiningRewardVestings))
 	}
 
 	replay, err := store.SubmitRetrievalReceipt(wire.SubmitRetrievalReceiptRequest{Receipt: receipt})

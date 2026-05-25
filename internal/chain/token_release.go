@@ -77,50 +77,13 @@ func (s *Store) distributeRetrievalPoolRewardsLocked(amount uint64) {
 	if amount == 0 {
 		return
 	}
-	type weightEntry struct {
-		address string
-		weight  uint64
-	}
-	entries := make([]weightEntry, 0, len(s.data.Miners))
-	var totalWeight uint64
-	for addr, stats := range s.data.Miners {
-		if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited || stats.RetrievalBytes == 0 {
-			continue
-		}
-		score := stats.AntiSpamScore
-		if score == 0 {
-			score = 10000
-		}
-		speed := stats.SpeedScore
-		if speed == 0 {
-			speed = 5000
-		}
-		weight := stats.RetrievalBytes * score / 10000
-		weight = weight * speed / 10000
-		if weight == 0 {
-			weight = 1
-		}
-		entries = append(entries, weightEntry{address: addr, weight: weight})
-		totalWeight = saturatingAdd(totalWeight, weight)
-	}
-	if totalWeight == 0 || len(entries) == 0 {
-		return
-	}
-	var distributed uint64
-	for i, entry := range entries {
-		reward := amount * entry.weight / totalWeight
-		if i == len(entries)-1 && distributed < amount {
-			reward = amount - distributed
-		}
-		if reward == 0 {
-			continue
-		}
-		distributed = saturatingAdd(distributed, reward)
-		s.vestMiningRewardLocked(entry.address, reward, miningRewardSourceRetrievalPool, time.Now().Unix())
-		stats := s.minerStatsLocked(entry.address)
-		stats.RetrievalRewards = saturatingAdd(stats.RetrievalRewards, reward)
-		stats.Rewards = saturatingAdd(stats.Rewards, reward)
-		s.data.Miners[entry.address] = stats
+	s.initRewardPoolsLocked()
+	// Access/retrieval pool settlement is intentionally reserved for gateway
+	// scheduling rewards. Storage miners provide upload/download service as a
+	// condition of storage mining, so raw download volume is not rewarded here.
+	if s.data.RewardPools.TokensReleased >= amount {
+		s.data.RewardPools.RetrievalRemaining = saturatingAdd(s.data.RewardPools.RetrievalRemaining, amount)
+		s.data.RewardPools.TokensReleased -= amount
 	}
 }
 

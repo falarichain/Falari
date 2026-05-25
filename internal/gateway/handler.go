@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 
 	"chain/internal/client"
 	chaincrypto "chain/internal/crypto"
+	falaridht "chain/internal/dht"
 	"chain/internal/wire"
 )
 
@@ -30,6 +32,7 @@ type Handler struct {
 	cfg        Config
 	mu         sync.Mutex
 	resumeJobs map[string]*ResumeJob
+	dhtService *falaridht.Service
 }
 
 type ResumeJob struct {
@@ -59,6 +62,11 @@ func New(cfg Config) (*Handler, error) {
 		cfg:        cfg,
 		resumeJobs: map[string]*ResumeJob{},
 	}, nil
+}
+
+// SetDHTService attaches a DHT service for fallback shard discovery.
+func (h *Handler) SetDHTService(svc *falaridht.Service) {
+	h.dhtService = svc
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -381,6 +389,7 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) fetchShard(shardHash, shardCID string) ([]byte, error) {
+	// Phase 1: Try known static endpoints (existing behavior).
 	for _, endpoint := range h.cfg.StorageEndpoints {
 		stClient := client.NewHTTP(endpoint)
 		if shardCID != "" {
@@ -392,6 +401,55 @@ func (h *Handler) fetchShard(shardHash, shardCID string) ([]byte, error) {
 		data, err := stClient.GetBytes("/shards/" + shardHash + ".bin")
 		if err == nil {
 			return data, nil
+		}
+	}
+	// Phase 2: DHT-based discovery (fallback when gateway endpoints fail).
+	if h.dhtService != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), falaridht.DefaultLookupTimeout)
+		defer cancel()
+		providers, err := h.dhtService.FindProviders(ctx, shardHash)
+		if err == nil {
+			for _, provider := range providers {
+				if provider.Endpoint == "" {
+					continue
+				}
+				stClient := client.NewHTTP(provider.Endpoint)
+				if shardCID != "" {
+					data, err := stClient.GetBytes("/blocks/" + shardCID)
+					if err == nil {
+						return data, nil
+					}
+				}
+				data, err := stClient.GetBytes("/shards/" + shardHash + ".bin")
+				if err == nil {
+					return data, nil
+				}
+			}
+		}
+	}
+	// Phase 3: Chain API fallback (safety net).
+	if h.cfg.ChainURL != "" {
+		chainClient := client.NewHTTP(h.cfg.ChainURL)
+		var providersResp struct {
+			Providers []wire.StorageProviderRecord `json:"providers"`
+		}
+		if err := chainClient.Get("/storage/providers?shard_hash="+shardHash, &providersResp); err == nil {
+			for _, provider := range providersResp.Providers {
+				if provider.Endpoint == "" {
+					continue
+				}
+				stClient := client.NewHTTP(provider.Endpoint)
+				if shardCID != "" {
+					data, err := stClient.GetBytes("/blocks/" + shardCID)
+					if err == nil {
+						return data, nil
+					}
+				}
+				data, err := stClient.GetBytes("/shards/" + shardHash + ".bin")
+				if err == nil {
+					return data, nil
+				}
+			}
 		}
 	}
 	return nil, fmt.Errorf("shard %s not found on any storage node", shardHash)
