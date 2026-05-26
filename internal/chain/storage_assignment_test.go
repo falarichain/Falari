@@ -18,9 +18,10 @@ func TestCreateIntentAssignsAndReservesMinerCapacity(t *testing.T) {
 	}
 	registerTestMiner(t, store, "miner_a", "http://miner-a", 10)
 	registerTestMiner(t, store, "miner_b", "http://miner-b", 10)
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", Balance: 10}
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(10))
 
-	resp, err := store.CreateIntent(testAssignedIntentRequest(0))
+	resp, err := store.CreateIntent(testAssignedIntentRequest(t, store, alice, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,8 +57,9 @@ func TestBatchCommitRejectsReceiptFromWrongAssignedMiner(t *testing.T) {
 	}
 	minerA := registerTestMiner(t, store, "miner_a", "http://miner-a", 10)
 	minerB := registerTestMiner(t, store, "miner_b", "http://miner-b", 10)
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", Balance: 10}
-	resp, err := store.CreateIntent(testAssignedIntentRequest(0))
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(10))
+	resp, err := store.CreateIntent(testAssignedIntentRequest(t, store, alice, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,13 +68,15 @@ func TestBatchCommitRejectsReceiptFromWrongAssignedMiner(t *testing.T) {
 	if assignment.MinerAddress == "miner_a" {
 		wrongMiner = minerB
 	}
-	receipt := testAssignmentReceipt(t, resp.IntentID, assignment, wrongMiner)
+	receipt := testAssignmentReceipt(t, resp.IntentID, assignment, wrongMiner, alice.Addr)
 
-	_, err = store.BatchCommit(wire.BatchCommitRequest{
+	bcReq := wire.BatchCommitRequest{
 		IntentID: resp.IntentID,
-		User:     "alice",
+		User:     alice.Addr,
 		Receipts: []wire.MinerReceipt{receipt},
-	})
+	}
+	signBatchCommit(t, store, &bcReq, alice)
+	_, err = store.BatchCommit(bcReq)
 	if err == nil {
 		t.Fatal("expected wrong assigned miner receipt to be rejected")
 	}
@@ -87,8 +91,9 @@ func TestBatchCommitReleasesReservationAndMarksUsed(t *testing.T) {
 		"miner_a": registerTestMiner(t, store, "miner_a", "http://miner-a", 10),
 		"miner_b": registerTestMiner(t, store, "miner_b", "http://miner-b", 10),
 	}
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", Balance: 10}
-	resp, err := store.CreateIntent(testAssignedIntentRequest(0))
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(10))
+	resp, err := store.CreateIntent(testAssignedIntentRequest(t, store, alice, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,13 +102,15 @@ func TestBatchCommitReleasesReservationAndMarksUsed(t *testing.T) {
 	if minerBefore.ReservedBytes < uint64(assignment.ShardSize) {
 		t.Fatalf("expected reservation before commit, miner=%+v assignment=%+v", minerBefore, assignment)
 	}
-	receipt := testAssignmentReceipt(t, resp.IntentID, assignment, miners[assignment.MinerAddress])
+	receipt := testAssignmentReceipt(t, resp.IntentID, assignment, miners[assignment.MinerAddress], alice.Addr)
 
-	if _, err := store.BatchCommit(wire.BatchCommitRequest{
+	bcReq := wire.BatchCommitRequest{
 		IntentID: resp.IntentID,
-		User:     "alice",
+		User:     alice.Addr,
 		Receipts: []wire.MinerReceipt{receipt},
-	}); err != nil {
+	}
+	signBatchCommit(t, store, &bcReq, alice)
+	if _, err := store.BatchCommit(bcReq); err != nil {
 		t.Fatal(err)
 	}
 	minerAfter := store.data.Miners[assignment.MinerAddress]
@@ -139,48 +146,25 @@ func registerTestMiner(t *testing.T, store *Store, address string, endpoint stri
 		PublicKey:     identity.PublicKey,
 		Endpoint:      endpoint,
 		CapacityBytes: capacity,
-		Stake:         1,
+		Stake:         gfTokens(1),
 	}
 	if err := wire.SignMinerRegistration(&req, priv); err != nil {
 		t.Fatal(err)
 	}
-	store.data.Accounts[address] = wire.Account{Address: address, Balance: 1}
+	store.data.Accounts[address] = wire.Account{Address: address, Balance: gfTokens(1)}
 	if _, err := store.RegisterMiner(req); err != nil {
 		t.Fatal(err)
 	}
 	return identity
 }
 
-func testAssignedIntentRequest(lockedFee uint64) wire.CreateIntentRequest {
-	return wire.CreateIntentRequest{
-		User:         "alice",
-		FileName:     "file.bin",
-		FileSize:     6,
-		SegmentSize:  6,
-		FileRoot:     "file-root",
-		SegmentRoots: []string{"segment-root"},
-		Segments: []wire.SegmentPlan{{
-			SegmentID:   0,
-			SegmentRoot: "segment-root",
-			ShardHashes: []string{
-				"shard-a",
-				"shard-b",
-			},
-		}},
-		Erasure:      wire.ErasurePolicy{DataShards: 2, ParityShards: 0},
-		Policy:       wire.StoragePolicy{Duration: int64(30 * 24 * time.Hour / time.Second)},
-		LockedFee:    lockedFee,
-		DeadlineUnix: time.Now().Add(time.Hour).Unix(),
-	}
-}
-
-func testAssignmentReceipt(t *testing.T, intentID string, assignment wire.StorageAssignment, miner testMinerIdentity) wire.MinerReceipt {
+func testAssignmentReceipt(t *testing.T, intentID string, assignment wire.StorageAssignment, miner testMinerIdentity, userAddr string) wire.MinerReceipt {
 	t.Helper()
 	receipt := wire.MinerReceipt{
 		Version:          1,
 		MinerAddress:     miner.Address,
 		MinerPublicKey:   miner.PublicKey,
-		User:             "alice",
+		User:             userAddr,
 		IntentID:         intentID,
 		FileRoot:         "file-root",
 		SegmentID:        assignment.SegmentID,

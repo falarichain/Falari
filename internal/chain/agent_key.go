@@ -31,35 +31,24 @@ var agentAllowedOps = []string{
 const maxAgentKeyNameLen = 64
 const maxAgentKeyPermissions = 10
 
+type registerAgentKeyTxPayload struct {
+	Request wire.RegisterAgentKeyRequest `json:"request"`
+	Key     wire.AgentKey                `json:"key"`
+}
+
+type revokeAgentKeyTxPayload struct {
+	Request wire.RevokeAgentKeyRequest `json:"request"`
+}
+
 func (s *Store) RegisterAgentKey(req wire.RegisterAgentKeyRequest) (wire.RegisterAgentKeyResponse, error) {
 	req.Master = wire.NormalizeAddress(req.Master)
-	if req.Master == "" {
-		return wire.RegisterAgentKeyResponse{}, errors.New("master address is required")
-	}
-	if req.AgentPub == "" {
-		return wire.RegisterAgentKeyResponse{}, errors.New("agent public key is required")
-	}
-	if strings.TrimSpace(req.Name) == "" {
-		return wire.RegisterAgentKeyResponse{}, errors.New("name is required")
-	}
-	if len(req.Name) > maxAgentKeyNameLen {
-		return wire.RegisterAgentKeyResponse{}, errors.New("name exceeds maximum length")
-	}
 	req.Name = strings.TrimSpace(req.Name)
-	if len(req.Permissions) == 0 || len(req.Permissions) > maxAgentKeyPermissions {
-		return wire.RegisterAgentKeyResponse{}, errors.New("permissions must have between 1 and 10 entries")
+	var err error
+	req.Permissions, err = normalizeAgentPermissions(req.Permissions)
+	if err != nil {
+		return wire.RegisterAgentKeyResponse{}, err
 	}
-	for _, p := range req.Permissions {
-		p = strings.TrimSpace(p)
-		if p == "" || !slices.Contains(agentAllowedOps, p) {
-			return wire.RegisterAgentKeyResponse{}, errors.New("invalid agent permission: " + p)
-		}
-	}
-	if req.ExpiresAt > 0 && req.ExpiresAt <= time.Now().Unix() {
-		return wire.RegisterAgentKeyResponse{}, errors.New("expires_at must be in the future")
-	}
-
-	if err := wire.VerifyRegisterAgentKey(req); err != nil {
+	if err := validateRegisterAgentKeyRequest(req, true); err != nil {
 		return wire.RegisterAgentKeyResponse{}, err
 	}
 
@@ -67,16 +56,19 @@ func (s *Store) RegisterAgentKey(req wire.RegisterAgentKeyRequest) (wire.Registe
 	defer s.mu.Unlock()
 
 	master := wire.NormalizeAddress(req.Master)
-	account := s.accountLocked(master)
-	nonce := account.Nonce
-	account.Nonce++
-	s.data.Accounts[master] = account
+	if err := s.verifyAccountRequestLocked(req.ChainID, master, req.Nonce, func() error {
+		return wire.VerifyRegisterAgentKey(req)
+	}); err != nil {
+		return wire.RegisterAgentKeyResponse{}, err
+	}
+	nonce := req.Nonce
+	s.consumeAccountNonceLocked(master)
 
 	keyID := agentKeyID(master, nonce)
 	now := time.Now().Unix()
 	dayStart := startOfNextDay()
 
-	s.data.AgentKeys[keyID] = &wire.AgentKey{
+	key := wire.AgentKey{
 		KeyID:       keyID,
 		Name:        req.Name,
 		Master:      master,
@@ -91,11 +83,13 @@ func (s *Store) RegisterAgentKey(req wire.RegisterAgentKeyRequest) (wire.Registe
 		CreatedAt:   now,
 		ExpiresAt:   req.ExpiresAt,
 	}
+	s.data.AgentKeys[keyID] = &key
+	s.recordTxLocked("register_agent_key", master, registerAgentKeyTxPayload{Request: req, Key: key})
 
 	if err := s.saveLocked(); err != nil {
 		return wire.RegisterAgentKeyResponse{}, err
 	}
-	return wire.RegisterAgentKeyResponse{Key: *s.data.AgentKeys[keyID]}, nil
+	return wire.RegisterAgentKeyResponse{Key: key}, nil
 }
 
 func (s *Store) RevokeAgentKey(req wire.RevokeAgentKeyRequest) error {
@@ -105,10 +99,6 @@ func (s *Store) RevokeAgentKey(req wire.RevokeAgentKeyRequest) error {
 	}
 	if req.Master == "" {
 		return errors.New("master address is required")
-	}
-
-	if err := wire.VerifyRevokeAgentKey(req); err != nil {
-		return err
 	}
 
 	s.mu.Lock()
@@ -125,13 +115,15 @@ func (s *Store) RevokeAgentKey(req wire.RevokeAgentKeyRequest) error {
 		return errors.New("agent key already revoked")
 	}
 
-	if req.Nonce <= s.data.Accounts[req.Master].Nonce {
-		acc := s.data.Accounts[req.Master]
-		acc.Nonce = req.Nonce + 1
-		s.data.Accounts[req.Master] = acc
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.Master, req.Nonce, func() error {
+		return wire.VerifyRevokeAgentKey(req)
+	}); err != nil {
+		return err
 	}
+	s.consumeAccountNonceLocked(req.Master)
 
 	key.Revoked = true
+	s.recordTxLocked("revoke_agent_key", req.Master, revokeAgentKeyTxPayload{Request: req})
 	return s.saveLocked()
 }
 
@@ -165,7 +157,7 @@ func (s *Store) validateAgentKeyTxLocked(tx wire.Transaction) error {
 		return errors.New("agent key expired")
 	}
 
-	if !slices.Contains(key.Permissions, tx.Type) {
+	if !agentKeyAllowsOperation(key.Permissions, tx.Type) {
 		return errors.New("agent key lacks permission: " + tx.Type)
 	}
 
@@ -204,6 +196,134 @@ func agentKeyID(master string, nonce uint64) string {
 	}{Master: wire.NormalizeAddress(master), Nonce: nonce})
 	hash := sha256.Sum256(payload)
 	return "key_" + base64.RawURLEncoding.EncodeToString(hash[:12])
+}
+
+func normalizeAgentPermissions(permissions []string) ([]string, error) {
+	if len(permissions) == 0 || len(permissions) > maxAgentKeyPermissions {
+		return nil, errors.New("permissions must have between 1 and 10 entries")
+	}
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(permissions))
+	for _, permission := range permissions {
+		p := strings.TrimSpace(permission)
+		if p == "" || !slices.Contains(agentAllowedOps, p) {
+			return nil, errors.New("invalid agent permission: " + p)
+		}
+		if seen[p] {
+			return nil, errors.New("duplicate agent permission: " + p)
+		}
+		seen[p] = true
+		normalized = append(normalized, p)
+	}
+	return normalized, nil
+}
+
+func validateRegisterAgentKeyRequest(req wire.RegisterAgentKeyRequest, requireFreshExpiry bool) error {
+	if req.Master == "" {
+		return errors.New("master address is required")
+	}
+	if req.AgentPub == "" {
+		return errors.New("agent public key is required")
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return errors.New("name is required")
+	}
+	if len(req.Name) > maxAgentKeyNameLen {
+		return errors.New("name exceeds maximum length")
+	}
+	if requireFreshExpiry && req.ExpiresAt > 0 && req.ExpiresAt <= time.Now().Unix() {
+		return errors.New("expires_at must be in the future")
+	}
+	return nil
+}
+
+func (s *Store) applyRegisterAgentKeyLocked(payload registerAgentKeyTxPayload) error {
+	req := payload.Request
+	req.Master = wire.NormalizeAddress(req.Master)
+	req.Name = strings.TrimSpace(req.Name)
+	permissions, err := normalizeAgentPermissions(req.Permissions)
+	if err != nil {
+		return err
+	}
+	req.Permissions = permissions
+	if err := validateRegisterAgentKeyRequest(req, false); err != nil {
+		return err
+	}
+	expectedKeyID := agentKeyID(req.Master, req.Nonce)
+	if payload.Key.KeyID != expectedKeyID {
+		return errors.New("replay register agent key id mismatch")
+	}
+	if _, exists := s.data.AgentKeys[expectedKeyID]; exists {
+		return nil
+	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.Master, req.Nonce, func() error {
+		return wire.VerifyRegisterAgentKey(req)
+	}); err != nil {
+		return err
+	}
+	if err := validateAgentKeyMatchesRequest(payload.Key, req); err != nil {
+		return err
+	}
+	s.consumeAccountNonceLocked(req.Master)
+	key := payload.Key
+	key.Master = req.Master
+	key.Name = req.Name
+	key.Permissions = append([]string(nil), req.Permissions...)
+	s.data.AgentKeys[expectedKeyID] = &key
+	return nil
+}
+
+func (s *Store) applyRevokeAgentKeyLocked(payload revokeAgentKeyTxPayload) error {
+	req := payload.Request
+	req.Master = wire.NormalizeAddress(req.Master)
+	if req.KeyID == "" {
+		return errors.New("key id is required")
+	}
+	if req.Master == "" {
+		return errors.New("master address is required")
+	}
+	key, ok := s.data.AgentKeys[req.KeyID]
+	if !ok {
+		return errors.New("replay revoke agent key not found")
+	}
+	if key.Master != req.Master {
+		return errors.New("replay revoke agent key master mismatch")
+	}
+	if key.Revoked {
+		return nil
+	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.Master, req.Nonce, func() error {
+		return wire.VerifyRevokeAgentKey(req)
+	}); err != nil {
+		return err
+	}
+	s.consumeAccountNonceLocked(req.Master)
+	key.Revoked = true
+	return nil
+}
+
+func validateAgentKeyMatchesRequest(key wire.AgentKey, req wire.RegisterAgentKeyRequest) error {
+	if key.Master != req.Master || key.Name != req.Name || key.AgentPub != req.AgentPub {
+		return errors.New("replay register agent key metadata mismatch")
+	}
+	if key.DailyLimit != req.DailyLimit || key.TotalLimit != req.TotalLimit || key.ExpiresAt != req.ExpiresAt {
+		return errors.New("replay register agent key limits mismatch")
+	}
+	if key.Nonce != 0 || key.UsedToday != 0 || key.UsedTotal != 0 || key.Revoked {
+		return errors.New("replay register agent key state mismatch")
+	}
+	if key.CreatedAt == 0 || key.DayResetAt == 0 {
+		return errors.New("replay register agent key timestamps missing")
+	}
+	if len(key.Permissions) != len(req.Permissions) {
+		return errors.New("replay register agent key permissions mismatch")
+	}
+	for i := range key.Permissions {
+		if key.Permissions[i] != req.Permissions[i] {
+			return errors.New("replay register agent key permissions mismatch")
+		}
+	}
+	return nil
 }
 
 func startOfNextDay() int64 {

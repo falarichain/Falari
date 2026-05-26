@@ -12,29 +12,32 @@ func TestSettleExpiredIntentRefundsLockedStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", Balance: 10, LockedStorage: 20}
+	alice := newTestUser(t)
+	store.data.Accounts[alice.Addr] = wire.Account{Address: alice.Addr, Balance: gfTokens(10), LockedStorage: gfTokens(20)}
 	intent := &Intent{
 		IntentView: wire.IntentView{
 			IntentID:  "intent_refund",
-			User:      "alice",
+			User:      alice.Addr,
 			FileName:  "refund.bin",
 			FileSize:  1,
-			LockedFee: 20,
+			LockedFee: gfTokens(20),
 			Status:    wire.StatusPartial,
 		},
 		DeadlineUnix: time.Now().Add(-time.Minute).Unix(),
 	}
 	store.data.Intents[intent.IntentID] = intent
 
-	resp, err := store.SettleIntent(wire.SettleIntentRequest{IntentID: intent.IntentID, User: "alice"})
+	siReq := wire.SettleIntentRequest{IntentID: intent.IntentID, User: alice.Addr}
+	signSettleIntent(t, store, &siReq, alice)
+	resp, err := store.SettleIntent(siReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.RefundedFee != 20 || resp.Status != wire.StatusExpired {
+	if resp.RefundedFee != gfTokens(20) || resp.Status != wire.StatusExpired {
 		t.Fatalf("unexpected settlement response %+v", resp)
 	}
-	account := store.accountLocked("alice")
-	if account.Balance != 30 || account.LockedStorage != 0 {
+	account := store.accountLocked(alice.Addr)
+	if account.Balance != gfTokens(30) || account.LockedStorage != 0 {
 		t.Fatalf("unexpected account after refund %+v", account)
 	}
 }
@@ -44,15 +47,16 @@ func TestSettleIntentRefundsOnlyUnpaidEscrow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", LockedStorage: 13}
+	alice := newTestUser(t)
+	store.data.Accounts[alice.Addr] = wire.Account{Address: alice.Addr, LockedStorage: gfTokens(13)}
 	intent := &Intent{
 		IntentView: wire.IntentView{
 			IntentID:      "intent_partial_refund",
-			User:          "alice",
+			User:          alice.Addr,
 			FileName:      "partial.bin",
 			FileSize:      1,
-			LockedFee:     20,
-			PaidFee:       7,
+			LockedFee:     gfTokens(20),
+			PaidFee:       gfTokens(7),
 			Status:        wire.StatusFinalized,
 			Policy:        wire.StoragePolicy{Duration: 1},
 			SegmentSize:   1,
@@ -63,15 +67,17 @@ func TestSettleIntentRefundsOnlyUnpaidEscrow(t *testing.T) {
 	}
 	store.data.Intents[intent.IntentID] = intent
 
-	resp, err := store.SettleIntent(wire.SettleIntentRequest{IntentID: intent.IntentID})
+	siReq := wire.SettleIntentRequest{IntentID: intent.IntentID, User: alice.Addr}
+	signSettleIntent(t, store, &siReq, alice)
+	resp, err := store.SettleIntent(siReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.RefundedFee != 13 || resp.PaidFee != 7 {
+	if resp.RefundedFee != gfTokens(13) || resp.PaidFee != gfTokens(7) {
 		t.Fatalf("unexpected settlement response %+v", resp)
 	}
-	account := store.accountLocked("alice")
-	if account.Balance != 13 || account.LockedStorage != 0 {
+	account := store.accountLocked(alice.Addr)
+	if account.Balance != gfTokens(13) || account.LockedStorage != 0 {
 		t.Fatalf("unexpected account after partial refund %+v", account)
 	}
 }
@@ -82,14 +88,14 @@ func TestSettleExpiredIntentsAutomaticallySettlesDueOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", LockedStorage: 10}
-	store.data.Accounts["bob"] = wire.Account{Address: "bob", LockedStorage: 20}
+	store.data.Accounts["alice"] = wire.Account{Address: "alice", LockedStorage: gfTokens(10)}
+	store.data.Accounts["bob"] = wire.Account{Address: "bob", LockedStorage: gfTokens(20)}
 	store.data.Intents["intent_due"] = &Intent{
 		IntentView: wire.IntentView{
 			IntentID:  "intent_due",
 			User:      "alice",
 			FileSize:  1,
-			LockedFee: 10,
+			LockedFee: gfTokens(10),
 			Status:    wire.StatusPartial,
 		},
 		DeadlineUnix: now.Add(-time.Minute).Unix(),
@@ -99,7 +105,7 @@ func TestSettleExpiredIntentsAutomaticallySettlesDueOnly(t *testing.T) {
 			IntentID:  "intent_permanent",
 			User:      "bob",
 			FileSize:  1,
-			LockedFee: 20,
+			LockedFee: gfTokens(20),
 			Status:    wire.StatusFinalized,
 			Policy:    wire.StoragePolicy{Class: "permanent"},
 		},
@@ -114,11 +120,11 @@ func TestSettleExpiredIntentsAutomaticallySettlesDueOnly(t *testing.T) {
 		t.Fatalf("expected only due intent to settle, got %+v", responses)
 	}
 	alice := store.accountLocked("alice")
-	if alice.Balance != 10 || alice.LockedStorage != 0 {
+	if alice.Balance != gfTokens(10) || alice.LockedStorage != 0 {
 		t.Fatalf("unexpected alice account %+v", alice)
 	}
 	bob := store.accountLocked("bob")
-	if bob.Balance != 0 || bob.LockedStorage != 20 {
+	if bob.Balance != 0 || bob.LockedStorage != gfTokens(20) {
 		t.Fatalf("permanent intent should remain locked, bob=%+v", bob)
 	}
 	if store.data.Intents["intent_permanent"].Status != wire.StatusFinalized {
@@ -131,13 +137,13 @@ func TestSettlePermanentFinalizedIntentIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", LockedStorage: 5}
+	store.data.Accounts["alice"] = wire.Account{Address: "alice", LockedStorage: gfTokens(5)}
 	store.data.Intents["intent_permanent_reject"] = &Intent{
 		IntentView: wire.IntentView{
 			IntentID:  "intent_permanent_reject",
 			User:      "alice",
 			FileSize:  1,
-			LockedFee: 5,
+			LockedFee: gfTokens(5),
 			Status:    wire.StatusFinalized,
 			Policy:    wire.StoragePolicy{Class: "permanent"},
 		},
@@ -153,43 +159,48 @@ func TestPermanentFundTopUpAndTerminateBurnsRemainingDonation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	intent := testLifecycleIntent()
+	alice := newTestUser(t)
+	intent := testLifecycleIntentWithUser(alice.Addr)
 	intent.Policy = wire.StoragePolicy{Class: "permanent", Duration: 0}
-	intent.LockedFee = 10
-	intent.PaidFee = 2
-	intent.PermanentFundBalance = 8
+	intent.LockedFee = gfTokens(10)
+	intent.PaidFee = gfTokens(2)
+	intent.PermanentFundBalance = gfTokens(8)
 	store.data.Intents[intent.IntentID] = intent
-	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, Balance: 5, LockedStorage: 8}
+	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, Balance: gfTokens(5), LockedStorage: gfTokens(8)}
 	store.data.PermanentStorageFunds[intent.IntentID] = wire.PermanentStorageFund{
 		IntentID:      intent.IntentID,
 		User:          intent.User,
-		Balance:       8,
-		Contributed:   10,
-		Paid:          2,
+		Balance:       gfTokens(8),
+		Contributed:   gfTokens(10),
+		Paid:          gfTokens(2),
 		CreatedAtUnix: time.Now().Unix(),
 		UpdatedAtUnix: time.Now().Unix(),
 	}
 
-	topUp, err := store.TopUpPermanentFund(wire.PermanentFundTopUpRequest{IntentID: intent.IntentID, User: intent.User, Amount: 5})
+	topUpReq := wire.PermanentFundTopUpRequest{IntentID: intent.IntentID, User: intent.User, Amount: gfTokens(5)}
+	signTopUpPermanentFund(t, store, &topUpReq, alice)
+	topUp, err := store.TopUpPermanentFund(topUpReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if topUp.Fund.Balance != 13 || topUp.Fund.Contributed != 15 {
+	if topUp.Fund.Balance != gfTokens(13) || topUp.Fund.Contributed != gfTokens(15) {
 		t.Fatalf("unexpected topup fund %+v", topUp.Fund)
 	}
 	account := store.accountLocked(intent.User)
-	if account.Balance != 0 || account.LockedStorage != 13 {
+	if account.Balance != 0 || account.LockedStorage != gfTokens(13) {
 		t.Fatalf("unexpected account after topup %+v", account)
 	}
 
-	resp, err := store.TerminateDeal(wire.TerminateDealRequest{IntentID: intent.IntentID, User: intent.User})
+	tdReq := wire.TerminateDealRequest{IntentID: intent.IntentID, User: intent.User}
+	signTerminateDeal(t, store, &tdReq, alice)
+	resp, err := store.TerminateDeal(tdReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.RefundedFee != 0 {
 		t.Fatalf("permanent fund termination should not refund, got %+v", resp)
 	}
-	if resp.BurnedFee != 13 {
+	if resp.BurnedFee != gfTokens(13) {
 		t.Fatalf("expected 13 tokens burned, got %d", resp.BurnedFee)
 	}
 	account = store.accountLocked(intent.User)
@@ -197,10 +208,10 @@ func TestPermanentFundTopUpAndTerminateBurnsRemainingDonation(t *testing.T) {
 		t.Fatalf("expected permanent donation to leave user locked storage, got %+v", account)
 	}
 	fund := store.data.PermanentStorageFunds[intent.IntentID]
-	if !fund.Closed || fund.Burned != 13 || fund.Balance != 0 {
+	if !fund.Closed || fund.Burned != gfTokens(13) || fund.Balance != 0 {
 		t.Fatalf("unexpected closed permanent fund %+v", fund)
 	}
-	if store.data.StorageFeePool.TotalBurned != 13 {
+	if store.data.StorageFeePool.TotalBurned != gfTokens(13) {
 		t.Fatalf("expected 13 tokens in TotalBurned, got %d", store.data.StorageFeePool.TotalBurned)
 	}
 }

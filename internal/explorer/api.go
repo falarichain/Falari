@@ -22,11 +22,9 @@ func NewServer(store *Store) *Server {
 }
 
 // Routes returns the HTTP handler with all explorer API routes.
+// CORS and rate limiting should be applied by the caller.
 func (srv *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-
-	// CORS middleware wrapper
-	handler := corsMiddleware(mux)
 
 	// ---- Dashboard / status ----
 	mux.HandleFunc("GET /api/status", srv.handleStatus)
@@ -62,7 +60,7 @@ func (srv *Server) Routes() http.Handler {
 	// ---- Stats ----
 	mux.HandleFunc("GET /api/stats/daily", srv.handleDailyStats)
 
-	return handler
+	return mux
 }
 
 // ============================================================
@@ -856,19 +854,6 @@ func (srv *Server) handleDailyStats(w http.ResponseWriter, r *http.Request) {
 
 func fetchChainAccount(chainURL, address string, out *wire.Account) error {
 	return client.NewHTTP(chainURL).Get("/accounts/"+address, out)
-}
-
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

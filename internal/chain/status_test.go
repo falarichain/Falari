@@ -13,7 +13,8 @@ func TestStatusSummarizesOperationalState(t *testing.T) {
 		t.Fatal(err)
 	}
 	registerTestMiner(t, store, "miner_a", "http://miner-a", 100)
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", Balance: 100}
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(100))
 	store.data.Blocks = append(store.data.Blocks, wire.Block{
 		Height:   1,
 		Hash:     "block_hash",
@@ -25,7 +26,7 @@ func TestStatusSummarizesOperationalState(t *testing.T) {
 	store.data.Epochs["epoch_1"] = wire.ProofEpoch{EpochID: "epoch_1", Status: "active"}
 	store.data.RepairTasks["repair_1"] = wire.RepairTask{RepairID: "repair_1", Status: "pending"}
 
-	resp, err := store.CreateIntent(testAssignedIntentRequest(0))
+	resp, err := store.CreateIntent(testAssignedIntentRequest(t, store, alice, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

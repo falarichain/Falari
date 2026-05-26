@@ -17,19 +17,131 @@ func (s *Store) initRewardPoolsLocked() {
 func (s *Store) releaseEpochRewardsLocked() {
 	s.initRewardPoolsLocked()
 	params := s.miningParamsLocked()
-	storageRelease, retrievalRelease, validatorRelease := s.data.RewardPools.ReleaseEpochRewards(
-		params.StorageReleaseRateBPS,
-		params.RetrievalReleaseRateBPS,
-		params.ValidatorReleaseRateBPS,
+
+	now := time.Now().Unix()
+	lastRelease := s.data.LastReleaseAtUnix
+	if lastRelease == 0 {
+		lastRelease = now
+		s.data.LastReleaseAtUnix = now
+		return
+	}
+	elapsed := now - lastRelease
+	if elapsed <= 0 {
+		return
+	}
+	s.data.LastReleaseAtUnix = now
+
+	const secondsPerYear int64 = 365 * 86400
+
+	// Governance-controlled release coefficient.
+	coeff := params.ReleaseCoefficientBPS
+	if coeff == 0 {
+		coeff = 10000
+	}
+
+	// Storage: exponential decay (pool_remaining × rate).
+	storageBPS := params.StorageAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
+	storageBPS = storageBPS * coeff / 10000
+	// Pass 0 for retrieval/validator/foundation — handled separately.
+	storageRelease, _, _, _ := s.data.RewardPools.ReleaseEpochRewards(
+		storageBPS, 0, 0, 0,
 	)
+
+	// Foundation: linear release (initialAmount × rate).
+	foundationBPS := params.FoundationAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
+	foundationBPS = foundationBPS * coeff / 10000
+	foundationRelease := s.data.RewardPools.ReleaseLinear(
+		&s.data.RewardPools.FoundationRemaining,
+		reward.FoundationPoolInitial,
+		foundationBPS,
+	)
+
+	// Retrieval: linear release (initialAmount × rate).
+	retrievalBPS := params.RetrievalAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
+	retrievalBPS = retrievalBPS * coeff / 10000
+	retrievalRelease := s.data.RewardPools.ReleaseLinear(
+		&s.data.RewardPools.RetrievalRemaining,
+		reward.RetrievalPoolInitial,
+		retrievalBPS,
+	)
+
+	// Validator: released per-block, not per-epoch (see releaseValidatorPerBlockLocked).
 
 	s.distributeStoragePoolRewardsLocked(storageRelease)
 	s.distributeRetrievalPoolRewardsLocked(retrievalRelease)
-	s.distributeValidatorPoolRewardsLocked(validatorRelease)
-	if storageRelease > 0 || retrievalRelease > 0 || validatorRelease > 0 {
-		log.Printf("token release epoch=%d storage=%d retrieval=%d validator=%d total=%d",
-			s.data.EpochRound, storageRelease, retrievalRelease, validatorRelease,
-			storageRelease+retrievalRelease+validatorRelease)
+	s.distributeFoundationPoolRewardsLocked(foundationRelease)
+	if storageRelease > 0 || retrievalRelease > 0 || foundationRelease > 0 {
+		log.Printf("token release epoch=%d elapsed=%ds coeff=%d storage=%d retrieval=%d foundation=%d total=%d",
+			s.data.EpochRound, elapsed, coeff, storageRelease, retrievalRelease, foundationRelease,
+			storageRelease+retrievalRelease+foundationRelease)
+	}
+}
+
+// releaseValidatorPerBlockLocked releases validator rewards proportional to the
+// time elapsed since the last per-block release. Uses linear release (constant
+// emission based on ValidatorPoolInitial). Called on every block production / acceptance.
+// Rewards are split: BlockProductionRewardBPS (default 30%) goes directly to the block
+// producer without vesting; the remainder (70%) is distributed to all consensus
+// validators with 90-day vesting.
+func (s *Store) releaseValidatorPerBlockLocked(now int64, producerAddress string) {
+	s.initRewardPoolsLocked()
+	params := s.miningParamsLocked()
+
+	lastRelease := s.data.LastValidatorReleaseAtUnix
+	if lastRelease == 0 {
+		s.data.LastValidatorReleaseAtUnix = now
+		return
+	}
+	elapsed := now - lastRelease
+	if elapsed <= 0 {
+		return
+	}
+	s.data.LastValidatorReleaseAtUnix = now
+
+	const secondsPerYear int64 = 365 * 86400
+
+	// Governance-controlled release coefficient.
+	coeff := params.ReleaseCoefficientBPS
+	if coeff == 0 {
+		coeff = 10000
+	}
+
+	// Validator: linear release (initialAmount × rate).
+	validatorBPS := params.ValidatorAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
+	validatorBPS = validatorBPS * coeff / 10000
+	validatorRelease := s.data.RewardPools.ReleaseLinear(
+		&s.data.RewardPools.ValidatorRemaining,
+		reward.ValidatorPoolInitial,
+		validatorBPS,
+	)
+
+	if validatorRelease == 0 {
+		return
+	}
+
+	// Split: block production reward (direct to producer) + staking reward (distributed).
+	productionBPS := params.BlockProductionRewardBPS
+	if productionBPS == 0 {
+		productionBPS = 3000
+	}
+	blockReward := validatorRelease * productionBPS / 10000
+	stakingReward := validatorRelease - blockReward
+
+	// Credit block production reward directly to producer (no vesting).
+	if blockReward > 0 && producerAddress != "" {
+		account := s.accountLocked(producerAddress)
+		account.Balance += blockReward
+		s.data.Accounts[account.Address] = account
+		validator := s.validatorLocked(producerAddress)
+		validator.Rewards = saturatingAdd(validator.Rewards, blockReward)
+		s.data.Validators[producerAddress] = validator
+	}
+
+	// Distribute staking reward to all consensus validators (with vesting).
+	s.distributeValidatorPoolRewardsLocked(stakingReward)
+	if validatorRelease > 0 {
+		log.Printf("validator per-block release elapsed=%ds coeff=%d total=%d producer=%d staking=%d",
+			elapsed, coeff, validatorRelease, blockReward, stakingReward)
 	}
 }
 
@@ -77,14 +189,38 @@ func (s *Store) distributeRetrievalPoolRewardsLocked(amount uint64) {
 	if amount == 0 {
 		return
 	}
-	s.initRewardPoolsLocked()
-	// Access/retrieval pool settlement is intentionally reserved for gateway
-	// scheduling rewards. Storage miners provide upload/download service as a
-	// condition of storage mining, so raw download volume is not rewarded here.
-	if s.data.RewardPools.TokensReleased >= amount {
-		s.data.RewardPools.RetrievalRemaining = saturatingAdd(s.data.RewardPools.RetrievalRemaining, amount)
-		s.data.RewardPools.TokensReleased -= amount
+	addr := s.data.RetrievalAddress
+	if addr == "" {
+		// No retrieval address configured — return tokens to pool.
+		s.initRewardPoolsLocked()
+		if s.data.RewardPools.TokensReleased >= amount {
+			s.data.RewardPools.RetrievalRemaining = saturatingAdd(s.data.RewardPools.RetrievalRemaining, amount)
+			s.data.RewardPools.TokensReleased -= amount
+		}
+		return
 	}
+	account := s.accountLocked(addr)
+	account.Balance += amount
+	s.data.Accounts[account.Address] = account
+}
+
+func (s *Store) distributeFoundationPoolRewardsLocked(amount uint64) {
+	if amount == 0 {
+		return
+	}
+	addr := s.data.FoundationAddress
+	if addr == "" {
+		// No foundation address configured — return tokens to pool.
+		s.initRewardPoolsLocked()
+		if s.data.RewardPools.TokensReleased >= amount {
+			s.data.RewardPools.FoundationRemaining = saturatingAdd(s.data.RewardPools.FoundationRemaining, amount)
+			s.data.RewardPools.TokensReleased -= amount
+		}
+		return
+	}
+	account := s.accountLocked(addr)
+	account.Balance += amount
+	s.data.Accounts[account.Address] = account
 }
 
 func (s *Store) distributeValidatorPoolRewardsLocked(amount uint64) {

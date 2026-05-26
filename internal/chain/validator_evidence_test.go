@@ -119,7 +119,7 @@ func registeredTestValidatorWithIdentity(t *testing.T, identity *ValidatorIdenti
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Faucet(wire.FaucetRequest{Address: identity.Address, Amount: stake}); err != nil {
+	if err := store.CreditBalance(identity.Address, stake); err != nil {
 		t.Fatal(err)
 	}
 	registration, err := identity.RegistrationRequest("http://localhost:8080", stake)

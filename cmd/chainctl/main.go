@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	crand "crypto/rand"
@@ -106,8 +107,6 @@ func main() {
 		finalizeEpoch(os.Args[2:])
 	case "miner":
 		minerStats(os.Args[2:])
-	case "faucet":
-		faucet(os.Args[2:])
 	case "balance":
 		balance(os.Args[2:])
 	case "transfer":
@@ -148,6 +147,7 @@ func createIntent(args []string) {
 	filePath := fs.String("file", "", "file to store")
 	outPath := fs.String("out", "./upload-plan.json", "upload plan path")
 	user := fs.String("user", "user_demo", "user address")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign the intent")
 	segmentSize := fs.Int64("segment-size", 4*1024*1024, "segment size in bytes")
 	dataShards := fs.Int("data-shards", 4, "erasure data shard count")
 	parityShards := fs.Int("parity-shards", 2, "erasure parity shard count")
@@ -161,6 +161,18 @@ func createIntent(args []string) {
 	if *filePath == "" {
 		log.Fatal("-file is required")
 	}
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *user == "" || *user == "user_demo" {
+		*user = accountKey.Address
+	} else if !strings.EqualFold(*user, accountKey.Address) {
+		log.Fatalf("-user %s does not match -account-key address %s", *user, accountKey.Address)
+	}
 	var size int64
 	var planSegmentSize int64
 	var segments []wire.SegmentPlan
@@ -168,7 +180,6 @@ func createIntent(args []string) {
 	var fileRoot string
 	var encryption *wire.EncryptionMetadata
 	var generatedKey []byte
-	var err error
 	if *encrypt {
 		key := []byte(nil)
 		if *encryptionKey != "" {
@@ -224,6 +235,7 @@ func createIntent(args []string) {
 		}
 	}
 	req := wire.CreateIntentRequest{
+		ChainID:      chainID(*chainURL),
 		User:         *user,
 		FileName:     filepath.Base(*filePath),
 		FileSize:     size,
@@ -236,6 +248,10 @@ func createIntent(args []string) {
 		Policy:       policy,
 		LockedFee:    fee,
 		DeadlineUnix: time.Now().Add(24 * time.Hour).Unix(),
+		Nonce:        accountNonce(*chainURL, accountKey.Address),
+	}
+	if err := wire.SignCreateIntent(&req, accountKey.PrivateKey); err != nil {
+		log.Fatal(err)
 	}
 
 	var resp wire.CreateIntentResponse
@@ -267,8 +283,8 @@ func createIntent(args []string) {
 		}
 		fmt.Printf("encryption key saved to %s\n", *encryptionKeyOut)
 	}
-	fmt.Printf("created intent %s with %d segments, file root %s, locked_fee=%d required_fee=%d\n",
-		resp.IntentID, len(roots), fileRoot, resp.LockedFee, resp.RequiredFee)
+	fmt.Printf("created intent %s with %d segments, file root %s, locked_fee=%s required_fee=%s\n",
+		resp.IntentID, len(roots), fileRoot, formatGF(resp.LockedFee), formatGF(resp.RequiredFee))
 }
 
 func showStatus(args []string) {
@@ -281,17 +297,17 @@ func showStatus(args []string) {
 	if err := client.NewHTTP(*chainURL).Get("/status", &status); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("chain status=%s height=%d finalized=%d pending_txs=%d base_fee=%d\n",
-		status.Status, status.Height, status.LatestFinalizedHeight, status.PendingTransactions, status.FeeMarket.BaseFee)
+	fmt.Printf("chain status=%s height=%d finalized=%d pending_txs=%d base_fee=%s\n",
+		status.Status, status.Height, status.LatestFinalizedHeight, status.PendingTransactions, formatGF(status.FeeMarket.BaseFee))
 	fmt.Printf("storage active_miners=%d/%d capacity=%s used=%s reserved=%s pending_repairs=%d pending_challenges=%d\n",
 		status.ActiveMiners, status.Miners, formatBytes(status.CapacityBytes), formatBytes(status.UsedBytes),
 		formatBytes(status.ReservedBytes), status.PendingRepairTasks, status.PendingChallenges)
 	fmt.Printf("deals at_risk=%d critical=%d\n", status.DealsAtRisk, status.DealsCritical)
-	fmt.Printf("rewards storage=%d retrieval=%d repair=%d slashed=%d\n",
-		status.TotalStorageRewards, status.TotalRetrievalRewards, status.TotalRepairRewards, status.TotalSlashed)
-	fmt.Printf("pools storage=%d retrieval=%d validator=%d repair=%d released=%d supply=%d\n",
-		status.StoragePoolRemaining, status.RetrievalPoolRemaining, status.ValidatorPoolRemaining,
-		status.RepairPoolRemaining, status.TokensReleased, status.TotalSupply)
+	fmt.Printf("rewards storage=%s retrieval=%s repair=%s slashed=%s\n",
+		formatGF(status.TotalStorageRewards), formatGF(status.TotalRetrievalRewards), formatGF(status.TotalRepairRewards), formatGF(status.TotalSlashed))
+	fmt.Printf("pools storage=%s retrieval=%s validator=%s repair=%s released=%s supply=%s\n",
+		formatGF(status.StoragePoolRemaining), formatGF(status.RetrievalPoolRemaining), formatGF(status.ValidatorPoolRemaining),
+		formatGF(status.RepairPoolRemaining), formatGF(status.TokensReleased), formatGF(status.TotalSupply))
 	fmt.Printf("retrieval receipts=%d bytes=%s\n", status.RetrievalReceipts, formatBytes(status.RetrievalBytes))
 	fmt.Printf("intents total=%d uploading=%d partial=%d finalized=%d expired=%d deals=%d\n",
 		status.Intents, status.UploadingIntents, status.PartialIntents, status.FinalizedIntents, status.ExpiredIntents, status.Deals)
@@ -381,6 +397,7 @@ func createCollection(args []string) {
 		if !strings.EqualFold(req.User, key.Address) {
 			log.Fatal("-user does not match account key")
 		}
+		req.ChainID = chainID(*chainURL)
 		req.Nonce = accountNonce(*chainURL, key.Address)
 		if err := wire.SignCreateCollection(&req, key.PrivateKey); err != nil {
 			log.Fatal(err)
@@ -431,6 +448,7 @@ func appendCollectionRecord(args []string) {
 		if !strings.EqualFold(req.User, key.Address) {
 			log.Fatal("-user does not match account key")
 		}
+		req.ChainID = chainID(*chainURL)
 		req.Nonce = accountNonce(*chainURL, key.Address)
 		if err := wire.SignAppendRecord(&req, key.PrivateKey); err != nil {
 			log.Fatal(err)
@@ -529,15 +547,26 @@ func upload(args []string) {
 	planPath := fs.String("plan", "./upload-plan.json", "upload plan path")
 	filePath := fs.String("file", "", "file to upload")
 	encryptionKey := fs.String("key", "", "encryption key file or raw base64/hex key for encrypted plans")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign batch commits")
 	batchSize := fs.Int("batch", 64, "receipts per batch commit")
 	fs.Parse(args)
 
 	if *filePath == "" {
 		log.Fatal("-file is required")
 	}
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 	plan, err := client.LoadPlan(*planPath)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if !strings.EqualFold(plan.User, accountKey.Address) {
+		log.Fatalf("plan user %s does not match -account-key address %s", plan.User, accountKey.Address)
 	}
 	endpoints := parseEndpoints(*storageURLs)
 	if len(endpoints) == 0 {
@@ -563,7 +592,7 @@ func upload(args []string) {
 
 	for segmentID := 0; segmentID < len(plan.SegmentRoots); segmentID++ {
 		if len(pending) >= *batchSize {
-			commitBatch(chainClient, plan, pending)
+			commitBatch(chainClient, *chainURL, plan, pending, accountKey)
 			client.MarkCommitted(&plan, pending)
 			pending = nil
 			if err := client.SavePlan(*planPath, plan); err != nil {
@@ -630,7 +659,7 @@ func upload(args []string) {
 				log.Fatal(err)
 			}
 			if len(pending) >= *batchSize {
-				commitBatch(chainClient, plan, pending)
+				commitBatch(chainClient, *chainURL, plan, pending, accountKey)
 				client.MarkCommitted(&plan, pending)
 				pending = nil
 				if err := client.SavePlan(*planPath, plan); err != nil {
@@ -642,7 +671,7 @@ func upload(args []string) {
 		cleanup()
 	}
 	if len(pending) > 0 {
-		commitBatch(chainClient, plan, pending)
+		commitBatch(chainClient, *chainURL, plan, pending, accountKey)
 		client.MarkCommitted(&plan, pending)
 	}
 	if err := client.SavePlan(*planPath, plan); err != nil {
@@ -655,16 +684,32 @@ func finalize(args []string) {
 	fs := flag.NewFlagSet("finalize", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
 	planPath := fs.String("plan", "./upload-plan.json", "upload plan path")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign finalize")
 	fs.Parse(args)
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	plan, err := client.LoadPlan(*planPath)
 	if err != nil {
 		log.Fatal(err)
 	}
+	if !strings.EqualFold(plan.User, accountKey.Address) {
+		log.Fatalf("plan user %s does not match -account-key address %s", plan.User, accountKey.Address)
+	}
 	req := wire.FinalizeRequest{
+		ChainID:      chainID(*chainURL),
 		IntentID:     plan.IntentID,
 		User:         plan.User,
 		ManifestRoot: chaincrypto.HashBytes([]byte(plan.FileRoot + ":" + plan.FileName)),
+		Nonce:        accountNonce(*chainURL, accountKey.Address),
+	}
+	if err := wire.SignFinalize(&req, accountKey.PrivateKey); err != nil {
+		log.Fatal(err)
 	}
 	var resp wire.FinalizeResponse
 	if err := client.NewHTTP(*chainURL).Post("/finalize", req, &resp); err != nil {
@@ -681,7 +726,6 @@ func mine(args []string) {
 	endpoint := fs.String("endpoint", "", "public endpoint registered on chain")
 	capacity := fs.Uint64("capacity", 1<<40, "declared storage capacity in bytes")
 	stake := fs.Uint64("stake", 1000, "declared miner stake")
-	faucet := fs.Bool("faucet", true, "request dev faucet funds for stake before registration")
 	autoProve := fs.Bool("auto-prove", true, "poll chain node and automatically submit storage proofs")
 	proveInterval := fs.Duration("prove-interval", 2*time.Second, "automatic proof polling interval")
 	autoRepair := fs.Bool("auto-repair", true, "poll chain node and automatically execute repair tasks")
@@ -704,10 +748,11 @@ func mine(args []string) {
 	if *chainURL == "" {
 		log.Fatal("-chain is required to enable mining")
 	}
-	if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake, *faucet); err != nil {
+	node.ConfigureChain(*chainURL, registeredEndpoint)
+	if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake); err != nil {
 		log.Fatalf("register miner: %v", err)
 	}
-	fmt.Printf("mining enabled address=%s endpoint=%s capacity=%d stake=%d\n", node.Address(), registeredEndpoint, *capacity, *stake)
+	fmt.Printf("mining enabled address=%s endpoint=%s capacity=%d stake=%s\n", node.Address(), registeredEndpoint, *capacity, formatGF(*stake))
 	fmt.Println("upload/download access service is mandatory while mining is enabled")
 
 	if *autoProve {
@@ -762,6 +807,7 @@ func settleIntent(args []string) {
 	intentID := fs.String("intent", "", "intent id")
 	user := fs.String("user", "", "optional user address")
 	planPath := fs.String("plan", "", "optional upload plan path")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign settlement")
 	fs.Parse(args)
 
 	if *planPath != "" {
@@ -779,11 +825,27 @@ func settleIntent(args []string) {
 	if *intentID == "" {
 		log.Fatal("-intent or -plan is required")
 	}
-	var resp wire.SettleIntentResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/settle", wire.SettleIntentRequest{IntentID: *intentID, User: *user}, &resp); err != nil {
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("settled intent %s status=%s refunded=%d paid=%d\n", resp.IntentID, resp.Status, resp.RefundedFee, resp.PaidFee)
+	if *user == "" {
+		*user = accountKey.Address
+	} else if !strings.EqualFold(*user, accountKey.Address) {
+		log.Fatalf("-user %s does not match -account-key address %s", *user, accountKey.Address)
+	}
+	req := wire.SettleIntentRequest{ChainID: chainID(*chainURL), IntentID: *intentID, User: *user, Nonce: accountNonce(*chainURL, accountKey.Address)}
+	if err := wire.SignSettleIntent(&req, accountKey.PrivateKey); err != nil {
+		log.Fatal(err)
+	}
+	var resp wire.SettleIntentResponse
+	if err := client.NewHTTP(*chainURL).Post("/intents/settle", req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("settled intent %s status=%s refunded=%s paid=%s\n", resp.IntentID, resp.Status, formatGF(resp.RefundedFee), formatGF(resp.PaidFee))
 }
 
 func renewDeal(args []string) {
@@ -793,6 +855,7 @@ func renewDeal(args []string) {
 	user := fs.String("user", "", "optional user address")
 	duration := fs.Int64("duration", 0, "renewal duration in seconds")
 	planPath := fs.String("plan", "", "optional upload plan path")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign renewal")
 	fs.Parse(args)
 
 	if *planPath != "" {
@@ -813,12 +876,28 @@ func renewDeal(args []string) {
 	if *duration <= 0 {
 		log.Fatal("-duration is required (seconds)")
 	}
-	var resp wire.RenewDealResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/"+*intentID+"/renew", wire.RenewDealRequest{IntentID: *intentID, User: *user, Duration: *duration}, &resp); err != nil {
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("renewed intent %s status=%s expires_at=%d paid=%d locked=%d grace=%t\n",
-		resp.IntentID, resp.Status, resp.ExpiresAtUnix, resp.PaidAmount, resp.NewLockedFee, resp.GraceUsed)
+	if *user == "" {
+		*user = accountKey.Address
+	} else if !strings.EqualFold(*user, accountKey.Address) {
+		log.Fatalf("-user %s does not match -account-key address %s", *user, accountKey.Address)
+	}
+	req := wire.RenewDealRequest{ChainID: chainID(*chainURL), IntentID: *intentID, User: *user, Duration: *duration, Nonce: accountNonce(*chainURL, accountKey.Address)}
+	if err := wire.SignRenewDeal(&req, accountKey.PrivateKey); err != nil {
+		log.Fatal(err)
+	}
+	var resp wire.RenewDealResponse
+	if err := client.NewHTTP(*chainURL).Post("/intents/"+*intentID+"/renew", req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("renewed intent %s status=%s expires_at=%d paid=%s locked=%s grace=%t\n",
+		resp.IntentID, resp.Status, resp.ExpiresAtUnix, formatGF(resp.PaidAmount), formatGF(resp.NewLockedFee), resp.GraceUsed)
 }
 
 func topUpPermanentFund(args []string) {
@@ -828,6 +907,7 @@ func topUpPermanentFund(args []string) {
 	user := fs.String("user", "", "optional user address")
 	amount := fs.Uint64("amount", 0, "amount to add to the permanent storage fund")
 	planPath := fs.String("plan", "", "optional upload plan path")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign top-up")
 	fs.Parse(args)
 
 	if *planPath != "" {
@@ -848,16 +928,34 @@ func topUpPermanentFund(args []string) {
 	if *amount == 0 {
 		log.Fatal("-amount is required")
 	}
-	var resp wire.PermanentFundTopUpResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/permanent-fund", wire.PermanentFundTopUpRequest{
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *user == "" {
+		*user = accountKey.Address
+	} else if !strings.EqualFold(*user, accountKey.Address) {
+		log.Fatalf("-user %s does not match -account-key address %s", *user, accountKey.Address)
+	}
+	req := wire.PermanentFundTopUpRequest{
+		ChainID:  chainID(*chainURL),
 		IntentID: *intentID,
 		User:     *user,
 		Amount:   *amount,
-	}, &resp); err != nil {
+		Nonce:    accountNonce(*chainURL, accountKey.Address),
+	}
+	if err := wire.SignPermanentFundTopUp(&req, accountKey.PrivateKey); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("permanent fund intent=%s balance=%d contributed=%d paid=%d closed=%t\n",
-		resp.Fund.IntentID, resp.Fund.Balance, resp.Fund.Contributed, resp.Fund.Paid, resp.Fund.Closed)
+	var resp wire.PermanentFundTopUpResponse
+	if err := client.NewHTTP(*chainURL).Post("/intents/permanent-fund", req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("permanent fund intent=%s balance=%s contributed=%s paid=%s closed=%t\n",
+		resp.Fund.IntentID, formatGF(resp.Fund.Balance), formatGF(resp.Fund.Contributed), formatGF(resp.Fund.Paid), resp.Fund.Closed)
 }
 
 func consensusState(args []string) {
@@ -918,6 +1016,7 @@ func consensusVotes(args []string) {
 func setUpgrade(args []string) {
 	fs := flag.NewFlagSet("set-upgrade", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	keyPath := fs.String("key", "", "path to governance operator key file")
 	name := fs.String("name", "", "upgrade name")
 	haltHeight := fs.Uint64("halt_height", 0, "height to halt chain")
 	haltTime := fs.Int64("halt_time", 0, "unix time to halt chain")
@@ -926,10 +1025,13 @@ func setUpgrade(args []string) {
 	if *name == "" {
 		log.Fatal("-name is required")
 	}
+	if *keyPath == "" {
+		log.Fatal("-key is required")
+	}
 	var plan consensus.UpgradePlan
-	if err := client.NewHTTP(*chainURL).Post("/upgrade", consensus.UpgradePlan{
+	if err := postOperator(*chainURL, "/upgrade", consensus.UpgradePlan{
 		Name: *name, HaltHeight: *haltHeight, HaltTime: *haltTime, Info: *info,
-	}, &plan); err != nil {
+	}, &plan, *keyPath); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("upgrade plan set name=%s halt_height=%d halt_time=%d\n", plan.Name, plan.HaltHeight, plan.HaltTime)
@@ -942,6 +1044,7 @@ func terminateDeal(args []string) {
 	user := fs.String("user", "", "deal owner")
 	reason := fs.String("reason", "", "optional termination reason")
 	planPath := fs.String("plan", "", "optional upload plan path")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign termination")
 	fs.Parse(args)
 
 	if *planPath != "" {
@@ -959,16 +1062,34 @@ func terminateDeal(args []string) {
 	if *intentID == "" {
 		log.Fatal("-intent or -plan is required")
 	}
-	var resp wire.TerminateDealResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/terminate", wire.TerminateDealRequest{
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *user == "" {
+		*user = accountKey.Address
+	} else if !strings.EqualFold(*user, accountKey.Address) {
+		log.Fatalf("-user %s does not match -account-key address %s", *user, accountKey.Address)
+	}
+	req := wire.TerminateDealRequest{
+		ChainID:  chainID(*chainURL),
 		IntentID: *intentID,
 		User:     *user,
 		Reason:   *reason,
-	}, &resp); err != nil {
+		Nonce:    accountNonce(*chainURL, accountKey.Address),
+	}
+	if err := wire.SignTerminateDeal(&req, accountKey.PrivateKey); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("terminated intent=%s storage=%s access=%s refunded=%d delete_tasks=%d\n",
-		resp.IntentID, resp.StorageStatus, resp.AccessStatus, resp.RefundedFee, len(resp.DeleteTasks))
+	var resp wire.TerminateDealResponse
+	if err := client.NewHTTP(*chainURL).Post("/intents/terminate", req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("terminated intent=%s storage=%s access=%s refunded=%s delete_tasks=%d\n",
+		resp.IntentID, resp.StorageStatus, resp.AccessStatus, formatGF(resp.RefundedFee), len(resp.DeleteTasks))
 }
 
 func setAccessPolicy(args []string) {
@@ -978,18 +1099,37 @@ func setAccessPolicy(args []string) {
 	user := fs.String("user", "", "deal owner")
 	accessStatus := fs.String("status", wire.AccessStatusPrivate, "access status: public, private, suspended, blocked")
 	reasonHash := fs.String("reason-hash", "", "optional reason hash")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign access policy")
 	fs.Parse(args)
 
 	if *intentID == "" {
 		log.Fatal("-intent is required")
 	}
-	var resp wire.SetAccessPolicyResponse
-	if err := client.NewHTTP(*chainURL).Post("/intents/access", wire.SetAccessPolicyRequest{
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *user == "" {
+		*user = accountKey.Address
+	} else if !strings.EqualFold(*user, accountKey.Address) {
+		log.Fatalf("-user %s does not match -account-key address %s", *user, accountKey.Address)
+	}
+	req := wire.SetAccessPolicyRequest{
+		ChainID:      chainID(*chainURL),
 		IntentID:     *intentID,
 		User:         *user,
 		AccessStatus: *accessStatus,
 		ReasonHash:   *reasonHash,
-	}, &resp); err != nil {
+		Nonce:        accountNonce(*chainURL, accountKey.Address),
+	}
+	if err := wire.SignSetAccessPolicy(&req, accountKey.PrivateKey); err != nil {
+		log.Fatal(err)
+	}
+	var resp wire.SetAccessPolicyResponse
+	if err := client.NewHTTP(*chainURL).Post("/intents/access", req, &resp); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("access updated intent=%s access=%s moderation=%s\n", resp.IntentID, resp.AccessStatus, resp.ModerationStatus)
@@ -1113,35 +1253,35 @@ func governancePropose(args []string) {
 
 	now := time.Now().Unix()
 	req := wire.CreateGovernanceProposalRequest{
-		Proposer:                           key.Address,
-		IntentID:                           *intentID,
-		Action:                             *action,
-		ReasonHash:                         *reasonHash,
-		ExpiresAtUnix:                      *expiresAtUnix,
-		PreserveStorage:                    *preserveStorage,
-		AppealDeadlineUnix:                 *appealDeadlineUnix,
-		TargetOperator:                     *targetOperator,
-		TargetPublicKey:                    *targetPublicKey,
-		TargetPermissions:                  permissions,
-		TargetDataModerationThresholdNum:   *dataModThresholdNum,
-		TargetDataModerationThresholdDen:   *dataModThresholdDen,
-		TargetOperatorChangeThresholdNum:   *opChangeThresholdNum,
-		TargetOperatorChangeThresholdDen:   *opChangeThresholdDen,
-		TargetStorageReleaseRateBPS:        *storageReleaseRateBPS,
-		TargetRetrievalReleaseRateBPS:      *retrievalReleaseRateBPS,
-		TargetValidatorReleaseRateBPS:      *validatorReleaseRateBPS,
-		TargetStoredBytesWeightBPS:         *storedBytesWeightBPS,
-		TargetProofScoreWeightBPS:          *proofScoreWeightBPS,
-		TargetAvailabilityWeightBPS:        *availabilityWeightBPS,
-		TargetDecentralizationWeightBPS:    *decentralizationWeightBPS,
-		TargetRetrievalRewardPerMiB:        *retrievalRewardPerMiB,
-		TargetMaxRetrievalRewardPerWindow:  *maxRetrievalRewardPerWindow,
-		TargetRepairRewardPerShard:         *repairRewardPerShard,
-		TargetMinerDegradeThreshold:        *minerDegradeThreshold,
-		TargetStorageProofSamples:          *storageProofSamples,
-		TargetValidatorCommissionBPS:       *validatorCommissionBPS,
-		TargetRetrievalWeightBPS:           *retrievalWeightBPS,
-		CreatedAtUnix:                      now,
+		Proposer:                          key.Address,
+		IntentID:                          *intentID,
+		Action:                            *action,
+		ReasonHash:                        *reasonHash,
+		ExpiresAtUnix:                     *expiresAtUnix,
+		PreserveStorage:                   *preserveStorage,
+		AppealDeadlineUnix:                *appealDeadlineUnix,
+		TargetOperator:                    *targetOperator,
+		TargetPublicKey:                   *targetPublicKey,
+		TargetPermissions:                 permissions,
+		TargetDataModerationThresholdNum:  *dataModThresholdNum,
+		TargetDataModerationThresholdDen:  *dataModThresholdDen,
+		TargetOperatorChangeThresholdNum:  *opChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:  *opChangeThresholdDen,
+		TargetStorageReleaseRateBPS:       *storageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:     *retrievalReleaseRateBPS,
+		TargetValidatorReleaseRateBPS:     *validatorReleaseRateBPS,
+		TargetStoredBytesWeightBPS:        *storedBytesWeightBPS,
+		TargetProofScoreWeightBPS:         *proofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:       *availabilityWeightBPS,
+		TargetDecentralizationWeightBPS:   *decentralizationWeightBPS,
+		TargetRetrievalRewardPerMiB:       *retrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow: *maxRetrievalRewardPerWindow,
+		TargetRepairRewardPerShard:        *repairRewardPerShard,
+		TargetMinerDegradeThreshold:       *minerDegradeThreshold,
+		TargetStorageProofSamples:         *storageProofSamples,
+		TargetValidatorCommissionBPS:      *validatorCommissionBPS,
+		TargetRetrievalWeightBPS:          *retrievalWeightBPS,
+		CreatedAtUnix:                     now,
 	}
 	if err := wire.SignGovernanceProposal(&req, privKey); err != nil {
 		log.Fatalf("failed to sign proposal: %v", err)
@@ -1390,8 +1530,8 @@ func submitRetrievalReceipt(args []string) {
 	if err := client.NewHTTP(*chainURL).Post("/retrieval-receipts", wire.SubmitRetrievalReceiptRequest{Receipt: receipt}, &resp); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("retrieval receipt=%s intent=%s miner=%s bytes=%s reward=%d status=%s\n",
-		resp.ReceiptID, resp.IntentID, resp.MinerAddress, formatBytes(resp.BytesServed), resp.Reward, resp.Status)
+	fmt.Printf("retrieval receipt=%s intent=%s miner=%s bytes=%s reward=%s status=%s\n",
+		resp.ReceiptID, resp.IntentID, resp.MinerAddress, formatBytes(resp.BytesServed), formatGF(resp.Reward), resp.Status)
 }
 
 func fetchShardBytes(storageURL string, shardHash string) ([]byte, error) {
@@ -1544,11 +1684,22 @@ func repair(args []string) {
 	useChainTasks := fs.Bool("chain-tasks", true, "create and execute on-chain repair tasks before local fallback")
 	includeMissing := fs.Bool("include-missing", true, "include missing shards when creating on-chain repair tasks")
 	batchSize := fs.Int("batch", 64, "receipts per batch commit")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign repair batch commits")
 	fs.Parse(args)
+	if *accountKeyPath == "" {
+		log.Fatal("-account-key is required")
+	}
+	accountKey, err := loadAccountKey(*accountKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	plan, err := client.LoadPlan(*planPath)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if !strings.EqualFold(plan.User, accountKey.Address) {
+		log.Fatalf("plan user %s does not match -account-key address %s", plan.User, accountKey.Address)
 	}
 	endpoints := parseEndpoints(*storageURLs)
 	if len(endpoints) == 0 {
@@ -1577,7 +1728,7 @@ func repair(args []string) {
 			log.Fatal(err)
 		}
 		if assignedTasks := assignedRepairTasks(repairResp.Tasks); len(assignedTasks) > 0 {
-			repaired = executeAssignedRepairTasks(chainClient, *chainURL, &plan, assignedTasks, endpoints, *batchSize, *planPath)
+			repaired = executeAssignedRepairTasks(chainClient, *chainURL, &plan, assignedTasks, endpoints, *batchSize, *planPath, accountKey)
 			fmt.Printf("repair completed from chain tasks: repaired_shards=%d intent=%s\n", repaired, plan.IntentID)
 			return
 		}
@@ -1655,7 +1806,7 @@ func repair(args []string) {
 				log.Fatal(err)
 			}
 			if len(pending) >= *batchSize {
-				commitBatch(chainClient, plan, pending)
+				commitBatch(chainClient, *chainURL, plan, pending, accountKey)
 				client.MarkCommitted(&plan, pending)
 				pending = nil
 				if err := client.SavePlan(*planPath, plan); err != nil {
@@ -1665,7 +1816,7 @@ func repair(args []string) {
 		}
 	}
 	if len(pending) > 0 {
-		commitBatch(chainClient, plan, pending)
+		commitBatch(chainClient, *chainURL, plan, pending, accountKey)
 		client.MarkCommitted(&plan, pending)
 	}
 	if err := client.SavePlan(*planPath, plan); err != nil {
@@ -1731,21 +1882,25 @@ func runEpoch(args []string) {
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
 	intentID := fs.String("intent", "", "optional intent id")
 	challengesPerDeal := fs.Int("challenges", 3, "challenges per finalized deal")
+	keyPath := fs.String("key", "", "path to governance operator key file")
 	reward := fs.Uint64("reward", 1, "reward per accepted proof")
 	slash := fs.Uint64("slash", 1, "slash per missed proof")
 	duration := fs.Int64("duration", 600, "epoch duration in seconds")
 	storageURLs := fs.String("storage", "", "fallback comma-separated storage node URLs")
 	fs.Parse(args)
+	if *keyPath == "" {
+		log.Fatal("-key is required")
+	}
 
 	chainClient := client.NewHTTP(*chainURL)
 	var epochResp wire.StartEpochResponse
-	if err := chainClient.Post("/epochs", wire.StartEpochRequest{
+	if err := postOperator(*chainURL, "/epochs", wire.StartEpochRequest{
 		IntentID:            *intentID,
 		ChallengesPerDeal:   *challengesPerDeal,
 		DurationSeconds:     *duration,
 		RewardPerProof:      *reward,
 		SlashPerMissedProof: *slash,
-	}, &epochResp); err != nil {
+	}, &epochResp, *keyPath); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("started epoch %s with %d challenges\n", epochResp.Epoch.EpochID, len(epochResp.Challenges))
@@ -1762,8 +1917,8 @@ func runEpoch(args []string) {
 			log.Printf("proof rejected: challenge=%s miner=%s error=%v", challenge.ChallengeID, challenge.MinerAddress, err)
 			continue
 		}
-		fmt.Printf("proof accepted: challenge=%s miner=%s reward=%d\n",
-			submitResp.ChallengeID, submitResp.MinerAddress, submitResp.Reward)
+		fmt.Printf("proof accepted: challenge=%s miner=%s reward=%s\n",
+			submitResp.ChallengeID, submitResp.MinerAddress, formatGF(submitResp.Reward))
 	}
 }
 
@@ -1771,19 +1926,23 @@ func finalizeEpoch(args []string) {
 	fs := flag.NewFlagSet("finalize-epoch", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
 	epochID := fs.String("epoch", "", "epoch id")
+	keyPath := fs.String("key", "", "path to governance operator key file")
 	fs.Parse(args)
 
 	if *epochID == "" {
 		log.Fatal("-epoch is required")
 	}
+	if *keyPath == "" {
+		log.Fatal("-key is required")
+	}
 	var resp wire.FinalizeEpochResponse
-	if err := client.NewHTTP(*chainURL).Post("/epochs/finalize", wire.FinalizeEpochRequest{EpochID: *epochID}, &resp); err != nil {
+	if err := postOperator(*chainURL, "/epochs/finalize", wire.FinalizeEpochRequest{EpochID: *epochID}, &resp, *keyPath); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("finalized epoch %s accepted=%d missed=%d storage_rewards=%d retrieval_rewards=%d repair_rewards=%d slashed=%d repairs=%d\n",
+	fmt.Printf("finalized epoch %s accepted=%d missed=%d storage_rewards=%s retrieval_rewards=%s repair_rewards=%s slashed=%s repairs=%d\n",
 		resp.EpochID, resp.AcceptedProofs, resp.MissedProofs,
-		resp.StorageRewardsPaid, resp.RetrievalRewardsPaid, resp.RepairRewardsPaid,
-		resp.StorageSlashed, resp.RepairTasksCreated)
+		formatGF(resp.StorageRewardsPaid), formatGF(resp.RetrievalRewardsPaid), formatGF(resp.RepairRewardsPaid),
+		formatGF(resp.StorageSlashed), resp.RepairTasksCreated)
 }
 
 func minerStats(args []string) {
@@ -1799,25 +1958,8 @@ func minerStats(args []string) {
 	if err := client.NewHTTP(*chainURL).Get("/miners/"+*miner, &stats); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("miner %s status=%s success=%d failure=%d consecutive=%d rewards=%d storage_rewards=%d retrieval_rewards=%d repair_rewards=%d slashed=%d\n",
-		stats.MinerAddress, stats.Status, stats.ProofSuccess, stats.ProofFailure, stats.ConsecutiveFailures, stats.Rewards, stats.StorageRewards, stats.RetrievalRewards, stats.RepairRewards, stats.Slashed)
-}
-
-func faucet(args []string) {
-	fs := flag.NewFlagSet("faucet", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	address := fs.String("address", "", "account address")
-	amount := fs.Uint64("amount", 1000, "amount to mint from dev faucet")
-	fs.Parse(args)
-
-	if *address == "" {
-		log.Fatal("-address is required")
-	}
-	var resp wire.FaucetResponse
-	if err := client.NewHTTP(*chainURL).Post("/faucet", wire.FaucetRequest{Address: *address, Amount: *amount}, &resp); err != nil {
-		log.Fatal(err)
-	}
-	printAccount(resp.Account)
+	fmt.Printf("miner %s status=%s success=%d failure=%d consecutive=%d rewards=%s storage_rewards=%s retrieval_rewards=%s repair_rewards=%s slashed=%s\n",
+		stats.MinerAddress, stats.Status, stats.ProofSuccess, stats.ProofFailure, stats.ConsecutiveFailures, formatGF(stats.Rewards), formatGF(stats.StorageRewards), formatGF(stats.RetrievalRewards), formatGF(stats.RepairRewards), formatGF(stats.Slashed))
 }
 
 func balance(args []string) {
@@ -1839,57 +1981,40 @@ func balance(args []string) {
 func transfer(args []string) {
 	fs := flag.NewFlagSet("transfer", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	from := fs.String("from", "", "sender account")
 	to := fs.String("to", "", "recipient account")
 	amount := fs.Uint64("amount", 0, "amount to transfer")
 	fee := fs.Uint64("fee", 1, "mempool priority fee")
-	keyPath := fs.String("key", "", "optional account key file for signed transfer")
-	rawMode := fs.Bool("raw", false, "submit as Ethereum RLP signed raw transaction")
+	keyPath := fs.String("key", "", "account key file for signed transfer")
 	fs.Parse(args)
 
 	if *to == "" {
 		log.Fatal("-to is required")
 	}
-	if *rawMode && *keyPath == "" {
-		log.Fatal("-raw requires -key")
+	if *keyPath == "" {
+		log.Fatal("-key is required")
 	}
-	req := wire.TransferRequest{From: *from, To: *to, Amount: *amount, Fee: *fee}
-	if *keyPath != "" {
-		key, err := loadAccountKey(*keyPath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if req.From == "" {
-			req.From = key.Address
-		}
-		if req.From != key.Address {
-			log.Fatal("-from does not match account key")
-		}
-		var account wire.Account
-		if err := client.NewHTTP(*chainURL).Get("/accounts/"+req.From, &account); err != nil {
-			log.Fatal(err)
-		}
-		req.Nonce = account.Nonce
-		req.PublicKey = encodeHex(ethcrypto.FromECDSAPub(key.PublicKey))
-		if *rawMode {
-			rawTx, err := wire.EncodeNativeTransferRawTx(req, key.PrivateKey, wire.DefaultEVMChainIDBig())
-			if err != nil {
-				log.Fatal(err)
-			}
-			var resp wire.TransferResponse
-			if err := client.NewHTTP(*chainURL).Post("/tx/raw", wire.RawTransactionRequest{RawTx: rawTx}, &resp); err != nil {
-				log.Fatal(err)
-			}
-			printAccount(resp.From)
-			printAccount(resp.To)
-			return
-		}
-		if err := wire.SignTransfer(&req, key.PrivateKey); err != nil {
-			log.Fatal(err)
-		}
+	key, err := loadAccountKey(*keyPath)
+	if err != nil {
+		log.Fatal(err)
 	}
-	if req.From == "" {
-		log.Fatal("-from is required without -key")
+	var account wire.Account
+	if err := client.NewHTTP(*chainURL).Get("/accounts/"+key.Address, &account); err != nil {
+		log.Fatal(err)
+	}
+	var statusResp wire.ChainStatusResponse
+	if err := client.NewHTTP(*chainURL).Get("/status", &statusResp); err != nil {
+		log.Fatal(err)
+	}
+	req := wire.TransferRequest{
+		From:   key.Address,
+		To:     *to,
+		Amount: *amount,
+		Fee:    *fee,
+		Nonce:  account.Nonce,
+	}
+	req.PublicKey = encodeHex(ethcrypto.FromECDSAPub(key.PublicKey))
+	if err := wire.SignTransfer(&req, key.PrivateKey, statusResp.ChainID); err != nil {
+		log.Fatal(err)
 	}
 	var resp wire.TransferResponse
 	if err := client.NewHTTP(*chainURL).Post("/transfer", req, &resp); err != nil {
@@ -2007,6 +2132,7 @@ func evmCollectionCreate(args []string) {
 		Name:        *name,
 		Description: *description,
 		Metadata:    parseMetadata(*metadataRaw),
+		ChainID:     chainID(*chainURL),
 		Nonce:       accountNonce(*chainURL, key.Address),
 	}
 	if err := wire.SignCreateCollection(&req, key.PrivateKey); err != nil {
@@ -2053,6 +2179,7 @@ func evmRecordAppend(args []string) {
 		Key:          *recordKey,
 		ManifestRoot: *manifestRoot,
 		Metadata:     parseMetadata(*metadataRaw),
+		ChainID:      chainID(*chainURL),
 		Nonce:        accountNonce(*chainURL, key.Address),
 	}
 	if err := wire.SignAppendRecord(&req, key.PrivateKey); err != nil {
@@ -2068,8 +2195,8 @@ func evmRecordAppend(args []string) {
 }
 
 func printAccount(account wire.Account) {
-	fmt.Printf("account %s balance=%d nonce=%d locked_stake=%d locked_storage=%d pending_mining=%d\n",
-		account.Address, account.Balance, account.Nonce, account.LockedStake, account.LockedStorage, account.PendingMiningRewards)
+	fmt.Printf("account %s balance=%s nonce=%d locked_stake=%s locked_storage=%s pending_mining=%s\n",
+		account.Address, formatGF(account.Balance), account.Nonce, formatGF(account.LockedStake), formatGF(account.LockedStorage), formatGF(account.PendingMiningRewards))
 }
 
 func accountNonce(chainURL string, address string) uint64 {
@@ -2078,6 +2205,72 @@ func accountNonce(chainURL string, address string) uint64 {
 		log.Fatal(err)
 	}
 	return account.Nonce
+}
+
+func chainID(chainURL string) string {
+	var status wire.ChainStatusResponse
+	if err := client.NewHTTP(chainURL).Get("/status", &status); err != nil {
+		log.Fatal(err)
+	}
+	if status.ChainID == "" {
+		log.Fatal("chain status did not include chain_id")
+	}
+	return status.ChainID
+}
+
+func operatorNonce(chainURL string, address string) uint64 {
+	var resp wire.GovernanceOperatorListResponse
+	if err := client.NewHTTP(chainURL).Get("/governance/operators", &resp); err != nil {
+		log.Fatal(err)
+	}
+	normalized := wire.NormalizeAddress(address)
+	for _, op := range resp.Operators {
+		if wire.NormalizeAddress(op.Operator) == normalized {
+			return op.Nonce
+		}
+	}
+	log.Fatalf("governance operator %s not found", address)
+	return 0
+}
+
+func postOperator(chainURL string, path string, in any, out any, keyPath string) error {
+	keyFile := loadGovernanceKey(keyPath)
+	privateKey := loadGovernanceECDSAKey(keyPath)
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	nonce := operatorNonce(chainURL, keyFile.Address)
+	timestamp := time.Now().Unix()
+	signature, err := wire.SignOperatorRequest(chainID(chainURL), http.MethodPost, path, raw, nonce, timestamp, privateKey)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(chainURL, "/")+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Operator-Address", keyFile.Address)
+	req.Header.Set("X-Operator-Nonce", fmt.Sprintf("%d", nonce))
+	req.Header.Set("X-Operator-Timestamp", fmt.Sprintf("%d", timestamp))
+	req.Header.Set("X-Operator-Signature", signature)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if out == nil || len(body) == 0 {
+		return nil
+	}
+	return json.Unmarshal(body, out)
 }
 
 type evmRPCRequest struct {
@@ -2265,21 +2458,25 @@ func showMempool(args []string) {
 	if err := client.NewHTTP(*chainURL).Get("/mempool", &resp); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("mempool pending=%d base_fee=%d target_block_txs=%d last_block_txs=%d\n",
-		len(resp.Pending), resp.FeeMarket.BaseFee, resp.FeeMarket.TargetBlockTxs, resp.FeeMarket.LastBlockTxs)
+	fmt.Printf("mempool pending=%d base_fee=%s target_block_txs=%d last_block_txs=%d\n",
+		len(resp.Pending), formatGF(resp.FeeMarket.BaseFee), resp.FeeMarket.TargetBlockTxs, resp.FeeMarket.LastBlockTxs)
 	for _, tx := range resp.Pending {
-		fmt.Printf("tx %s type=%s from=%s nonce=%d fee=%d nonce_protected=%t payload=%s\n",
-			tx.TxID, tx.Type, tx.From, tx.Nonce, tx.Fee, tx.NonceProtected, tx.PayloadHash)
+		fmt.Printf("tx %s type=%s from=%s nonce=%d fee=%s nonce_protected=%t payload=%s\n",
+			tx.TxID, tx.Type, tx.From, tx.Nonce, formatGF(tx.Fee), tx.NonceProtected, tx.PayloadHash)
 	}
 }
 
 func produceBlock(args []string) {
 	fs := flag.NewFlagSet("produce-block", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	keyPath := fs.String("key", "", "path to governance operator key file")
 	fs.Parse(args)
+	if *keyPath == "" {
+		log.Fatal("-key is required")
+	}
 
 	var resp wire.ProduceBlockResponse
-	if err := client.NewHTTP(*chainURL).Post("/blocks/produce", map[string]string{}, &resp); err != nil {
+	if err := postOperator(*chainURL, "/blocks/produce", map[string]string{}, &resp, *keyPath); err != nil {
 		log.Fatal(err)
 	}
 	if !resp.Produced {
@@ -2366,8 +2563,8 @@ func listValidators(args []string) {
 	}
 	fmt.Printf("validators=%d\n", len(resp.Validators))
 	for _, validator := range resp.Validators {
-		fmt.Printf("validator %s status=%s consensus=%t stake=%d delegated=%d produced=%d delegators=%d endpoint=%s\n",
-			validator.Address, validator.Status, validator.Consensus, validator.SelfStake, validator.DelegatedStake, validator.ProducedBlocks, validator.DelegatorCount, validator.Endpoint)
+		fmt.Printf("validator %s status=%s consensus=%t stake=%s delegated=%s produced=%d delegators=%d endpoint=%s\n",
+			validator.Address, validator.Status, validator.Consensus, formatGF(validator.SelfStake), formatGF(validator.DelegatedStake), validator.ProducedBlocks, validator.DelegatorCount, validator.Endpoint)
 	}
 }
 
@@ -2568,7 +2765,7 @@ func assignedRepairTasks(tasks []wire.RepairTask) []wire.RepairTask {
 	return out
 }
 
-func executeAssignedRepairTasks(chainClient *client.HTTP, chainURL string, plan *wire.UploadPlan, tasks []wire.RepairTask, fallbackEndpoints []string, batchSize int, planPath string) int {
+func executeAssignedRepairTasks(chainClient *client.HTTP, chainURL string, plan *wire.UploadPlan, tasks []wire.RepairTask, fallbackEndpoints []string, batchSize int, planPath string, accountKey accountKey) int {
 	totalShards := plan.Erasure.DataShards + plan.Erasure.ParityShards
 	bySegment := receiptsBySegment(plan.Receipts)
 	var pending []wire.MinerReceipt
@@ -2652,7 +2849,7 @@ func executeAssignedRepairTasks(chainClient *client.HTTP, chainURL string, plan 
 			log.Fatal(err)
 		}
 		if len(pending) >= batchSize {
-			commitBatch(chainClient, *plan, pending)
+			commitBatch(chainClient, chainURL, *plan, pending, accountKey)
 			client.MarkCommitted(plan, pending)
 			pending = nil
 			if err := client.SavePlan(planPath, *plan); err != nil {
@@ -2661,7 +2858,7 @@ func executeAssignedRepairTasks(chainClient *client.HTTP, chainURL string, plan 
 		}
 	}
 	if len(pending) > 0 {
-		commitBatch(chainClient, *plan, pending)
+		commitBatch(chainClient, chainURL, *plan, pending, accountKey)
 		client.MarkCommitted(plan, pending)
 	}
 	if err := client.SavePlan(planPath, *plan); err != nil {
@@ -2733,11 +2930,16 @@ func setValues(values map[string]bool) []string {
 	return out
 }
 
-func commitBatch(chainClient *client.HTTP, plan wire.UploadPlan, receipts []wire.MinerReceipt) {
+func commitBatch(chainClient *client.HTTP, chainURL string, plan wire.UploadPlan, receipts []wire.MinerReceipt, accountKey accountKey) {
 	req := wire.BatchCommitRequest{
+		ChainID:  chainID(chainURL),
 		IntentID: plan.IntentID,
 		User:     plan.User,
 		Receipts: receipts,
+		Nonce:    accountNonce(chainURL, accountKey.Address),
+	}
+	if err := wire.SignBatchCommit(&req, accountKey.PrivateKey); err != nil {
+		log.Fatal(err)
 	}
 	var resp wire.BatchCommitResponse
 	if err := chainClient.Post("/batch-commits", req, &resp); err != nil {
@@ -2774,6 +2976,17 @@ func parseMetadata(raw string) map[string]string {
 		log.Fatalf("invalid metadata JSON object: %v", err)
 	}
 	return metadata
+}
+
+func formatGF(amount uint64) string {
+	whole := amount / wire.TokenUnit
+	frac := amount % wire.TokenUnit
+	if frac == 0 {
+		return fmt.Sprintf("%d GF", whole)
+	}
+	s := fmt.Sprintf("%d.%08d", whole, frac)
+	s = strings.TrimRight(s, "0")
+	return s + " GF"
 }
 
 func formatBytes(value uint64) string {
@@ -3092,6 +3305,7 @@ func agentKeyCreate(args []string) {
 		expiresAt = time.Now().Add(*expire).Unix()
 	}
 	req := wire.RegisterAgentKeyRequest{
+		ChainID:     chainID(*chainURL),
 		Master:      master.Address,
 		Name:        *name,
 		AgentPub:    agentPub,
@@ -3099,6 +3313,7 @@ func agentKeyCreate(args []string) {
 		DailyLimit:  *dailyLimit,
 		TotalLimit:  *totalLimit,
 		ExpiresAt:   expiresAt,
+		Nonce:       accountNonce(*chainURL, master.Address),
 	}
 	if err := wire.SignRegisterAgentKey(&req, master.PrivateKey); err != nil {
 		log.Fatal(err)
@@ -3202,7 +3417,10 @@ func agentKeyRevoke(args []string) {
 	}
 	revokeNonce := accountNonce(*chainURL, *master)
 	revokeReq := wire.RevokeAgentKeyRequest{
-		KeyID: *keyID, Master: *master, Nonce: revokeNonce,
+		ChainID: chainID(*chainURL),
+		KeyID:   *keyID,
+		Master:  *master,
+		Nonce:   revokeNonce,
 	}
 	if err := wire.SignRevokeAgentKey(&revokeReq, masterKeyObj.PrivateKey); err != nil {
 		log.Fatal(err)
@@ -3232,10 +3450,11 @@ func genesisInit(args []string) {
 		ChainID:     *chainID,
 		GenesisTime: now,
 		RewardPools: &wire.GenesisRewardPools{
-			StoragePoolRemaining:   6_000_000_000,
-			RetrievalPoolRemaining: 1_000_000_000,
-			ValidatorPoolRemaining: 1_000_000_000,
-			RepairPoolRemaining:    1_000_000_000,
+			StoragePoolRemaining:    wire.TokenStoragePoolInitial,
+			RetrievalPoolRemaining:  wire.TokenRetrievalPoolInitial,
+			ValidatorPoolRemaining:  wire.TokenValidatorPoolInitial,
+			RepairPoolRemaining:     wire.TokenRepairPoolInitial,
+			FoundationPoolRemaining: wire.TokenFoundationPoolInitial,
 		},
 	}
 
@@ -3293,7 +3512,6 @@ func usage() {
   chainctl finalize-epoch -chain http://localhost:8080 -epoch epoch_xxx
   chainctl miner         -chain http://localhost:8080 -address miner_xxx
   chainctl account-new   -out ./alice.json
-  chainctl faucet        -chain http://localhost:8080 -address user_demo -amount 1000
   chainctl balance       -chain http://localhost:8080 -address user_demo
   chainctl transfer      -chain http://localhost:8080 -from user_demo -to user_2 -amount 10
   chainctl transfer      -chain http://localhost:8080 -key ./alice.json -to user_2 -amount 10

@@ -9,18 +9,21 @@ import (
 )
 
 type createKeyEnvelopeTxPayload struct {
-	Envelope wire.KeyEnvelope `json:"envelope"`
+	Envelope wire.KeyEnvelope              `json:"envelope"`
+	Request  wire.CreateKeyEnvelopeRequest `json:"request"`
 }
 
 type createShareTxPayload struct {
-	Share    wire.ShareRecord `json:"share"`
-	Envelope wire.KeyEnvelope `json:"envelope"`
+	Share    wire.ShareRecord              `json:"share"`
+	Envelope wire.KeyEnvelope              `json:"envelope"`
+	Request  wire.CreateKeyEnvelopeRequest `json:"request"`
 }
 
 type revokeShareTxPayload struct {
-	ShareID       string `json:"share_id"`
-	Owner         string `json:"owner"`
-	RevokedAtUnix int64  `json:"revoked_at_unix"`
+	ShareID       string                  `json:"share_id"`
+	Owner         string                  `json:"owner"`
+	RevokedAtUnix int64                   `json:"revoked_at_unix"`
+	Request       wire.RevokeShareRequest `json:"request"`
 }
 
 func (s *Store) CreateKeyEnvelope(req wire.CreateKeyEnvelopeRequest) (wire.CreateKeyEnvelopeResponse, error) {
@@ -35,8 +38,14 @@ func (s *Store) CreateKeyEnvelope(req wire.CreateKeyEnvelopeRequest) (wire.Creat
 	if err := s.validateEnvelopeOwnerLocked(envelope.IntentID, envelope.Owner); err != nil {
 		return wire.CreateKeyEnvelopeResponse{}, err
 	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, envelope.Owner, req.AccountNonce, func() error {
+		return wire.VerifyCreateKeyEnvelope(req)
+	}); err != nil {
+		return wire.CreateKeyEnvelopeResponse{}, err
+	}
+	s.consumeAccountNonceLocked(envelope.Owner)
 	s.data.KeyEnvelopes[envelope.EnvelopeID] = envelope
-	s.recordTxLocked("create_key_envelope", envelope.Owner, createKeyEnvelopeTxPayload{Envelope: envelope})
+	s.recordTxLocked("create_key_envelope", envelope.Owner, createKeyEnvelopeTxPayload{Envelope: envelope, Request: req})
 	if err := s.saveLocked(); err != nil {
 		return wire.CreateKeyEnvelopeResponse{}, err
 	}
@@ -59,6 +68,10 @@ func (s *Store) CreateAddressShare(req wire.CreateAddressShareRequest) (wire.Cre
 		Nonce:            req.Nonce,
 		KDF:              req.KDF,
 		ExpiresAtUnix:    req.ExpiresAtUnix,
+		ChainID:          req.ChainID,
+		AccountNonce:     req.AccountNonce,
+		PublicKey:        req.PublicKey,
+		Signature:        req.Signature,
 	}
 	return s.createShare(envelopeReq, wire.ShareModeAddress, recipient)
 }
@@ -87,6 +100,10 @@ func (s *Store) CreatePasscodeShare(req wire.CreatePasscodeShareRequest) (wire.C
 		Nonce:            req.Nonce,
 		KDF:              req.KDF,
 		ExpiresAtUnix:    req.ExpiresAtUnix,
+		ChainID:          req.ChainID,
+		AccountNonce:     req.AccountNonce,
+		PublicKey:        req.PublicKey,
+		Signature:        req.Signature,
 	}
 	return s.createShare(envelopeReq, mode, "")
 }
@@ -118,9 +135,15 @@ func (s *Store) createShare(envelopeReq wire.CreateKeyEnvelopeRequest, mode stri
 	if err := s.validateEnvelopeOwnerLocked(envelope.IntentID, envelope.Owner); err != nil {
 		return wire.CreateShareResponse{}, err
 	}
+	if err := s.verifyAccountRequestLocked(envelopeReq.ChainID, envelope.Owner, envelopeReq.AccountNonce, func() error {
+		return wire.VerifyCreateKeyEnvelope(envelopeReq)
+	}); err != nil {
+		return wire.CreateShareResponse{}, err
+	}
+	s.consumeAccountNonceLocked(envelope.Owner)
 	s.data.KeyEnvelopes[envelope.EnvelopeID] = envelope
 	s.data.ShareRecords[share.ShareID] = share
-	s.recordTxLocked("create_share", envelope.Owner, createShareTxPayload{Share: share, Envelope: envelope})
+	s.recordTxLocked("create_share", envelope.Owner, createShareTxPayload{Share: share, Envelope: envelope, Request: envelopeReq})
 	if err := s.saveLocked(); err != nil {
 		return wire.CreateShareResponse{}, err
 	}
@@ -146,9 +169,15 @@ func (s *Store) RevokeShare(req wire.RevokeShareRequest) error {
 	if share.Owner != owner {
 		return errors.New("only the owner can revoke this share")
 	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, owner, req.AccountNonce, func() error {
+		return wire.VerifyRevokeShare(req)
+	}); err != nil {
+		return err
+	}
 	if share.Revoked {
 		return nil
 	}
+	s.consumeAccountNonceLocked(owner)
 	share.Revoked = true
 	s.data.ShareRecords[share.ShareID] = share
 	if envelope, ok := s.data.KeyEnvelopes[share.EnvelopeID]; ok {
@@ -156,7 +185,7 @@ func (s *Store) RevokeShare(req wire.RevokeShareRequest) error {
 		s.data.KeyEnvelopes[envelope.EnvelopeID] = envelope
 	}
 	now := time.Now().Unix()
-	s.recordTxLocked("revoke_share", owner, revokeShareTxPayload{ShareID: req.ShareID, Owner: owner, RevokedAtUnix: now})
+	s.recordTxLocked("revoke_share", owner, revokeShareTxPayload{ShareID: req.ShareID, Owner: owner, RevokedAtUnix: now, Request: req})
 	return s.saveLocked()
 }
 
@@ -313,6 +342,15 @@ func (s *Store) applyCreateKeyEnvelopeLocked(payload createKeyEnvelopeTxPayload)
 	if payload.Envelope.EnvelopeID == "" {
 		return errors.New("envelope id is required")
 	}
+	if err := s.verifyAccountRequestLocked(payload.Request.ChainID, payload.Envelope.Owner, payload.Request.AccountNonce, func() error {
+		return wire.VerifyCreateKeyEnvelope(payload.Request)
+	}); err != nil {
+		return err
+	}
+	if payload.Envelope.Owner != wire.NormalizeAddress(payload.Request.Owner) {
+		return errors.New("replay envelope owner mismatch")
+	}
+	s.consumeAccountNonceLocked(payload.Envelope.Owner)
 	s.data.KeyEnvelopes[payload.Envelope.EnvelopeID] = payload.Envelope
 	return nil
 }
@@ -321,6 +359,15 @@ func (s *Store) applyCreateShareLocked(payload createShareTxPayload) error {
 	if payload.Share.ShareID == "" || payload.Envelope.EnvelopeID == "" {
 		return errors.New("share and envelope ids are required")
 	}
+	if err := s.verifyAccountRequestLocked(payload.Request.ChainID, payload.Envelope.Owner, payload.Request.AccountNonce, func() error {
+		return wire.VerifyCreateKeyEnvelope(payload.Request)
+	}); err != nil {
+		return err
+	}
+	if payload.Share.Owner != wire.NormalizeAddress(payload.Request.Owner) || payload.Envelope.Owner != payload.Share.Owner {
+		return errors.New("replay share owner mismatch")
+	}
+	s.consumeAccountNonceLocked(payload.Share.Owner)
 	s.data.KeyEnvelopes[payload.Envelope.EnvelopeID] = payload.Envelope
 	s.data.ShareRecords[payload.Share.ShareID] = payload.Share
 	return nil
@@ -331,6 +378,15 @@ func (s *Store) applyRevokeShareLocked(payload revokeShareTxPayload) error {
 	if !ok {
 		return nil
 	}
+	if err := s.verifyAccountRequestLocked(payload.Request.ChainID, share.Owner, payload.Request.AccountNonce, func() error {
+		return wire.VerifyRevokeShare(payload.Request)
+	}); err != nil {
+		return err
+	}
+	if share.Owner != wire.NormalizeAddress(payload.Request.Owner) {
+		return errors.New("replay revoke share owner mismatch")
+	}
+	s.consumeAccountNonceLocked(share.Owner)
 	share.Revoked = true
 	s.data.ShareRecords[payload.ShareID] = share
 	if envelope, ok := s.data.KeyEnvelopes[share.EnvelopeID]; ok {

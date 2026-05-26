@@ -49,18 +49,21 @@ func DecodeAgentKeyString(encoded string) (AgentKeyParts, error) {
 }
 
 type registerAgentKeySigningPayload struct {
+	ChainID     string   `json:"chain_id"`
 	Master      string   `json:"master"`
 	AgentPub    string   `json:"agent_pub"`
 	Permissions []string `json:"permissions"`
 	DailyLimit  uint64   `json:"daily_limit"`
 	TotalLimit  uint64   `json:"total_limit"`
 	ExpiresAt   int64    `json:"expires_at"`
+	Nonce       uint64   `json:"nonce"`
 }
 
 type revokeAgentKeySigningPayload struct {
-	KeyID  string `json:"key_id"`
-	Master string `json:"master"`
-	Nonce  uint64 `json:"nonce"`
+	ChainID string `json:"chain_id"`
+	KeyID   string `json:"key_id"`
+	Master  string `json:"master"`
+	Nonce   uint64 `json:"nonce"`
 }
 
 func SignRegisterAgentKey(req *RegisterAgentKeyRequest, privateKey *ecdsa.PrivateKey) error {
@@ -95,12 +98,14 @@ func VerifyRegisterAgentKey(req RegisterAgentKeyRequest) error {
 
 func RegisterAgentKeyHash(req RegisterAgentKeyRequest) ([]byte, error) {
 	payload, err := json.Marshal(registerAgentKeySigningPayload{
+		ChainID:     req.ChainID,
 		Master:      NormalizeAddress(req.Master),
 		AgentPub:    req.AgentPub,
 		Permissions: req.Permissions,
 		DailyLimit:  req.DailyLimit,
 		TotalLimit:  req.TotalLimit,
 		ExpiresAt:   req.ExpiresAt,
+		Nonce:       req.Nonce,
 	})
 	if err != nil {
 		return nil, err
@@ -140,9 +145,10 @@ func VerifyRevokeAgentKey(req RevokeAgentKeyRequest) error {
 
 func RevokeAgentKeyHash(req RevokeAgentKeyRequest) ([]byte, error) {
 	payload, err := json.Marshal(revokeAgentKeySigningPayload{
-		KeyID:  req.KeyID,
-		Master: NormalizeAddress(req.Master),
-		Nonce:  req.Nonce,
+		ChainID: req.ChainID,
+		KeyID:   req.KeyID,
+		Master:  NormalizeAddress(req.Master),
+		Nonce:   req.Nonce,
 	})
 	if err != nil {
 		return nil, err

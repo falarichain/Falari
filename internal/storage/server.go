@@ -34,7 +34,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /retrieval-receipts/sign", s.signRetrievalReceipt)
 	mux.HandleFunc("GET /blocks/", s.getBlock)
 	mux.HandleFunc("GET /shards/", s.getShard)
-	return withCORS(mux)
+	return mux
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -176,10 +176,17 @@ func (s *Server) isShardBlacklisted(shardHash string) bool {
 	return bl.IsBlocked(shardHash)
 }
 
+const maxStorageRequestSize = 32 << 20 // 32 MB (shard data can be large)
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxStorageRequestSize)
 	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		if err.Error() == "http: request body too large" {
+			writeError(w, http.StatusRequestEntityTooLarge, err)
+		} else {
+			writeError(w, http.StatusBadRequest, err)
+		}
 		return false
 	}
 	return true
@@ -193,17 +200,4 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
-}
-
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }

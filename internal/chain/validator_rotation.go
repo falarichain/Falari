@@ -7,7 +7,7 @@ import (
 	"chain/internal/wire"
 )
 
-const maxConsensusValidators = 21
+const defaultMaxConsensusValidators = 21
 
 type validatorRotationTxPayload struct {
 	EpochRound    uint64   `json:"epoch_round"`
@@ -24,13 +24,29 @@ func (s *Store) rotateValidatorsLocked(epochRound uint64) validatorRotationTxPay
 		previousSet[address] = true
 	}
 
+	params := s.miningParamsLocked()
+	maxValidators := params.MaxConsensusValidators
+	if maxValidators == 0 {
+		maxValidators = defaultMaxConsensusValidators
+	}
+	minValidators := params.MinConsensusValidators
+	if minValidators == 0 {
+		minValidators = 2
+	}
+	availThreshold := params.AvailabilityThresholdBPS
+	if availThreshold == 0 {
+		availThreshold = 6000
+	}
+
 	candidates := s.activeValidatorCandidatesLocked()
 	if len(candidates) == 0 {
 		return validatorRotationTxPayload{EpochRound: epochRound, TotalActive: 0}
 	}
+
+	// Sort by effective power (stake × availability), then ProducedBlocks, then address.
 	sort.SliceStable(candidates, func(i, j int) bool {
-		leftPower := validatorPower(candidates[i])
-		rightPower := validatorPower(candidates[j])
+		leftPower := s.effectivePowerLocked(candidates[i].Address)
+		rightPower := s.effectivePowerLocked(candidates[j].Address)
 		if leftPower != rightPower {
 			return leftPower > rightPower
 		}
@@ -40,15 +56,35 @@ func (s *Store) rotateValidatorsLocked(epochRound uint64) validatorRotationTxPay
 		return candidates[i].Address < candidates[j].Address
 	})
 
+	// Select top candidates, filtering by availability threshold.
 	newSet := map[string]bool{}
 	added := make([]string, 0)
-	for i, candidate := range candidates {
-		if i >= maxConsensusValidators {
+	for _, candidate := range candidates {
+		if uint64(len(newSet)) >= maxValidators {
 			break
+		}
+		score := s.availabilityScoreLocked(candidate.Address)
+		if score < availThreshold && uint64(len(newSet)) >= minValidators {
+			continue
 		}
 		newSet[candidate.Address] = true
 		if !previousSet[candidate.Address] {
 			added = append(added, candidate.Address)
+		}
+	}
+
+	// Safety: ensure minimum validators even if all are below threshold.
+	if uint64(len(newSet)) < minValidators {
+		for _, candidate := range candidates {
+			if uint64(len(newSet)) >= minValidators {
+				break
+			}
+			if !newSet[candidate.Address] {
+				newSet[candidate.Address] = true
+				if !previousSet[candidate.Address] {
+					added = append(added, candidate.Address)
+				}
+			}
 		}
 	}
 

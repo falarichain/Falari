@@ -12,35 +12,50 @@ import (
 // governanceProposalSigningPayload is the canonical payload for proposal signatures.
 // The Signature field is excluded — it is what we are computing.
 type governanceProposalSigningPayload struct {
-	Proposer                           string   `json:"proposer"`
-	IntentID                           string   `json:"intent_id,omitempty"`
-	Action                             string   `json:"action"`
-	ReasonHash                         string   `json:"reason_hash"`
-	ExpiresAtUnix                      int64    `json:"expires_at_unix,omitempty"`
-	PreserveStorage                    bool     `json:"preserve_storage,omitempty"`
-	AppealDeadlineUnix                 int64    `json:"appeal_deadline_unix,omitempty"`
-	TargetOperator                     string   `json:"target_operator,omitempty"`
-	TargetPublicKey                    string   `json:"target_public_key,omitempty"`
-	TargetPermissions                  []string `json:"target_permissions,omitempty"`
-	TargetDataModerationThresholdNum   int      `json:"target_data_moderation_threshold_num,omitempty"`
-	TargetDataModerationThresholdDen   int      `json:"target_data_moderation_threshold_den,omitempty"`
-	TargetOperatorChangeThresholdNum   int      `json:"target_operator_change_threshold_num,omitempty"`
-	TargetOperatorChangeThresholdDen   int      `json:"target_operator_change_threshold_den,omitempty"`
-	TargetStorageReleaseRateBPS        uint64   `json:"target_storage_release_rate_bps,omitempty"`
-	TargetRetrievalReleaseRateBPS      uint64   `json:"target_retrieval_release_rate_bps,omitempty"`
-	TargetValidatorReleaseRateBPS      uint64   `json:"target_validator_release_rate_bps,omitempty"`
-	TargetStoredBytesWeightBPS         uint64   `json:"target_stored_bytes_weight_bps,omitempty"`
-	TargetProofScoreWeightBPS          uint64   `json:"target_proof_score_weight_bps,omitempty"`
-	TargetAvailabilityWeightBPS        uint64   `json:"target_availability_weight_bps,omitempty"`
-	TargetDecentralizationWeightBPS    uint64   `json:"target_decentralization_weight_bps,omitempty"`
-	TargetRetrievalRewardPerMiB        uint64   `json:"target_retrieval_reward_per_mib,omitempty"`
-	TargetMaxRetrievalRewardPerWindow  uint64   `json:"target_max_retrieval_reward_per_window,omitempty"`
-	TargetRepairRewardPerShard         uint64   `json:"target_repair_reward_per_shard,omitempty"`
-	TargetMinerDegradeThreshold        uint64   `json:"target_miner_degrade_threshold,omitempty"`
-	TargetStorageProofSamples          int      `json:"target_storage_proof_samples,omitempty"`
-	TargetValidatorCommissionBPS       uint64   `json:"target_validator_commission_bps,omitempty"`
-	TargetRetrievalWeightBPS           uint64   `json:"target_retrieval_weight_bps,omitempty"`
-	CreatedAtUnix                      int64    `json:"created_at_unix"`
+	Proposer                          string   `json:"proposer"`
+	IntentID                          string   `json:"intent_id,omitempty"`
+	Action                            string   `json:"action"`
+	ReasonHash                        string   `json:"reason_hash"`
+	ExpiresAtUnix                     int64    `json:"expires_at_unix,omitempty"`
+	PreserveStorage                   bool     `json:"preserve_storage,omitempty"`
+	AppealDeadlineUnix                int64    `json:"appeal_deadline_unix,omitempty"`
+	TargetOperator                    string   `json:"target_operator,omitempty"`
+	TargetPublicKey                   string   `json:"target_public_key,omitempty"`
+	TargetPermissions                 []string `json:"target_permissions,omitempty"`
+	TargetDataModerationThresholdNum  int      `json:"target_data_moderation_threshold_num,omitempty"`
+	TargetDataModerationThresholdDen  int      `json:"target_data_moderation_threshold_den,omitempty"`
+	TargetOperatorChangeThresholdNum  int      `json:"target_operator_change_threshold_num,omitempty"`
+	TargetOperatorChangeThresholdDen  int      `json:"target_operator_change_threshold_den,omitempty"`
+	TargetStorageReleaseRateBPS       uint64   `json:"target_storage_release_rate_bps,omitempty"`
+	TargetRetrievalReleaseRateBPS     uint64   `json:"target_retrieval_release_rate_bps,omitempty"`
+	TargetValidatorReleaseRateBPS     uint64   `json:"target_validator_release_rate_bps,omitempty"`
+	TargetStoredBytesWeightBPS        uint64   `json:"target_stored_bytes_weight_bps,omitempty"`
+	TargetProofScoreWeightBPS         uint64   `json:"target_proof_score_weight_bps,omitempty"`
+	TargetAvailabilityWeightBPS       uint64   `json:"target_availability_weight_bps,omitempty"`
+	TargetDecentralizationWeightBPS   uint64   `json:"target_decentralization_weight_bps,omitempty"`
+	TargetRetrievalRewardPerMiB       uint64   `json:"target_retrieval_reward_per_mib,omitempty"`
+	TargetMaxRetrievalRewardPerWindow uint64   `json:"target_max_retrieval_reward_per_window,omitempty"`
+	TargetRepairRewardPerShard        uint64   `json:"target_repair_reward_per_shard,omitempty"`
+	TargetRepairPoolTakeoverBPS       uint64   `json:"target_repair_pool_takeover_bps,omitempty"`
+	TargetRepairPoolSubsidyBPS        uint64   `json:"target_repair_pool_subsidy_bps,omitempty"`
+	TargetMinerDegradeThreshold       uint64   `json:"target_miner_degrade_threshold,omitempty"`
+	TargetStorageProofSamples         int      `json:"target_storage_proof_samples,omitempty"`
+	TargetValidatorCommissionBPS      uint64   `json:"target_validator_commission_bps,omitempty"`
+	TargetRetrievalWeightBPS          uint64   `json:"target_retrieval_weight_bps,omitempty"`
+	TargetFoundationReleaseRateBPS    uint64   `json:"target_foundation_release_rate_bps,omitempty"`
+	TargetFoundationAddress           string   `json:"target_foundation_address,omitempty"`
+	TargetRetrievalAddress            string   `json:"target_retrieval_address,omitempty"`
+	TargetStorageAnnualRateBPS        uint64   `json:"target_storage_annual_rate_bps,omitempty"`
+	TargetRetrievalAnnualRateBPS      uint64   `json:"target_retrieval_annual_rate_bps,omitempty"`
+	TargetValidatorAnnualRateBPS      uint64   `json:"target_validator_annual_rate_bps,omitempty"`
+	TargetFoundationAnnualRateBPS     uint64   `json:"target_foundation_annual_rate_bps,omitempty"`
+	TargetReleaseCoefficientBPS       uint64   `json:"target_release_coefficient_bps,omitempty"`
+	TargetAvailabilityWindowSize      uint64   `json:"target_availability_window_size,omitempty"`
+	TargetAvailabilityThresholdBPS    uint64   `json:"target_availability_threshold_bps,omitempty"`
+	TargetBlockProductionRewardBPS    uint64   `json:"target_block_production_reward_bps,omitempty"`
+	TargetMaxConsensusValidators      uint64   `json:"target_max_consensus_validators,omitempty"`
+	TargetMinConsensusValidators      uint64   `json:"target_min_consensus_validators,omitempty"`
+	CreatedAtUnix                     int64    `json:"created_at_unix"`
 }
 
 // governanceVoteSigningPayload is the canonical payload for vote signatures.
@@ -54,35 +69,50 @@ type governanceVoteSigningPayload struct {
 // GovernanceProposalPayload returns the JSON-encoded signing payload for a proposal.
 func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, error) {
 	payload := governanceProposalSigningPayload{
-		Proposer:                           req.Proposer,
-		IntentID:                           req.IntentID,
-		Action:                             req.Action,
-		ReasonHash:                         req.ReasonHash,
-		ExpiresAtUnix:                      req.ExpiresAtUnix,
-		PreserveStorage:                    req.PreserveStorage,
-		AppealDeadlineUnix:                 req.AppealDeadlineUnix,
-		TargetOperator:                     req.TargetOperator,
-		TargetPublicKey:                    req.TargetPublicKey,
-		TargetPermissions:                  req.TargetPermissions,
-		TargetDataModerationThresholdNum:   req.TargetDataModerationThresholdNum,
-		TargetDataModerationThresholdDen:   req.TargetDataModerationThresholdDen,
-		TargetOperatorChangeThresholdNum:   req.TargetOperatorChangeThresholdNum,
-		TargetOperatorChangeThresholdDen:   req.TargetOperatorChangeThresholdDen,
-		TargetStorageReleaseRateBPS:        req.TargetStorageReleaseRateBPS,
-		TargetRetrievalReleaseRateBPS:      req.TargetRetrievalReleaseRateBPS,
-		TargetValidatorReleaseRateBPS:      req.TargetValidatorReleaseRateBPS,
-		TargetStoredBytesWeightBPS:         req.TargetStoredBytesWeightBPS,
-		TargetProofScoreWeightBPS:          req.TargetProofScoreWeightBPS,
-		TargetAvailabilityWeightBPS:        req.TargetAvailabilityWeightBPS,
-		TargetDecentralizationWeightBPS:    req.TargetDecentralizationWeightBPS,
-		TargetRetrievalRewardPerMiB:        req.TargetRetrievalRewardPerMiB,
-		TargetMaxRetrievalRewardPerWindow:  req.TargetMaxRetrievalRewardPerWindow,
-		TargetRepairRewardPerShard:         req.TargetRepairRewardPerShard,
-		TargetMinerDegradeThreshold:        req.TargetMinerDegradeThreshold,
-		TargetStorageProofSamples:          req.TargetStorageProofSamples,
-		TargetValidatorCommissionBPS:       req.TargetValidatorCommissionBPS,
-		TargetRetrievalWeightBPS:           req.TargetRetrievalWeightBPS,
-		CreatedAtUnix:                      req.CreatedAtUnix,
+		Proposer:                          req.Proposer,
+		IntentID:                          req.IntentID,
+		Action:                            req.Action,
+		ReasonHash:                        req.ReasonHash,
+		ExpiresAtUnix:                     req.ExpiresAtUnix,
+		PreserveStorage:                   req.PreserveStorage,
+		AppealDeadlineUnix:                req.AppealDeadlineUnix,
+		TargetOperator:                    req.TargetOperator,
+		TargetPublicKey:                   req.TargetPublicKey,
+		TargetPermissions:                 req.TargetPermissions,
+		TargetDataModerationThresholdNum:  req.TargetDataModerationThresholdNum,
+		TargetDataModerationThresholdDen:  req.TargetDataModerationThresholdDen,
+		TargetOperatorChangeThresholdNum:  req.TargetOperatorChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:  req.TargetOperatorChangeThresholdDen,
+		TargetStorageReleaseRateBPS:       req.TargetStorageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:     req.TargetRetrievalReleaseRateBPS,
+		TargetValidatorReleaseRateBPS:     req.TargetValidatorReleaseRateBPS,
+		TargetStoredBytesWeightBPS:        req.TargetStoredBytesWeightBPS,
+		TargetProofScoreWeightBPS:         req.TargetProofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:       req.TargetAvailabilityWeightBPS,
+		TargetDecentralizationWeightBPS:   req.TargetDecentralizationWeightBPS,
+		TargetRetrievalRewardPerMiB:       req.TargetRetrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow: req.TargetMaxRetrievalRewardPerWindow,
+		TargetRepairRewardPerShard:        req.TargetRepairRewardPerShard,
+		TargetRepairPoolTakeoverBPS:       req.TargetRepairPoolTakeoverBPS,
+		TargetRepairPoolSubsidyBPS:        req.TargetRepairPoolSubsidyBPS,
+		TargetMinerDegradeThreshold:       req.TargetMinerDegradeThreshold,
+		TargetStorageProofSamples:         req.TargetStorageProofSamples,
+		TargetValidatorCommissionBPS:      req.TargetValidatorCommissionBPS,
+		TargetRetrievalWeightBPS:          req.TargetRetrievalWeightBPS,
+		TargetFoundationReleaseRateBPS:    req.TargetFoundationReleaseRateBPS,
+		TargetFoundationAddress:           req.TargetFoundationAddress,
+		TargetRetrievalAddress:            req.TargetRetrievalAddress,
+		TargetStorageAnnualRateBPS:        req.TargetStorageAnnualRateBPS,
+		TargetRetrievalAnnualRateBPS:      req.TargetRetrievalAnnualRateBPS,
+		TargetValidatorAnnualRateBPS:      req.TargetValidatorAnnualRateBPS,
+		TargetFoundationAnnualRateBPS:     req.TargetFoundationAnnualRateBPS,
+		TargetReleaseCoefficientBPS:       req.TargetReleaseCoefficientBPS,
+		TargetAvailabilityWindowSize:      req.TargetAvailabilityWindowSize,
+		TargetAvailabilityThresholdBPS:    req.TargetAvailabilityThresholdBPS,
+		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
+		TargetMaxConsensusValidators:      req.TargetMaxConsensusValidators,
+		TargetMinConsensusValidators:      req.TargetMinConsensusValidators,
+		CreatedAtUnix:                     req.CreatedAtUnix,
 	}
 	return json.Marshal(payload)
 }

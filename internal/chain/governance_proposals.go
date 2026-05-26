@@ -112,40 +112,53 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 	}
 
 	proposal := wire.GovernanceProposal{
-		ProposalID:                         proposalID,
-		Proposer:                           proposer,
-		ProposerSignature:                  req.Signature,
-		IntentID:                           req.IntentID,
-		Action:                             req.Action,
-		ReasonHash:                         req.ReasonHash,
-		ExpiresAtUnix:                      req.ExpiresAtUnix,
-		PreserveStorage:                    req.PreserveStorage,
-		AppealDeadlineUnix:                 req.AppealDeadlineUnix,
-		TargetOperator:                     req.TargetOperator,
-		TargetPublicKey:                    req.TargetPublicKey,
-		TargetPermissions:                  req.TargetPermissions,
-		TargetDataModerationThresholdNum:   req.TargetDataModerationThresholdNum,
-		TargetDataModerationThresholdDen:   req.TargetDataModerationThresholdDen,
-		TargetOperatorChangeThresholdNum:   req.TargetOperatorChangeThresholdNum,
-		TargetOperatorChangeThresholdDen:   req.TargetOperatorChangeThresholdDen,
-		TargetStorageReleaseRateBPS:        req.TargetStorageReleaseRateBPS,
-		TargetRetrievalReleaseRateBPS:      req.TargetRetrievalReleaseRateBPS,
-		TargetValidatorReleaseRateBPS:      req.TargetValidatorReleaseRateBPS,
-		TargetStoredBytesWeightBPS:         req.TargetStoredBytesWeightBPS,
-		TargetProofScoreWeightBPS:          req.TargetProofScoreWeightBPS,
-		TargetAvailabilityWeightBPS:        req.TargetAvailabilityWeightBPS,
-		TargetDecentralizationWeightBPS:    req.TargetDecentralizationWeightBPS,
-		TargetRetrievalRewardPerMiB:        req.TargetRetrievalRewardPerMiB,
-		TargetMaxRetrievalRewardPerWindow:  req.TargetMaxRetrievalRewardPerWindow,
-		TargetRepairRewardPerShard:         req.TargetRepairRewardPerShard,
-		TargetRepairPoolTakeoverBPS:        req.TargetRepairPoolTakeoverBPS,
-		TargetRepairPoolSubsidyBPS:         req.TargetRepairPoolSubsidyBPS,
-		TargetMinerDegradeThreshold:        req.TargetMinerDegradeThreshold,
-		TargetStorageProofSamples:          req.TargetStorageProofSamples,
-		TargetValidatorCommissionBPS:       req.TargetValidatorCommissionBPS,
-		TargetRetrievalWeightBPS:           req.TargetRetrievalWeightBPS,
-		Status:                             wire.GovProposalPending,
-		CreatedAtUnix:                      now,
+		ProposalID:                        proposalID,
+		Proposer:                          proposer,
+		ProposerSignature:                 req.Signature,
+		IntentID:                          req.IntentID,
+		Action:                            req.Action,
+		ReasonHash:                        req.ReasonHash,
+		ExpiresAtUnix:                     req.ExpiresAtUnix,
+		PreserveStorage:                   req.PreserveStorage,
+		AppealDeadlineUnix:                req.AppealDeadlineUnix,
+		TargetOperator:                    req.TargetOperator,
+		TargetPublicKey:                   req.TargetPublicKey,
+		TargetPermissions:                 req.TargetPermissions,
+		TargetDataModerationThresholdNum:  req.TargetDataModerationThresholdNum,
+		TargetDataModerationThresholdDen:  req.TargetDataModerationThresholdDen,
+		TargetOperatorChangeThresholdNum:  req.TargetOperatorChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:  req.TargetOperatorChangeThresholdDen,
+		TargetStorageReleaseRateBPS:       req.TargetStorageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:     req.TargetRetrievalReleaseRateBPS,
+		TargetValidatorReleaseRateBPS:     req.TargetValidatorReleaseRateBPS,
+		TargetStoredBytesWeightBPS:        req.TargetStoredBytesWeightBPS,
+		TargetProofScoreWeightBPS:         req.TargetProofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:       req.TargetAvailabilityWeightBPS,
+		TargetDecentralizationWeightBPS:   req.TargetDecentralizationWeightBPS,
+		TargetRetrievalRewardPerMiB:       req.TargetRetrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow: req.TargetMaxRetrievalRewardPerWindow,
+		TargetRepairRewardPerShard:        req.TargetRepairRewardPerShard,
+		TargetRepairPoolTakeoverBPS:       req.TargetRepairPoolTakeoverBPS,
+		TargetRepairPoolSubsidyBPS:        req.TargetRepairPoolSubsidyBPS,
+		TargetMinerDegradeThreshold:       req.TargetMinerDegradeThreshold,
+		TargetStorageProofSamples:         req.TargetStorageProofSamples,
+		TargetValidatorCommissionBPS:      req.TargetValidatorCommissionBPS,
+		TargetRetrievalWeightBPS:          req.TargetRetrievalWeightBPS,
+		TargetFoundationReleaseRateBPS:    req.TargetFoundationReleaseRateBPS,
+		TargetFoundationAddress:           req.TargetFoundationAddress,
+		TargetRetrievalAddress:            req.TargetRetrievalAddress,
+		TargetStorageAnnualRateBPS:        req.TargetStorageAnnualRateBPS,
+		TargetRetrievalAnnualRateBPS:      req.TargetRetrievalAnnualRateBPS,
+		TargetValidatorAnnualRateBPS:      req.TargetValidatorAnnualRateBPS,
+		TargetFoundationAnnualRateBPS:     req.TargetFoundationAnnualRateBPS,
+		TargetReleaseCoefficientBPS:       req.TargetReleaseCoefficientBPS,
+		TargetAvailabilityWindowSize:      req.TargetAvailabilityWindowSize,
+		TargetAvailabilityThresholdBPS:    req.TargetAvailabilityThresholdBPS,
+		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
+		TargetMaxConsensusValidators:      req.TargetMaxConsensusValidators,
+		TargetMinConsensusValidators:      req.TargetMinConsensusValidators,
+		Status:                            wire.GovProposalPending,
+		CreatedAtUnix:                     now,
 	}
 
 	s.data.GovernanceProposals[proposalID] = proposal
@@ -431,6 +444,12 @@ func (s *Store) executeConfigChangeLocked(proposal wire.GovernanceProposal, now 
 		s.data.OperatorChangeThresholdNum = proposal.TargetOperatorChangeThresholdNum
 		s.data.OperatorChangeThresholdDen = proposal.TargetOperatorChangeThresholdDen
 	}
+	if proposal.TargetFoundationAddress != "" {
+		s.data.FoundationAddress = wire.NormalizeAddress(proposal.TargetFoundationAddress)
+	}
+	if proposal.TargetRetrievalAddress != "" {
+		s.data.RetrievalAddress = wire.NormalizeAddress(proposal.TargetRetrievalAddress)
+	}
 
 	return wire.GovernanceDealActionResponse{
 		GovernanceType: "governance_update_config",
@@ -450,6 +469,7 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.StorageReleaseRateBPS, proposal.TargetStorageReleaseRateBPS)
 	applyIfNonZero(&p.RetrievalReleaseRateBPS, proposal.TargetRetrievalReleaseRateBPS)
 	applyIfNonZero(&p.ValidatorReleaseRateBPS, proposal.TargetValidatorReleaseRateBPS)
+	applyIfNonZero(&p.FoundationReleaseRateBPS, proposal.TargetFoundationReleaseRateBPS)
 	applyIfNonZero(&p.StoredBytesWeightBPS, proposal.TargetStoredBytesWeightBPS)
 	applyIfNonZero(&p.ProofScoreWeightBPS, proposal.TargetProofScoreWeightBPS)
 	applyIfNonZero(&p.AvailabilityWeightBPS, proposal.TargetAvailabilityWeightBPS)
@@ -465,6 +485,16 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	}
 	applyIfNonZero(&p.ValidatorCommissionBPS, proposal.TargetValidatorCommissionBPS)
 	applyIfNonZero(&p.RetrievalWeightBPS, proposal.TargetRetrievalWeightBPS)
+	applyIfNonZero(&p.StorageAnnualRateBPS, proposal.TargetStorageAnnualRateBPS)
+	applyIfNonZero(&p.RetrievalAnnualRateBPS, proposal.TargetRetrievalAnnualRateBPS)
+	applyIfNonZero(&p.ValidatorAnnualRateBPS, proposal.TargetValidatorAnnualRateBPS)
+	applyIfNonZero(&p.FoundationAnnualRateBPS, proposal.TargetFoundationAnnualRateBPS)
+	applyIfNonZero(&p.ReleaseCoefficientBPS, proposal.TargetReleaseCoefficientBPS)
+	applyIfNonZero(&p.AvailabilityWindowSize, proposal.TargetAvailabilityWindowSize)
+	applyIfNonZero(&p.AvailabilityThresholdBPS, proposal.TargetAvailabilityThresholdBPS)
+	applyIfNonZero(&p.BlockProductionRewardBPS, proposal.TargetBlockProductionRewardBPS)
+	applyIfNonZero(&p.MaxConsensusValidators, proposal.TargetMaxConsensusValidators)
+	applyIfNonZero(&p.MinConsensusValidators, proposal.TargetMinConsensusValidators)
 
 	return wire.GovernanceDealActionResponse{
 		GovernanceType: "governance_update_mining_params",
@@ -588,6 +618,7 @@ func (s *Store) GovernanceOperators() wire.GovernanceOperatorListResponse {
 
 	operators := make([]wire.GovernanceOperator, 0, len(s.data.GovernanceOperators))
 	for _, op := range s.data.GovernanceOperators {
+		op.Nonce = s.data.OperatorNonces[normalizeGovernanceOperator(op.Operator)]
 		operators = append(operators, op)
 	}
 	sort.Slice(operators, func(i, j int) bool {
@@ -595,13 +626,13 @@ func (s *Store) GovernanceOperators() wire.GovernanceOperatorListResponse {
 	})
 
 	return wire.GovernanceOperatorListResponse{
-		Operators:                     operators,
-		DataModerationThreshold:       s.governanceThresholdLocked("freeze"),
-		OperatorChangeThreshold:       s.governanceThresholdLocked("add_operator"),
-		DataModerationThresholdNum:    s.data.DataModerationThresholdNum,
-		DataModerationThresholdDen:    s.data.DataModerationThresholdDen,
-		OperatorChangeThresholdNum:    s.data.OperatorChangeThresholdNum,
-		OperatorChangeThresholdDen:    s.data.OperatorChangeThresholdDen,
+		Operators:                  operators,
+		DataModerationThreshold:    s.governanceThresholdLocked("freeze"),
+		OperatorChangeThreshold:    s.governanceThresholdLocked("add_operator"),
+		DataModerationThresholdNum: s.data.DataModerationThresholdNum,
+		DataModerationThresholdDen: s.data.DataModerationThresholdDen,
+		OperatorChangeThresholdNum: s.data.OperatorChangeThresholdNum,
+		OperatorChangeThresholdDen: s.data.OperatorChangeThresholdDen,
 	}
 }
 
@@ -768,8 +799,10 @@ func validateOperatorManagementFields(action string, targetOperator, targetPubli
 func validateConfigChangeFields(req wire.CreateGovernanceProposalRequest) error {
 	hasDataMod := req.TargetDataModerationThresholdNum > 0 && req.TargetDataModerationThresholdDen > 0
 	hasOpChange := req.TargetOperatorChangeThresholdNum > 0 && req.TargetOperatorChangeThresholdDen > 0
-	if !hasDataMod && !hasOpChange {
-		return errors.New("update_config requires at least one threshold pair (num/den)")
+	hasFoundationAddr := req.TargetFoundationAddress != ""
+	hasRetrievalAddr := req.TargetRetrievalAddress != ""
+	if !hasDataMod && !hasOpChange && !hasFoundationAddr && !hasRetrievalAddr {
+		return errors.New("update_config requires at least one threshold pair (num/den), target_foundation_address, or target_retrieval_address")
 	}
 	if hasDataMod {
 		if req.TargetDataModerationThresholdNum > req.TargetDataModerationThresholdDen {
@@ -796,6 +829,7 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest) 
 	if req.TargetStorageReleaseRateBPS != 0 ||
 		req.TargetRetrievalReleaseRateBPS != 0 ||
 		req.TargetValidatorReleaseRateBPS != 0 ||
+		req.TargetFoundationReleaseRateBPS != 0 ||
 		req.TargetStoredBytesWeightBPS != 0 ||
 		req.TargetProofScoreWeightBPS != 0 ||
 		req.TargetAvailabilityWeightBPS != 0 ||
@@ -808,7 +842,17 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest) 
 		req.TargetMinerDegradeThreshold != 0 ||
 		req.TargetStorageProofSamples != 0 ||
 		req.TargetValidatorCommissionBPS != 0 ||
-		req.TargetRetrievalWeightBPS != 0 {
+		req.TargetRetrievalWeightBPS != 0 ||
+		req.TargetStorageAnnualRateBPS != 0 ||
+		req.TargetRetrievalAnnualRateBPS != 0 ||
+		req.TargetValidatorAnnualRateBPS != 0 ||
+		req.TargetFoundationAnnualRateBPS != 0 ||
+		req.TargetReleaseCoefficientBPS != 0 ||
+		req.TargetAvailabilityWindowSize != 0 ||
+		req.TargetAvailabilityThresholdBPS != 0 ||
+		req.TargetBlockProductionRewardBPS != 0 ||
+		req.TargetMaxConsensusValidators != 0 ||
+		req.TargetMinConsensusValidators != 0 {
 		return nil
 	}
 	return errors.New("update_mining_params requires at least one non-zero target field")

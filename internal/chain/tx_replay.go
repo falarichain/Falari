@@ -22,10 +22,11 @@ type batchCommitTxPayload struct {
 }
 
 type finalizeDealTxPayload struct {
-	IntentID     string `json:"intent_id"`
-	DealID       string `json:"deal_id"`
-	User         string `json:"user"`
-	ManifestRoot string `json:"manifest_root"`
+	Request      wire.FinalizeRequest `json:"request"`
+	IntentID     string               `json:"intent_id"`
+	DealID       string               `json:"deal_id"`
+	User         string               `json:"user"`
+	ManifestRoot string               `json:"manifest_root"`
 }
 
 type settleIntentTxPayload struct {
@@ -65,6 +66,11 @@ func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
 		if err := s.validateTransactionFeeLocked(tx); err != nil {
 			return err
 		}
+		if tx.AgentKeyID != "" {
+			if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
+				return err
+			}
+		}
 		if err := s.validateAgentKeyTxLocked(tx); err != nil {
 			return err
 		}
@@ -82,40 +88,55 @@ func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
 	return nil
 }
 
-func (s *Store) applyPendingTransactionsForBlockLocked(txs []wire.Transaction, producerAddress string) error {
+func (s *Store) applyPendingTransactionsForBlockLocked(txs []wire.Transaction, producerAddress string) ([]wire.Transaction, error) {
+	var applied []wire.Transaction
 	for _, tx := range txs {
 		if s.data.ConfirmedTxs[tx.TxID] {
-			return errors.New("pending transaction already confirmed")
+			continue
 		}
 		if err := s.validateTransactionFeeLocked(tx); err != nil {
-			return err
+			continue
+		}
+		if tx.AgentKeyID != "" {
+			if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
+				continue
+			}
 		}
 		if err := s.validateAgentKeyTxLocked(tx); err != nil {
-			return err
+			continue
 		}
 		if !s.data.AppliedTxs[tx.TxID] {
 			if err := s.applyTransactionLocked(tx); err != nil {
-				return err
+				continue
 			}
 			s.data.AppliedTxs[tx.TxID] = true
 		}
 		if err := s.chargeTransactionFeeLocked(tx, producerAddress); err != nil {
-			return err
+			continue
 		}
+		applied = append(applied, tx)
 	}
-	return nil
+	return applied, nil
 }
 
 func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 	switch tx.Type {
 	case "faucet":
-		var req wire.FaucetRequest
-		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+		// Faucet has been removed; skip legacy faucet transactions
+		return nil
+	case "genesis_credit":
+		// Replay genesis_credit: credit balance on this node
+		var payload struct {
+			Address string `json:"address"`
+			Amount  uint64 `json:"amount"`
+		}
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return err
 		}
-		account := s.accountLocked(req.Address)
-		account.Balance += req.Amount
-		s.data.Accounts[req.Address] = account
+		acc := s.accountLocked(payload.Address)
+		acc.Balance += payload.Amount
+		s.data.Accounts[payload.Address] = acc
+		return nil
 	case "transfer":
 		var req wire.TransferRequest
 		if err := json.Unmarshal(tx.Payload, &req); err != nil {
@@ -171,6 +192,18 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyRevokeShareLocked(payload)
+	case "register_agent_key":
+		var payload registerAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyRegisterAgentKeyLocked(payload)
+	case "revoke_agent_key":
+		var payload revokeAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyRevokeAgentKeyLocked(payload)
 	case "batch_commit":
 		var payload batchCommitTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -298,59 +331,87 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 		}
 		_, err := s.applyValidatorEvidenceLocked(payload.Evidence)
 		return err
+	case "delegate_stake":
+		var payload delegateStakeTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyDelegateStakeLocked(payload)
+	case "undelegate_stake":
+		var payload undelegateStakeTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyUndelegateStakeLocked(payload)
+	case "create_multisig":
+		var payload createMultisigTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyCreateMultisigLocked(payload)
+	case "multisig_exec":
+		var payload multisigExecTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyMultisigExecLocked(payload)
 	default:
 		return nil
 	}
-	return nil
 }
 
 func (s *Store) applyTransferLocked(req wire.TransferRequest) (wire.Account, wire.Account, error) {
 	fromAddress := wire.NormalizeAddress(req.From)
-	toAddress := wire.NormalizeAddress(req.To)
 	from := s.accountLocked(fromAddress)
-	if wire.IsSignedTransfer(req) {
-		if req.Signature == "" {
-			return wire.Account{}, wire.Account{}, errors.New("signed transfer requires signature")
-		}
-		recoveredPublicKey, err := wire.RecoverTransferPublicKey(req)
-		if err != nil {
-			return wire.Account{}, wire.Account{}, err
-		}
-		if req.PublicKey != "" && !strings.EqualFold(req.PublicKey, recoveredPublicKey) {
-			return wire.Account{}, wire.Account{}, errors.New("transfer public key does not match signature")
-		}
-		req.PublicKey = recoveredPublicKey
-		if err := wire.VerifyTransferSignature(req); err != nil {
-			return wire.Account{}, wire.Account{}, err
-		}
-		if from.PublicKey != "" && !strings.EqualFold(from.PublicKey, req.PublicKey) {
-			return wire.Account{}, wire.Account{}, errors.New("transfer public key mismatch with account")
-		}
-		if req.Fee < s.data.FeeMarket.BaseFee {
-			return wire.Account{}, wire.Account{}, errors.New("transfer fee below current base fee")
-		}
-		expectedNonce := from.Nonce
-		if req.Nonce != expectedNonce {
-			return wire.Account{}, wire.Account{}, errors.New("invalid transfer nonce")
-		}
-		return s.applyNonceProtectedTransferLocked(req, req.PublicKey)
+	if req.Signature == "" {
+		return wire.Account{}, wire.Account{}, errors.New("transfer requires signature")
 	}
-	total, err := transferTotalCost(req.Amount, req.Fee)
+	recoveredPublicKey, err := wire.RecoverTransferPublicKey(req, s.data.ChainID)
 	if err != nil {
 		return wire.Account{}, wire.Account{}, err
 	}
-	if from.Balance < total {
-		return wire.Account{}, wire.Account{}, errors.New("insufficient balance")
+	if req.PublicKey != "" && !strings.EqualFold(req.PublicKey, recoveredPublicKey) {
+		return wire.Account{}, wire.Account{}, errors.New("transfer public key does not match signature")
 	}
-	to := s.accountLocked(toAddress)
-	from.Balance -= req.Amount
-	to.Balance += req.Amount
-	s.data.Accounts[fromAddress] = from
-	s.data.Accounts[toAddress] = to
-	return from, to, nil
+	req.PublicKey = recoveredPublicKey
+	if err := wire.VerifyTransferSignature(req, s.data.ChainID); err != nil {
+		return wire.Account{}, wire.Account{}, err
+	}
+	if from.PublicKey != "" && !strings.EqualFold(from.PublicKey, req.PublicKey) {
+		return wire.Account{}, wire.Account{}, errors.New("transfer public key mismatch with account")
+	}
+	if req.Fee < s.data.FeeMarket.BaseFee {
+		return wire.Account{}, wire.Account{}, errors.New("transfer fee below current base fee")
+	}
+	expectedNonce := from.Nonce
+	if req.Nonce != expectedNonce {
+		return wire.Account{}, wire.Account{}, errors.New("invalid transfer nonce")
+	}
+	return s.applySignedTransferLocked(req, req.PublicKey)
 }
 
-func (s *Store) applyNonceProtectedTransferLocked(req wire.TransferRequest, publicKey string) (wire.Account, wire.Account, error) {
+func (s *Store) verifyTransferTxLocked(tx wire.Transaction) error {
+	var req wire.TransferRequest
+	if err := json.Unmarshal(tx.Payload, &req); err != nil {
+		return err
+	}
+	if req.Signature == "" {
+		return errors.New("transfer requires signature")
+	}
+	if err := wire.VerifyTransferSignature(req, s.data.ChainID); err != nil {
+		return err
+	}
+	from := s.accountLocked(wire.NormalizeAddress(req.From))
+	if req.Fee < s.data.FeeMarket.BaseFee {
+		return errors.New("transfer fee below current base fee")
+	}
+	if req.Nonce < from.Nonce {
+		return errors.New("invalid transfer nonce")
+	}
+	return nil
+}
+
+func (s *Store) applySignedTransferLocked(req wire.TransferRequest, publicKey string) (wire.Account, wire.Account, error) {
 	fromAddress := wire.NormalizeAddress(req.From)
 	toAddress := wire.NormalizeAddress(req.To)
 	from := s.accountLocked(fromAddress)
@@ -463,9 +524,44 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 	if account.Balance < req.LockedFee {
 		return errors.New("replay create intent has insufficient storage fee balance")
 	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "create_intent", req.LockedFee, func(agentPub string) error {
+			return wire.VerifyCreateIntentAgent(req, agentPub)
+		}); err != nil {
+			return err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyCreateIntent(req)
+		}); err != nil {
+			return err
+		}
+		s.consumeAccountNonceLocked(req.User)
+	}
+	account = s.accountLocked(req.User)
+	burnAmount := req.LockedFee * defaultStorageBurnBPS / 10_000
+	retrievalAmount := req.LockedFee * defaultStorageRetrievalBPS / 10_000
+	foundationAmount := req.LockedFee * defaultStorageFoundationBPS / 10_000
+	minerPortion := req.LockedFee - burnAmount - retrievalAmount - foundationAmount
 	account.Balance -= req.LockedFee
-	account.LockedStorage += req.LockedFee
+	account.LockedStorage += minerPortion
 	s.data.Accounts[account.Address] = account
+	if retrievalAmount > 0 && s.data.RetrievalAddress != "" {
+		retAcc := s.accountLocked(s.data.RetrievalAddress)
+		retAcc.Balance += retrievalAmount
+		s.data.Accounts[retAcc.Address] = retAcc
+		s.data.StorageFeePool.TotalToRetrieval = saturatingAdd(s.data.StorageFeePool.TotalToRetrieval, retrievalAmount)
+	} else {
+		burnAmount += retrievalAmount
+	}
+	if foundationAmount > 0 && s.data.FoundationAddress != "" {
+		fndAcc := s.accountLocked(s.data.FoundationAddress)
+		fndAcc.Balance += foundationAmount
+		s.data.Accounts[fndAcc.Address] = fndAcc
+		s.data.StorageFeePool.TotalToFoundation = saturatingAdd(s.data.StorageFeePool.TotalToFoundation, foundationAmount)
+	} else {
+		burnAmount += foundationAmount
+	}
 
 	createdAt := payload.CreatedAtUnix
 	if createdAt == 0 {
@@ -485,7 +581,7 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 			Erasure:          req.Erasure,
 			Encryption:       req.Encryption,
 			Policy:           req.Policy,
-			LockedFee:        req.LockedFee,
+			LockedFee:        minerPortion,
 			Status:           wire.StatusUploading,
 			StorageStatus:    wire.StorageStatusPending,
 			AccessStatus:     defaultAccessStatus(wire.IntentView{Encryption: req.Encryption}),
@@ -498,6 +594,13 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 	}
 	s.createPermanentFundLocked(s.data.Intents[payload.IntentID], createdAt)
 	s.createDealEscrowLocked(s.data.Intents[payload.IntentID], createdAt)
+	if burnAmount > 0 {
+		s.data.Intents[payload.IntentID].BurnedFee = burnAmount
+		escrow := s.dealEscrowLocked(s.data.Intents[payload.IntentID])
+		escrow.BurnedFee = burnAmount
+		s.data.DealEscrows[payload.IntentID] = escrow
+		s.data.StorageFeePool.TotalBurned = saturatingAdd(s.data.StorageFeePool.TotalBurned, burnAmount)
+	}
 	s.reserveStorageAssignmentsLocked(assignments)
 	return nil
 }
@@ -507,6 +610,9 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 	intent, ok := s.data.Intents[req.IntentID]
 	if !ok {
 		return errors.New("replay batch commit intent not found")
+	}
+	if intent.User != req.User {
+		return errors.New("replay batch commit user mismatch")
 	}
 	for _, receipt := range req.Receipts {
 		if err := validateReceiptForReplay(intent, receipt); err != nil {
@@ -519,6 +625,23 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 		if !ok || miner.Status != wire.MinerStatusActive {
 			return errors.New("replay batch commit miner not found")
 		}
+	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "batch_commit", 0, func(agentPub string) error {
+			return wire.VerifyBatchCommitAgent(req, agentPub)
+		}); err != nil {
+			return err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyBatchCommit(req)
+		}); err != nil {
+			return err
+		}
+		s.consumeAccountNonceLocked(req.User)
+	}
+	for _, receipt := range req.Receipts {
+		miner := s.minerStatsLocked(receipt.MinerAddress)
 		if intent.Receipts[receipt.SegmentID] == nil {
 			intent.Receipts[receipt.SegmentID] = map[int]wire.MinerReceipt{}
 		}
@@ -571,6 +694,24 @@ func (s *Store) applyFinalizeDealLocked(payload finalizeDealTxPayload) error {
 	if payload.User != "" && intent.User != payload.User {
 		return errors.New("replay finalize deal user mismatch")
 	}
+	req := payload.Request
+	if req.IntentID == "" {
+		req = wire.FinalizeRequest{ChainID: "", IntentID: payload.IntentID, User: payload.User, ManifestRoot: payload.ManifestRoot}
+	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "finalize", 0, func(agentPub string) error {
+			return wire.VerifyFinalizeAgent(req, agentPub)
+		}); err != nil {
+			return err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyFinalize(req)
+		}); err != nil {
+			return err
+		}
+		s.consumeAccountNonceLocked(req.User)
+	}
 	intent.DealID = payload.DealID
 	intent.Status = wire.StatusFinalized
 	now := time.Now().Unix()
@@ -594,6 +735,15 @@ func (s *Store) applySettleIntentLocked(payload settleIntentTxPayload) error {
 	if payload.Request.User != "" && payload.Request.User != intent.User {
 		return errors.New("replay settle intent user mismatch")
 	}
+	req := payload.Request
+	if req.User == "" {
+		req.User = intent.User
+	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+		return wire.VerifySettleIntent(req)
+	}); err != nil {
+		return err
+	}
 	settledAt := payload.SettledAtUnix
 	if settledAt == 0 {
 		settledAt = time.Now().Unix()
@@ -605,10 +755,16 @@ func (s *Store) applySettleIntentLocked(payload settleIntentTxPayload) error {
 	if resp.RefundedFee != payload.Response.RefundedFee || resp.PaidFee != payload.Response.PaidFee || resp.Status != payload.Response.Status {
 		return errors.New("replay settle intent response mismatch")
 	}
+	s.consumeAccountNonceLocked(req.User)
 	return nil
 }
 
 func (s *Store) applyTerminateDealLocked(payload terminateDealTxPayload) error {
+	if err := s.verifyAccountRequestLocked(payload.Request.ChainID, payload.Request.User, payload.Request.Nonce, func() error {
+		return wire.VerifyTerminateDeal(payload.Request)
+	}); err != nil {
+		return err
+	}
 	resp, err := s.terminateDealLocked(payload.Request, payload.Response.TerminatedAtUnix)
 	if err != nil {
 		return err
@@ -616,10 +772,16 @@ func (s *Store) applyTerminateDealLocked(payload terminateDealTxPayload) error {
 	if resp.StorageStatus != payload.Response.StorageStatus || resp.AccessStatus != payload.Response.AccessStatus {
 		return errors.New("replay terminate deal response mismatch")
 	}
+	s.consumeAccountNonceLocked(payload.Request.User)
 	return nil
 }
 
 func (s *Store) applySetAccessPolicyLocked(payload setAccessPolicyTxPayload) error {
+	if err := s.verifyAccountRequestLocked(payload.Request.ChainID, payload.Request.User, payload.Request.Nonce, func() error {
+		return wire.VerifySetAccessPolicy(payload.Request)
+	}); err != nil {
+		return err
+	}
 	resp, err := s.setAccessPolicyLocked(payload.Request, payload.Response.UpdatedAtUnix)
 	if err != nil {
 		return err
@@ -627,6 +789,7 @@ func (s *Store) applySetAccessPolicyLocked(payload setAccessPolicyTxPayload) err
 	if resp.AccessStatus != payload.Response.AccessStatus {
 		return errors.New("replay set access policy response mismatch")
 	}
+	s.consumeAccountNonceLocked(payload.Request.User)
 	return nil
 }
 

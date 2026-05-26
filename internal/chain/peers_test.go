@@ -30,14 +30,24 @@ func TestPeerNetworkSyncOnceFetchesMissingBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.SetBlockProducer(identity)
-	if _, err := producer.Faucet(wire.FaucetRequest{Address: "alice", Amount: 100}); err != nil {
+
+	aliceKey, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := wire.AccountAddress(&aliceKey.PublicKey)
+	if err := producer.CreditBalance(alice, gfTokens(100)); err != nil {
 		t.Fatal(err)
 	}
 	first, err := producer.ProduceBlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := producer.Transfer(wire.TransferRequest{From: "alice", To: "bob", Amount: 30}); err != nil {
+	transferReq := wire.TransferRequest{From: alice, To: "bob", Amount: gfTokens(30), Fee: gfTokens(1), Nonce: 0}
+	if err := wire.SignTransfer(&transferReq, aliceKey, producer.data.ChainID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := producer.Transfer(transferReq); err != nil {
 		t.Fatal(err)
 	}
 	second, err := producer.ProduceBlock()
@@ -74,10 +84,10 @@ func TestPeerNetworkSyncOnceFetchesMissingBlocks(t *testing.T) {
 	if peer.Height() != 2 {
 		t.Fatalf("expected peer height 2, got %d", peer.Height())
 	}
-	if peer.accountLocked("alice").Balance != 70 {
-		t.Fatalf("expected alice balance 70, got %d", peer.accountLocked("alice").Balance)
+	if peer.accountLocked(alice).Balance != gfTokens(69) {
+		t.Fatalf("expected alice balance 69, got %d", peer.accountLocked(alice).Balance)
 	}
-	if peer.accountLocked("bob").Balance != 30 {
+	if peer.accountLocked("bob").Balance != gfTokens(30) {
 		t.Fatalf("expected bob balance 30, got %d", peer.accountLocked("bob").Balance)
 	}
 }
@@ -130,7 +140,7 @@ func TestLibP2PGossipBroadcastsBlocks(t *testing.T) {
 	})
 	time.Sleep(750 * time.Millisecond)
 
-	if _, err := producer.Faucet(wire.FaucetRequest{Address: "alice", Amount: 100}); err != nil {
+	if err := producer.CreditBalance("alice", gfTokens(100)); err != nil {
 		t.Fatal(err)
 	}
 	produced, err := producer.ProduceBlock()
@@ -144,7 +154,7 @@ func TestLibP2PGossipBroadcastsBlocks(t *testing.T) {
 	waitFor(t, 10*time.Second, func() bool {
 		return peerStore.Height() == produced.Block.Height
 	})
-	if peerStore.accountLocked("alice").Balance != 100 {
+	if peerStore.accountLocked("alice").Balance != gfTokens(100) {
 		t.Fatalf("expected libp2p gossip block to replay alice balance 100, got %d", peerStore.accountLocked("alice").Balance)
 	}
 }
@@ -159,24 +169,24 @@ func TestSignedTransferNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	from := wire.AccountAddress(&privateKey.PublicKey)
-	if _, err := store.Faucet(wire.FaucetRequest{Address: from, Amount: 100}); err != nil {
+	if err := store.CreditBalance(from, gfTokens(100)); err != nil {
 		t.Fatal(err)
 	}
 	req := wire.TransferRequest{
 		From:   from,
 		To:     "bob",
-		Amount: 40,
-		Fee:    1,
+		Amount: gfTokens(40),
+		Fee:    gfTokens(1),
 		Nonce:  0,
 	}
-	if err := wire.SignTransfer(&req, privateKey); err != nil {
+	if err := wire.SignTransfer(&req, privateKey, store.data.ChainID); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := store.Transfer(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.From.Nonce != 1 || resp.From.Balance != 60 || resp.To.Balance != 40 {
+	if resp.From.Nonce != 1 || resp.From.Balance != gfTokens(60) || resp.To.Balance != gfTokens(40) {
 		t.Fatalf("unexpected signed transfer state: from=%+v to=%+v", resp.From, resp.To)
 	}
 	if _, err := store.Transfer(req); err == nil {
@@ -184,7 +194,7 @@ func TestSignedTransferNonce(t *testing.T) {
 	}
 }
 
-func TestSignedRawEthereumTransferNonce(t *testing.T) {
+func TestSignedTransferWithEthereumAddress(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -194,30 +204,32 @@ func TestSignedRawEthereumTransferNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	from := wire.AccountAddress(&privateKey.PublicKey)
-	if _, err := store.Faucet(wire.FaucetRequest{Address: from, Amount: 100}); err != nil {
+	if err := store.CreditBalance(from, gfTokens(100)); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := store.Transfer(wire.TransferRequest{
+	req := wire.TransferRequest{
 		From:   from,
 		To:     "0x00000000000000000000000000000000000000b0",
-		Amount: 25,
-		Fee:    1,
-	})
+		Amount: gfTokens(25),
+		Fee:    gfTokens(1),
+		Nonce:  0,
+	}
+	if err := wire.SignTransfer(&req, privateKey, store.data.ChainID); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := store.Transfer(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.From.Nonce != 0 || resp.From.Balance != 75 || resp.To.Balance != 25 {
+	if resp.From.Nonce != 1 || resp.From.Balance != gfTokens(75) || resp.To.Balance != gfTokens(25) {
 		t.Fatalf("unexpected transfer state: from=%+v to=%+v", resp.From, resp.To)
 	}
 	lowercaseRecipient, err := store.Account("0x00000000000000000000000000000000000000b0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lowercaseRecipient.Balance != 25 {
+	if lowercaseRecipient.Balance != gfTokens(25) {
 		t.Fatalf("expected normalized Ethereum address lookup balance 25, got %d", lowercaseRecipient.Balance)
-	}
-	if _, err := store.SubmitRawTransaction(wire.RawTransactionRequest{RawTx: "0x"}); err == nil {
-		t.Fatal("expected raw transaction to be rejected after EVM removal")
 	}
 }
 
@@ -226,7 +238,7 @@ func TestAcceptedTransactionIsAppliedWhenProduced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := source.Faucet(wire.FaucetRequest{Address: "alice", Amount: 100}); err != nil {
+	if err := source.CreditBalance("alice", gfTokens(100)); err != nil {
 		t.Fatal(err)
 	}
 	tx := source.Mempool().Pending[0]
@@ -265,7 +277,7 @@ func TestAcceptedTransactionIsAppliedWhenProduced(t *testing.T) {
 	if !produced.Produced {
 		t.Fatal("expected block to be produced")
 	}
-	if producer.accountLocked("alice").Balance != 100 {
+	if producer.accountLocked("alice").Balance != gfTokens(100) {
 		t.Fatalf("expected gossiped transaction to execute during production, got balance %d", producer.accountLocked("alice").Balance)
 	}
 	if !producer.data.ConfirmedTxs[tx.TxID] {

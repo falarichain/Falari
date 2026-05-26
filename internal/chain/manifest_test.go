@@ -5,7 +5,7 @@ import (
 )
 
 func TestManifestExportsDownloadPlanWithCommittedReceipts(t *testing.T) {
-	store, _, resp := setupCommittedAssignedIntent(t)
+	store, _, resp, _ := setupCommittedAssignedIntent(t)
 
 	manifest, err := store.Manifest(resp.IntentID)
 	if err != nil {

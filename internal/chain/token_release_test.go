@@ -41,9 +41,9 @@ func TestDistributeValidatorRewardsSharesWithDelegators(t *testing.T) {
 	store.data.Validators["validator_a"] = wire.ValidatorInfo{
 		Address:        "validator_a",
 		PublicKey:      "pub",
-		Stake:          10,
-		SelfStake:      10,
-		DelegatedStake: 10,
+		Stake:          gfTokens(10),
+		SelfStake:      gfTokens(10),
+		DelegatedStake: gfTokens(10),
 		Status:         wire.ValidatorStatusActive,
 	}
 	store.data.ConsensusValidators["validator_a"] = true
@@ -51,7 +51,7 @@ func TestDistributeValidatorRewardsSharesWithDelegators(t *testing.T) {
 		delegationKey("delegator_a", "validator_a"): {
 			Delegator: "delegator_a",
 			Validator: "validator_a",
-			Amount:    10,
+			Amount:    gfTokens(10),
 		},
 	}
 
@@ -72,5 +72,46 @@ func TestDistributeValidatorRewardsSharesWithDelegators(t *testing.T) {
 	validator := store.data.Validators["validator_a"]
 	if validator.Rewards != 60 || validator.DelegationRewards != 40 {
 		t.Fatalf("unexpected validator reward accounting: %+v", validator)
+	}
+}
+
+func TestFoundationPoolDistributesDirectlyToAddress(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.data.FoundationAddress = "foundation_addr"
+
+	store.distributeFoundationPoolRewardsLocked(1000)
+
+	acct := store.data.Accounts["foundation_addr"]
+	if acct.Balance != 1000 {
+		t.Fatalf("expected foundation address balance 1000, got %d", acct.Balance)
+	}
+	// Foundation rewards should NOT go through vesting.
+	if acct.PendingMiningRewards != 0 {
+		t.Fatalf("expected no pending mining rewards for foundation, got %d", acct.PendingMiningRewards)
+	}
+}
+
+func TestFoundationPoolReturnsWhenNoAddress(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.initRewardPoolsLocked()
+	// Simulate a release that already decremented FoundationRemaining and incremented TokensReleased.
+	store.data.RewardPools.FoundationRemaining = wire.TokenFoundationPoolInitial - 500
+	store.data.RewardPools.TokensReleased = 500
+
+	store.distributeFoundationPoolRewardsLocked(500)
+
+	// Tokens should be returned to the pool since no address is set.
+	if store.data.RewardPools.FoundationRemaining != wire.TokenFoundationPoolInitial {
+		t.Fatalf("expected foundation pool restored to %d, got %d",
+			wire.TokenFoundationPoolInitial, store.data.RewardPools.FoundationRemaining)
+	}
+	if store.data.RewardPools.TokensReleased != 0 {
+		t.Fatalf("expected tokens released reset to 0, got %d", store.data.RewardPools.TokensReleased)
 	}
 }

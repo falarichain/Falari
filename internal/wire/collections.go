@@ -11,6 +11,7 @@ import (
 )
 
 type createCollectionSigningPayload struct {
+	ChainID     string            `json:"chain_id"`
 	User        string            `json:"user"`
 	Name        string            `json:"name"`
 	Description string            `json:"description,omitempty"`
@@ -19,6 +20,7 @@ type createCollectionSigningPayload struct {
 }
 
 type appendRecordSigningPayload struct {
+	ChainID      string            `json:"chain_id"`
 	CollectionID string            `json:"collection_id"`
 	User         string            `json:"user"`
 	IntentID     string            `json:"intent_id"`
@@ -70,6 +72,7 @@ func RecoverCreateCollectionPublicKey(req CreateCollectionRequest) (string, erro
 
 func CreateCollectionHash(req CreateCollectionRequest) ([]byte, error) {
 	payload, err := json.Marshal(createCollectionSigningPayload{
+		ChainID:     req.ChainID,
 		User:        NormalizeAddress(req.User),
 		Name:        req.Name,
 		Description: req.Description,
@@ -122,6 +125,7 @@ func RecoverAppendRecordPublicKey(req AppendRecordRequest) (string, error) {
 
 func AppendRecordHash(req AppendRecordRequest) ([]byte, error) {
 	payload, err := json.Marshal(appendRecordSigningPayload{
+		ChainID:      req.ChainID,
 		CollectionID: req.CollectionID,
 		User:         NormalizeAddress(req.User),
 		IntentID:     req.IntentID,

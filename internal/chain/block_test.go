@@ -3,8 +3,8 @@ package chain
 import (
 	"crypto/ecdsa"
 	"encoding/json"
-	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,10 +33,19 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 	}
 	store.SetBlockProducer(identity)
 
-	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 100}); err != nil {
+	aliceKey, err := ethcrypto.GenerateKey()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Transfer(wire.TransferRequest{From: "alice", To: "bob", Amount: 25}); err != nil {
+	alice := wire.AccountAddress(&aliceKey.PublicKey)
+	if err := store.CreditBalance(alice, gfTokens(100)); err != nil {
+		t.Fatal(err)
+	}
+	transferReq := wire.TransferRequest{From: alice, To: "bob", Amount: gfTokens(25), Fee: gfTokens(1), Nonce: 0}
+	if err := wire.SignTransfer(&transferReq, aliceKey, store.data.ChainID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transfer(transferReq); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,8 +95,86 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if empty.Produced {
-		t.Fatal("empty mempool should not produce a block")
+	if !empty.Produced {
+		t.Fatal("empty mempool should produce an empty block")
+	}
+	if empty.Block.Height != 2 || len(empty.Block.Transactions) != 0 {
+		t.Fatalf("expected empty block at height 2, got height=%d txs=%d", empty.Block.Height, len(empty.Block.Transactions))
+	}
+}
+
+func TestBlockProductionCapsTransactionCount(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := LoadOrCreateValidatorIdentity("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RegisterValidator(registration); err != nil {
+		t.Fatal(err)
+	}
+	store.SetBlockProducer(identity)
+	if produced, err := store.ProduceBlock(); err != nil || !produced.Produced {
+		t.Fatalf("expected validator registration block, produced=%t err=%v", produced.Produced, err)
+	}
+
+	privateKey, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := wire.AccountAddress(&privateKey.PublicKey)
+	store.data.Accounts[from] = wire.Account{Address: from, Balance: gfTokens(1000)}
+
+	for i := 0; i < defaultMaxBlockTxs+5; i++ {
+		tx := signedTransferTx(t, "tx", wire.TransferRequest{
+			From:   from,
+			To:     "0x00000000000000000000000000000000000000b0",
+			Amount: gfTokens(1),
+			Nonce:  uint64(i),
+			Fee:    gfTokens(1),
+		}, privateKey, store.data.ChainID)
+		if accepted, err := store.AcceptTransaction(tx); err != nil || !accepted {
+			t.Fatalf("expected tx %d accepted, accepted=%t err=%v", i, accepted, err)
+		}
+	}
+
+	produced, err := store.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !produced.Produced {
+		t.Fatal("expected block to be produced")
+	}
+	if len(produced.Block.Transactions) != defaultMaxBlockTxs {
+		t.Fatalf("expected %d transactions, got %d", defaultMaxBlockTxs, len(produced.Block.Transactions))
+	}
+	if len(store.Mempool().Pending) != 5 {
+		t.Fatalf("expected 5 transactions left in mempool, got %d", len(store.Mempool().Pending))
+	}
+}
+
+func TestAcceptTransactionRejectsOversizedPayload(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`"` + strings.Repeat("x", defaultMaxTxBytes+1) + `"`)
+	payloadHash := chaincrypto.HashBytes(payload)
+	tx := wire.Transaction{
+		TxID:          chaincrypto.HashBytes([]byte("oversized:" + payloadHash)),
+		Type:          "oversized",
+		PayloadHash:   payloadHash,
+		Payload:       payload,
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	if accepted, err := store.AcceptTransaction(tx); err == nil || accepted {
+		t.Fatalf("expected oversized transaction rejected, accepted=%t err=%v", accepted, err)
 	}
 }
 
@@ -108,7 +195,7 @@ func TestAcceptPeerBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.SetBlockProducer(identity)
-	if _, err := producer.Faucet(wire.FaucetRequest{Address: "alice", Amount: 100}); err != nil {
+	if err := producer.CreditBalance("alice", 100); err != nil {
 		t.Fatal(err)
 	}
 	produced, err := producer.ProduceBlock()
@@ -139,7 +226,7 @@ func TestAcceptPeerBlock(t *testing.T) {
 		t.Fatal("accepted block should remove matching pending txs")
 	}
 	if peer.accountLocked("alice").Balance != 100 {
-		t.Fatal("accepted block should replay faucet transaction")
+		t.Fatal("accepted block should replay genesis_credit transaction")
 	}
 	if peer.data.Validators[identity.Address].ProducedBlocks != 1 {
 		t.Fatal("peer should track producer block count")
@@ -168,10 +255,10 @@ func TestMempoolReplacesSameNonceWithHigherFee(t *testing.T) {
 	lowFee := signedTransferTx(t, "low-fee", wire.TransferRequest{
 		From:   from,
 		To:     "0x00000000000000000000000000000000000000b0",
-		Amount: 10,
+		Amount: gfTokens(10),
 		Nonce:  0,
-		Fee:    1,
-	}, privateKey)
+		Fee:    gfTokens(1),
+	}, privateKey, store.data.ChainID)
 	if accepted, err := store.AcceptTransaction(lowFee); err != nil || !accepted {
 		t.Fatalf("expected low fee tx accepted, accepted=%t err=%v", accepted, err)
 	}
@@ -179,25 +266,25 @@ func TestMempoolReplacesSameNonceWithHigherFee(t *testing.T) {
 	replacement := signedTransferTx(t, "replacement", wire.TransferRequest{
 		From:   from,
 		To:     "0x00000000000000000000000000000000000000b0",
-		Amount: 10,
+		Amount: gfTokens(10),
 		Nonce:  0,
-		Fee:    3,
-	}, privateKey)
+		Fee:    gfTokens(3),
+	}, privateKey, store.data.ChainID)
 	if accepted, err := store.AcceptTransaction(replacement); err != nil || !accepted {
 		t.Fatalf("expected replacement tx accepted, accepted=%t err=%v", accepted, err)
 	}
 	mempool := store.Mempool()
-	if len(mempool.Pending) != 1 || mempool.Pending[0].TxID != replacement.TxID || mempool.Pending[0].Fee != 3 {
+	if len(mempool.Pending) != 1 || mempool.Pending[0].TxID != replacement.TxID || mempool.Pending[0].Fee != gfTokens(3) {
 		t.Fatalf("unexpected replacement mempool: %+v", mempool.Pending)
 	}
 
 	tooCheap := signedTransferTx(t, "too-cheap", wire.TransferRequest{
 		From:   from,
 		To:     "0x00000000000000000000000000000000000000b0",
-		Amount: 10,
+		Amount: gfTokens(10),
 		Nonce:  0,
-		Fee:    2,
-	}, privateKey)
+		Fee:    gfTokens(2),
+	}, privateKey, store.data.ChainID)
 	if accepted, err := store.AcceptTransaction(tooCheap); err == nil || accepted {
 		t.Fatalf("expected lower fee replacement rejected, accepted=%t err=%v", accepted, err)
 	}
@@ -226,22 +313,22 @@ func TestMempoolProducesContiguousNonceOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	from := wire.AccountAddress(&privateKey.PublicKey)
-	store.data.Accounts[from] = wire.Account{Address: from, Balance: 200}
+	store.data.Accounts[from] = wire.Account{Address: from, Balance: gfTokens(200)}
 
 	nonceOneHighFee := signedTransferTx(t, "nonce-one", wire.TransferRequest{
 		From:   from,
 		To:     "0x00000000000000000000000000000000000000b1",
-		Amount: 10,
+		Amount: gfTokens(10),
 		Nonce:  1,
-		Fee:    100,
-	}, privateKey)
+		Fee:    gfTokens(100),
+	}, privateKey, store.data.ChainID)
 	nonceZeroLowFee := signedTransferTx(t, "nonce-zero", wire.TransferRequest{
 		From:   from,
 		To:     "0x00000000000000000000000000000000000000b0",
-		Amount: 10,
+		Amount: gfTokens(10),
 		Nonce:  0,
-		Fee:    1,
-	}, privateKey)
+		Fee:    gfTokens(1),
+	}, privateKey, store.data.ChainID)
 	if accepted, err := store.AcceptTransaction(nonceOneHighFee); err != nil || !accepted {
 		t.Fatalf("expected nonce 1 tx accepted, accepted=%t err=%v", accepted, err)
 	}
@@ -266,7 +353,7 @@ func TestMempoolProducesContiguousNonceOrder(t *testing.T) {
 		t.Fatalf("expected contiguous nonce order [0 1], got %v", transferOrder)
 	}
 	account := store.accountLocked(from)
-	if account.Nonce != 2 || account.Balance != 79 {
+	if account.Nonce != 2 || account.Balance != gfTokens(79) {
 		t.Fatalf("unexpected sender account after block: %+v", account)
 	}
 }
@@ -295,14 +382,14 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	}
 	from := wire.AccountAddress(&privateKey.PublicKey)
 	to := "0x00000000000000000000000000000000000000f1"
-	store.data.Accounts[from] = wire.Account{Address: from, Balance: 100}
+	store.data.Accounts[from] = wire.Account{Address: from, Balance: gfTokens(100)}
 	tx := signedTransferTx(t, "fee-transfer", wire.TransferRequest{
 		From:   from,
 		To:     to,
-		Amount: 25,
+		Amount: gfTokens(25),
 		Nonce:  0,
-		Fee:    5,
-	}, privateKey)
+		Fee:    gfTokens(5),
+	}, privateKey, store.data.ChainID)
 	if accepted, err := store.AcceptTransaction(tx); err != nil || !accepted {
 		t.Fatalf("expected tx accepted, accepted=%t err=%v", accepted, err)
 	}
@@ -317,7 +404,7 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	fromAccount := store.accountLocked(from)
 	toAccount := store.accountLocked(to)
 	producerAccount := store.accountLocked(identity.Address)
-	if fromAccount.Balance != 70 || toAccount.Balance != 25 || producerAccount.Balance != 5 {
+	if fromAccount.Balance != gfTokens(70) || toAccount.Balance != gfTokens(25) || producerAccount.Balance != gfTokens(5) {
 		t.Fatalf("unexpected fee balances: from=%+v to=%+v producer=%+v", fromAccount, toAccount, producerAccount)
 	}
 }
@@ -340,7 +427,7 @@ func TestMempoolRejectsTransactionsBelowBaseFee(t *testing.T) {
 		Amount: 10,
 		Nonce:  0,
 		Fee:    1,
-	}, privateKey)
+	}, privateKey, store.data.ChainID)
 	if accepted, err := store.AcceptTransaction(tx); err == nil || accepted {
 		t.Fatalf("expected low fee tx rejected, accepted=%t err=%v", accepted, err)
 	}
@@ -370,21 +457,21 @@ func TestFeeMarketAdjustsAfterBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	from := wire.AccountAddress(&privateKey.PublicKey)
-	store.data.Accounts[from] = wire.Account{Address: from, Balance: 100}
+	store.data.Accounts[from] = wire.Account{Address: from, Balance: gfTokens(100)}
 	tx := signedTransferTx(t, "busy-transfer", wire.TransferRequest{
 		From:   from,
 		To:     "0x00000000000000000000000000000000000000f3",
-		Amount: 10,
+		Amount: gfTokens(10),
 		Nonce:  0,
-		Fee:    2,
-	}, privateKey)
+		Fee:    gfTokens(2),
+	}, privateKey, store.data.ChainID)
 	if accepted, err := store.AcceptTransaction(tx); err != nil || !accepted {
 		t.Fatalf("expected tx accepted, accepted=%t err=%v", accepted, err)
 	}
 	if _, err := store.ProduceBlock(); err != nil {
 		t.Fatal(err)
 	}
-	if store.data.FeeMarket.BaseFee != 2 || store.data.FeeMarket.LastBlockTxs != 2 {
+	if store.data.FeeMarket.BaseFee != 112_500_000 || store.data.FeeMarket.LastBlockTxs != 2 {
 		t.Fatalf("expected base fee to increase after busy block, got %+v", store.data.FeeMarket)
 	}
 }
@@ -424,7 +511,7 @@ func TestSimplifiedBFTFinalizesAfterTwoThirdsVotes(t *testing.T) {
 		t.Fatal("proposer identity not found")
 	}
 	store.SetBlockProducer(producer)
-	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 1}); err != nil {
+	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
 	produced, err := store.ProduceBlock()
@@ -497,7 +584,7 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 		t.Fatal("proposer identity not found")
 	}
 	store.SetBlockProducer(producer)
-	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 1}); err != nil {
+	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
 	produced, err := store.ProduceBlock()
@@ -548,7 +635,7 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 func TestSubmitConsensusVoteBroadcastsAcceptedVoteOnce(t *testing.T) {
 	store, identity := registeredTestValidator(t, 10)
 	store.SetBlockProducer(identity)
-	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 1}); err != nil {
+	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
 	produced, err := store.ProduceBlock()
@@ -616,7 +703,7 @@ func TestAcceptBlockRejectsInvalidFinalityCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.SetBlockProducer(identity)
-	if _, err := producer.Faucet(wire.FaucetRequest{Address: "alice", Amount: 1}); err != nil {
+	if err := producer.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
 	produced, err := producer.ProduceBlock()
@@ -652,7 +739,7 @@ func TestAcceptBlockRejectsNonCanonicalFinalityVotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.SetBlockProducer(identity)
-	if _, err := producer.Faucet(wire.FaucetRequest{Address: "alice", Amount: 1}); err != nil {
+	if err := producer.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
 	produced, err := producer.ProduceBlock()
@@ -689,7 +776,7 @@ func TestLevelDBStorePersistsState(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.SetBlockProducer(identity)
-	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 100}); err != nil {
+	if err := store.CreditBalance("alice", 100); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ProduceBlock(); err != nil {
@@ -726,7 +813,7 @@ func TestJSONStoreStillPersistsState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 50}); err != nil {
+	if err := store.CreditBalance("alice", 50); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -866,7 +953,7 @@ func TestRoundRobinRejectsOutOfTurnProducer(t *testing.T) {
 		outOfTurn = second
 	}
 	store.SetBlockProducer(outOfTurn)
-	if _, err := store.Faucet(wire.FaucetRequest{Address: "alice", Amount: 1}); err != nil {
+	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ProduceBlock(); err == nil {
@@ -950,23 +1037,24 @@ func seedFinalizedDealForEpochTest(store *Store) {
 	store.data.Deals["deal_epoch"] = "intent_epoch"
 }
 
-func signedTransferTx(t *testing.T, id string, req wire.TransferRequest, privateKey *ecdsa.PrivateKey) wire.Transaction {
+func signedTransferTx(t *testing.T, id string, req wire.TransferRequest, privateKey *ecdsa.PrivateKey, chainID string) wire.Transaction {
 	t.Helper()
-	if err := wire.SignTransfer(&req, privateKey); err != nil {
+	if err := wire.SignTransfer(&req, privateKey, chainID); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	payloadHash := chaincrypto.HashBytes(raw)
 	return wire.Transaction{
-		TxID:           fmt.Sprintf("tx_%s", id),
+		TxID:           chaincrypto.HashBytes([]byte("transfer:" + payloadHash)),
 		Type:           "transfer",
 		From:           wire.NormalizeAddress(req.From),
 		Nonce:          req.Nonce,
 		NonceProtected: true,
 		Fee:            req.Fee,
-		PayloadHash:    chaincrypto.HashBytes(raw),
+		PayloadHash:    payloadHash,
 		Payload:        append([]byte(nil), raw...),
 		CreatedAtUnix:  time.Now().Unix(),
 	}

@@ -338,7 +338,7 @@ func TestAddOperatorViaProposal(t *testing.T) {
 		Proposer:          addresses[0],
 		Action:            "add_operator",
 		ReasonHash:        "add_new_member",
-		TargetPublicKey:    newPubHex,
+		TargetPublicKey:   newPubHex,
 		TargetPermissions: []string{"freeze", "block"},
 		CreatedAtUnix:     time.Now().Unix(),
 	}
@@ -516,7 +516,7 @@ func TestUpdateOperatorKeyRotationRejected(t *testing.T) {
 		Action:            "update_operator",
 		ReasonHash:        "rotate_key",
 		TargetOperator:    targetAddr,
-		TargetPublicKey:    newPubHex,
+		TargetPublicKey:   newPubHex,
 		TargetPermissions: []string{"freeze"},
 		CreatedAtUnix:     time.Now().Unix(),
 	}
@@ -534,11 +534,11 @@ func TestAddOperatorDuplicateRejected(t *testing.T) {
 	// Try to add an operator with the same public key as an existing operator.
 	existingPubHex := testEncodeHex(ethcrypto.FromECDSAPub(&privKeys[1].PublicKey))
 	req := wire.CreateGovernanceProposalRequest{
-		Proposer:       addresses[0],
-		Action:         "add_operator",
-		ReasonHash:     "duplicate",
+		Proposer:        addresses[0],
+		Action:          "add_operator",
+		ReasonHash:      "duplicate",
 		TargetPublicKey: existingPubHex,
-		CreatedAtUnix:  time.Now().Unix(),
+		CreatedAtUnix:   time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
 		t.Fatal(err)
@@ -586,14 +586,14 @@ func TestUpdateConfigViaProposal(t *testing.T) {
 
 	// Propose update_config: change data moderation to 2/3, operator change to 3/4.
 	req := wire.CreateGovernanceProposalRequest{
-		Proposer:                           addresses[0],
-		Action:                             "update_config",
-		ReasonHash:                         "adjust_thresholds",
-		TargetDataModerationThresholdNum:   2,
-		TargetDataModerationThresholdDen:   3,
-		TargetOperatorChangeThresholdNum:   3,
-		TargetOperatorChangeThresholdDen:   4,
-		CreatedAtUnix:                      time.Now().Unix(),
+		Proposer:                         addresses[0],
+		Action:                           "update_config",
+		ReasonHash:                       "adjust_thresholds",
+		TargetDataModerationThresholdNum: 2,
+		TargetDataModerationThresholdDen: 3,
+		TargetOperatorChangeThresholdNum: 3,
+		TargetOperatorChangeThresholdDen: 4,
+		CreatedAtUnix:                    time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
 		t.Fatal(err)
@@ -715,11 +715,11 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 
 	// Only change proof score weight.
 	req := wire.CreateGovernanceProposalRequest{
-		Proposer:                addresses[0],
-		Action:                  "update_mining_params",
-		ReasonHash:              "tune_proof_weight",
+		Proposer:                  addresses[0],
+		Action:                    "update_mining_params",
+		ReasonHash:                "tune_proof_weight",
 		TargetProofScoreWeightBPS: 4000,
-		CreatedAtUnix:           time.Now().Unix(),
+		CreatedAtUnix:             time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
 		t.Fatal(err)

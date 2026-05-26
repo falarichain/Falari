@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	falaridht "chain/internal/dht"
 	"chain/internal/gateway"
+	"chain/internal/middleware"
 	"chain/internal/storage"
 )
 
@@ -19,7 +24,6 @@ func main() {
 	endpoint := flag.String("endpoint", "", "public endpoint registered on chain")
 	capacity := flag.Uint64("capacity", 1<<40, "declared capacity in bytes")
 	stake := flag.Uint64("stake", 1000, "declared stake")
-	faucet := flag.Bool("faucet", true, "request dev faucet before registration")
 	autoCollect := flag.Bool("auto-collect", true, "automatically sign and submit retrieval receipts")
 	collectInterval := flag.Duration("collect-interval", 30*time.Second, "auto receipt collection interval")
 	cacheSize := flag.Int("cache-size", 512, "max in-memory shard cache entries")
@@ -37,7 +41,44 @@ func main() {
 	dataShards := flag.Int("gateway-data-shards", 4, "data shards for erasure coding")
 	parityShards := flag.Int("gateway-parity-shards", 2, "parity shards for erasure coding")
 	segmentSize := flag.Int64("gateway-segment-size", 1<<26, "segment size in bytes (default 64 MiB)")
+	corsOrigins := flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
+	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")
+	rateLimitBurst := flag.Int("rate-limit-burst", 0, "rate limit burst size (default: rps+1)")
+	production := flag.Bool("production", false, "enable production mode with strict safety checks")
 	flag.Parse()
+
+	if *production {
+		var errs []string
+		if *p2pTopic == "storage-chain/providers/devnet" || *p2pTopic == "storage-chain/devnet" {
+			errs = append(errs, "production mode requires a non-default --p2p-topic")
+		}
+		if *endpoint == "" {
+			errs = append(errs, "production mode requires explicit --endpoint")
+		}
+		if *rateLimitRPS <= 0 {
+			errs = append(errs, "production mode requires --rate-limit-rps to be set")
+		}
+		if *chainURL == "" {
+			errs = append(errs, "production mode requires --chain to register on-chain")
+		}
+		if len(errs) > 0 {
+			for _, e := range errs {
+				log.Printf("PRODUCTION CHECK FAILED: %s", e)
+			}
+			os.Exit(1)
+		}
+		log.Println("production mode enabled: all safety checks passed")
+	}
+
+	var origins []string
+	if *corsOrigins != "" {
+		for _, o := range strings.Split(*corsOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+	}
 
 	node, err := storage.OpenNode(*data)
 	if err != nil {
@@ -48,8 +89,9 @@ func main() {
 	if registeredEndpoint == "" {
 		registeredEndpoint = "http://localhost" + *addr
 	}
+	node.ConfigureChain(*chainURL, registeredEndpoint)
 	if *chainURL != "" {
-		if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake, *faucet); err != nil {
+		if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake); err != nil {
 			log.Fatalf("register retrieval node: %v", err)
 		}
 		log.Printf("registered retrieval node %s endpoint=%s capacity=%d stake=%d", node.Address(), registeredEndpoint, *capacity, *stake)
@@ -130,8 +172,6 @@ func main() {
 		}
 	}
 
-	log.Printf("retrieval node %s listening on %s", node.Address(), *addr)
-
 	mux := http.NewServeMux()
 	storageMux := storage.NewServerWithProviderNetwork(node, providerNetwork).Routes()
 	mux.Handle("/", storageMux)
@@ -143,9 +183,36 @@ func main() {
 		mux.Handle("/gateway/", gwMux)
 	}
 
-	if err := http.ListenAndServe(*addr, mux); err != nil {
-		log.Fatal(err)
+	handler := middleware.Chain(
+		middleware.CORS(origins),
+		middleware.RateLimit(*rateLimitRPS, *rateLimitBurst),
+	)(mux)
+
+	log.Printf("retrieval node %s listening on %s", node.Address(), *addr)
+	httpServer := &http.Server{
+		Addr:              *addr,
+		Handler:           handler,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
+
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("retrieval node server error: %v", err)
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Println("retrieval node: shutting down...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	httpServer.Shutdown(shutdownCtx)
 }
 
 func splitCSV(s string) []string {

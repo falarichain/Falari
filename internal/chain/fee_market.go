@@ -1,7 +1,6 @@
 package chain
 
 import (
-	"encoding/json"
 	"errors"
 
 	"chain/internal/wire"
@@ -86,14 +85,7 @@ func (s *Store) adjustFeeMarketAfterBlockLocked(block wire.Block) {
 }
 
 func transactionRequiresBaseFee(tx wire.Transaction) bool {
-	if tx.Type != "transfer" {
-		return false
-	}
-	var req wire.TransferRequest
-	if json.Unmarshal(tx.Payload, &req) != nil {
-		return false
-	}
-	return req.RawTx != "" || wire.IsSignedTransfer(req)
+	return tx.Type == "transfer" || tx.Type == "multisig_exec"
 }
 
 func transferTotalCost(amount uint64, fee uint64) (uint64, error) {

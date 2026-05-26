@@ -35,10 +35,17 @@ func (s *Store) TopUpPermanentFund(req wire.PermanentFundTopUpRequest) (wire.Per
 	if !isPermanentIntent(intent) {
 		return wire.PermanentFundTopUpResponse{}, errors.New("intent is not permanent storage")
 	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+		return wire.VerifyPermanentFundTopUp(req)
+	}); err != nil {
+		return wire.PermanentFundTopUpResponse{}, err
+	}
 	account := s.accountLocked(req.User)
 	if account.Balance < req.Amount {
 		return wire.PermanentFundTopUpResponse{}, errors.New("insufficient balance")
 	}
+	s.consumeAccountNonceLocked(req.User)
+	account = s.accountLocked(req.User)
 	account.Balance -= req.Amount
 	account.LockedStorage = saturatingAdd(account.LockedStorage, req.Amount)
 	s.data.Accounts[req.User] = account
@@ -89,10 +96,17 @@ func (s *Store) applyPermanentFundTopUpLocked(payload permanentFundTopUpTxPayloa
 	if !isPermanentIntent(intent) {
 		return errors.New("intent is not permanent storage")
 	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+		return wire.VerifyPermanentFundTopUp(req)
+	}); err != nil {
+		return err
+	}
 	account := s.accountLocked(req.User)
 	if account.Balance < req.Amount {
 		return errors.New("replay permanent fund topup has insufficient balance")
 	}
+	s.consumeAccountNonceLocked(req.User)
+	account = s.accountLocked(req.User)
 	account.Balance -= req.Amount
 	account.LockedStorage = saturatingAdd(account.LockedStorage, req.Amount)
 	s.data.Accounts[req.User] = account

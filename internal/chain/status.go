@@ -12,6 +12,7 @@ func (s *Store) Status() wire.ChainStatusResponse {
 	defer s.mu.Unlock()
 
 	resp := wire.ChainStatusResponse{
+		ChainID:             s.data.ChainID,
 		Status:              "ok",
 		Height:              uint64(len(s.data.Blocks)),
 		PendingTransactions: len(s.data.PendingTxs),
@@ -68,8 +69,42 @@ func (s *Store) Status() wire.ChainStatusResponse {
 		resp.RetrievalPoolRemaining = s.data.RewardPools.RetrievalRemaining
 		resp.ValidatorPoolRemaining = s.data.RewardPools.ValidatorRemaining
 		resp.RepairPoolRemaining = s.data.RewardPools.RepairRemaining
+		resp.FoundationPoolRemaining = s.data.RewardPools.FoundationRemaining
 		resp.TokensReleased = s.data.RewardPools.TokensReleased
 	}
+	// Compute estimated per-block validator reward.
+	if s.blockInterval > 0 {
+		params := s.miningParamsLocked()
+		blockSecs := uint64(s.blockInterval.Seconds())
+		if blockSecs == 0 {
+			blockSecs = 5
+		}
+		coeff := params.ReleaseCoefficientBPS
+		if coeff == 0 {
+			coeff = 10000
+		}
+		const secondsPerYear uint64 = 365 * 86400
+		resp.ValidatorRewardPerBlock = reward.ValidatorPoolInitial * params.ValidatorAnnualRateBPS * blockSecs / secondsPerYear * coeff / 10000
+		// Compute average availability and below-threshold count for consensus validators.
+		availThreshold := params.AvailabilityThresholdBPS
+		if availThreshold == 0 {
+			availThreshold = 6000
+		}
+		var totalAvail uint64
+		cvCount := len(s.data.ConsensusValidators)
+		for addr := range s.data.ConsensusValidators {
+			score := s.availabilityScoreLocked(addr)
+			totalAvail += score
+			if score < availThreshold {
+				resp.ValidatorsBelowThreshold++
+			}
+		}
+		if cvCount > 0 {
+			resp.AverageAvailabilityBPS = totalAvail / uint64(cvCount)
+		}
+	}
+	resp.FoundationAddress = s.data.FoundationAddress
+	resp.RetrievalAddress = s.data.RetrievalAddress
 	for challengeID := range s.data.Challenges {
 		if _, ok := s.data.Proofs[challengeID]; !ok {
 			resp.PendingChallenges++

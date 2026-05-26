@@ -10,15 +10,17 @@ import (
 )
 
 type createCollectionTxPayload struct {
-	Collection wire.DataCollection `json:"collection"`
-	Nonce      uint64              `json:"nonce,omitempty"`
-	PublicKey  string              `json:"public_key,omitempty"`
+	Collection wire.DataCollection          `json:"collection"`
+	Request    wire.CreateCollectionRequest `json:"request,omitempty"`
+	Nonce      uint64                       `json:"nonce,omitempty"`
+	PublicKey  string                       `json:"public_key,omitempty"`
 }
 
 type appendRecordTxPayload struct {
-	Record    wire.DataRecord `json:"record"`
-	Nonce     uint64          `json:"nonce,omitempty"`
-	PublicKey string          `json:"public_key,omitempty"`
+	Record    wire.DataRecord          `json:"record"`
+	Request   wire.AppendRecordRequest `json:"request,omitempty"`
+	Nonce     uint64                   `json:"nonce,omitempty"`
+	PublicKey string                   `json:"public_key,omitempty"`
 }
 
 func (s *Store) CreateCollection(req wire.CreateCollectionRequest) (wire.CreateCollectionResponse, error) {
@@ -53,6 +55,7 @@ func (s *Store) CreateCollection(req wire.CreateCollectionRequest) (wire.CreateC
 	s.data.Collections[collectionID] = collection
 	s.recordTxLocked("create_collection", req.User, createCollectionTxPayload{
 		Collection: collection,
+		Request:    req,
 		Nonce:      req.Nonce,
 		PublicKey:  req.PublicKey,
 	})
@@ -131,6 +134,7 @@ func (s *Store) AppendRecord(req wire.AppendRecordRequest) (wire.AppendRecordRes
 	s.data.Collections[collection.CollectionID] = collection
 	s.recordTxLocked("append_record", collection.User, appendRecordTxPayload{
 		Record:    record,
+		Request:   req,
 		Nonce:     req.Nonce,
 		PublicKey: req.PublicKey,
 	})
@@ -234,17 +238,22 @@ func (s *Store) applyDataCollectionLocked(collection wire.DataCollection) {
 }
 
 func (s *Store) applyDataCollectionPayloadLocked(payload createCollectionTxPayload) error {
+	if payload.Request.Signature == "" {
+		return errors.New("replay collection owner signature is required")
+	}
+	if err := s.authorizeCreateCollectionLocked(&payload.Request); err != nil {
+		return err
+	}
+	if payload.Collection.User != wire.NormalizeAddress(payload.Request.User) {
+		return errors.New("replay collection user mismatch")
+	}
 	if payload.PublicKey != "" {
-		account := s.accountLocked(payload.Collection.User)
-		if account.PublicKey != "" && !strings.EqualFold(account.PublicKey, payload.PublicKey) {
-			return errors.New("replay collection public key mismatch with account")
+		if !strings.EqualFold(payload.PublicKey, payload.Request.PublicKey) {
+			return errors.New("replay collection public key mismatch")
 		}
-		if account.Nonce != payload.Nonce {
-			return errors.New("replay invalid collection nonce")
-		}
-		account.Nonce++
-		account.PublicKey = payload.PublicKey
-		s.data.Accounts[account.Address] = account
+	}
+	if payload.Nonce != payload.Request.Nonce {
+		return errors.New("replay collection nonce mismatch")
 	}
 	s.applyDataCollectionLocked(payload.Collection)
 	return nil
@@ -259,17 +268,22 @@ func (s *Store) applyDataRecordLocked(record wire.DataRecord) {
 }
 
 func (s *Store) applyDataRecordPayloadLocked(payload appendRecordTxPayload) error {
+	if payload.Request.Signature == "" {
+		return errors.New("replay record owner signature is required")
+	}
+	if err := s.authorizeAppendRecordLocked(&payload.Request); err != nil {
+		return err
+	}
+	if payload.Record.User != wire.NormalizeAddress(payload.Request.User) {
+		return errors.New("replay record user mismatch")
+	}
 	if payload.PublicKey != "" {
-		account := s.accountLocked(payload.Record.User)
-		if account.PublicKey != "" && !strings.EqualFold(account.PublicKey, payload.PublicKey) {
-			return errors.New("replay record public key mismatch with account")
+		if !strings.EqualFold(payload.PublicKey, payload.Request.PublicKey) {
+			return errors.New("replay record public key mismatch")
 		}
-		if account.Nonce != payload.Nonce {
-			return errors.New("replay invalid record nonce")
-		}
-		account.Nonce++
-		account.PublicKey = payload.PublicKey
-		s.data.Accounts[account.Address] = account
+	}
+	if payload.Nonce != payload.Request.Nonce {
+		return errors.New("replay record nonce mismatch")
 	}
 	s.applyDataRecordLocked(payload.Record)
 	return nil
@@ -287,11 +301,14 @@ func copyStringMap(in map[string]string) map[string]string {
 }
 
 func (s *Store) authorizeCreateCollectionLocked(req *wire.CreateCollectionRequest) error {
-	if !wire.RequiresAccountSignature(req.User) && !wire.IsSignedCreateCollection(*req) {
-		return nil
-	}
 	if !wire.IsSignedCreateCollection(*req) {
 		return errors.New("collection owner signature is required")
+	}
+	if req.ChainID == "" {
+		return errors.New("chain_id is required")
+	}
+	if req.ChainID != s.data.ChainID {
+		return errors.New("request chain_id mismatch")
 	}
 	recoveredPublicKey, err := wire.RecoverCreateCollectionPublicKey(*req)
 	if err != nil {
@@ -318,11 +335,14 @@ func (s *Store) authorizeCreateCollectionLocked(req *wire.CreateCollectionReques
 }
 
 func (s *Store) authorizeAppendRecordLocked(req *wire.AppendRecordRequest) error {
-	if !wire.RequiresAccountSignature(req.User) && !wire.IsSignedAppendRecord(*req) {
-		return nil
-	}
 	if !wire.IsSignedAppendRecord(*req) {
 		return errors.New("record owner signature is required")
+	}
+	if req.ChainID == "" {
+		return errors.New("chain_id is required")
+	}
+	if req.ChainID != s.data.ChainID {
+		return errors.New("request chain_id mismatch")
 	}
 	recoveredPublicKey, err := wire.RecoverAppendRecordPublicKey(*req)
 	if err != nil {

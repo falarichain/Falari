@@ -46,7 +46,7 @@ func (s *Store) selectProposerLocked(height uint64, round uint64) (string, error
 	powers := make([]uint64, len(validators))
 	var totalPower uint64
 	for i, addr := range validators {
-		p := s.validatorPowerLocked(addr)
+		p := s.effectivePowerLocked(addr)
 		powers[i] = p
 		totalPower += p
 	}
@@ -93,6 +93,7 @@ func (s *Store) advanceConsensusRoundLocked(now int64) {
 	}
 	cs.ConsensusProposer = proposer
 	cs.ConsensusPhase = "propose"
+	cs.ConsensusRoundStartedAtUnix = now
 
 	if s.blockProducer != nil && proposer == s.blockProducer.Address {
 		return
@@ -266,9 +267,28 @@ func (s *Store) checkBlockTimeoutLocked(now int64) (bool, uint64) {
 		cs.ConsensusHeight = expectedHeight
 		cs.ConsensusRound = 0
 		cs.ConsensusPhase = "propose"
+		cs.ConsensusRoundStartedAtUnix = now
 		return false, 0
 	}
 	if cs.ConsensusHeight == expectedHeight {
+		// Check if the current proposer has timed out.
+		roundStart := cs.ConsensusRoundStartedAtUnix
+		if roundStart == 0 {
+			roundStart = now
+			cs.ConsensusRoundStartedAtUnix = now
+		}
+		const blockTimeoutSec int64 = 10 // 2x block interval
+		if now-roundStart >= blockTimeoutSec && cs.ConsensusProposer != "" {
+			// Record missed turn for the timed-out proposer.
+			s.recordProposerTurnLocked(cs.ConsensusProposer, false)
+			// Advance to next round.
+			cs.ConsensusRound++
+			if cs.ConsensusRound > maxConsensusRounds {
+				cs.ConsensusRound = 0
+			}
+			s.advanceConsensusRoundLocked(now)
+			return true, cs.ConsensusRound
+		}
 		return false, cs.ConsensusRound
 	}
 	return false, cs.ConsensusRound

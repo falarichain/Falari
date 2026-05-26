@@ -27,7 +27,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /snapshot", s.snapshot)
 	mux.HandleFunc("GET /consensus", s.consensus)
 	mux.HandleFunc("GET /consensus/votes", s.listConsensusVotes)
-	mux.HandleFunc("POST /upgrade", s.setUpgrade)
+	mux.HandleFunc("POST /upgrade", s.requireOperator(s.setUpgrade))
 	mux.HandleFunc("GET /upgrade", s.getUpgrade)
 	mux.HandleFunc("GET /admin/mining-params", s.getMiningParams)
 	mux.HandleFunc("GET /intents/{id}/health", s.intentHealth)
@@ -74,8 +74,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /delete-receipts", s.submitDeleteReceipt)
 	mux.HandleFunc("POST /retrieval-receipts", s.submitRetrievalReceipt)
 	mux.HandleFunc("GET /retrieval-receipts", s.listRetrievalReceipts)
-	mux.HandleFunc("POST /epochs", s.startEpoch)
-	mux.HandleFunc("POST /epochs/finalize", s.finalizeEpoch)
+	mux.HandleFunc("POST /epochs", s.requireOperator(s.startEpoch))
+	mux.HandleFunc("POST /epochs/finalize", s.requireOperator(s.finalizeEpoch))
 	mux.HandleFunc("GET /epochs/{id}/rewards", s.epochRewards)
 	mux.HandleFunc("POST /miners", s.registerMiner)
 	mux.HandleFunc("POST /miners/deregister", s.deregisterMiner)
@@ -86,13 +86,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /validators/delegate", s.delegateStake)
 	mux.HandleFunc("POST /validators/undelegate", s.undelegateStake)
 	mux.HandleFunc("POST /validators/evidence", s.submitValidatorEvidence)
-	mux.HandleFunc("POST /faucet", s.faucet)
 	mux.HandleFunc("POST /transfer", s.transfer)
-	mux.HandleFunc("POST /tx/raw", s.submitRawTransaction)
 	mux.HandleFunc("GET /accounts/", s.getAccount)
 	mux.HandleFunc("GET /intents/", s.getIntent)
 	mux.HandleFunc("GET /mempool", s.getMempool)
-	mux.HandleFunc("POST /blocks/produce", s.produceBlock)
+	mux.HandleFunc("POST /blocks/produce", s.requireOperator(s.produceBlock))
 	mux.HandleFunc("POST /blocks/votes", s.acceptBlockVote)
 	mux.HandleFunc("POST /consensus/votes", s.submitConsensusVote)
 	mux.HandleFunc("GET /blocks/latest", s.latestBlock)
@@ -103,6 +101,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /agent-keys", s.registerAgentKey)
 	mux.HandleFunc("GET /agent-keys", s.listAgentKeys)
 	mux.HandleFunc("POST /agent-keys/revoke", s.revokeAgentKey)
+	mux.HandleFunc("POST /multisig", s.createMultisig)
+	mux.HandleFunc("GET /multisig", s.listMultisigWallets)
+	mux.HandleFunc("GET /multisig/{address}", s.getMultisigWallet)
+	mux.HandleFunc("POST /multisig/exec", s.multisigExec)
 	return mux
 }
 
@@ -639,38 +641,12 @@ func (s *Server) submitValidatorEvidence(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) faucet(w http.ResponseWriter, r *http.Request) {
-	var req wire.FaucetRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	resp, err := s.store.Faucet(req)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
 func (s *Server) transfer(w http.ResponseWriter, r *http.Request) {
 	var req wire.TransferRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	resp, err := s.store.Transfer(req)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) submitRawTransaction(w http.ResponseWriter, r *http.Request) {
-	var req wire.RawTransactionRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	resp, err := s.store.SubmitRawTransaction(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -1009,10 +985,17 @@ func (s *Server) getMiningParams(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, params)
 }
 
+const maxRequestSize = 1 << 20 // 1 MB
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		if err.Error() == "http: request body too large" {
+			writeError(w, http.StatusRequestEntityTooLarge, err)
+		} else {
+			writeError(w, http.StatusBadRequest, err)
+		}
 		return false
 	}
 	return true
@@ -1065,4 +1048,56 @@ func (s *Server) revokeAgentKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked", "key_id": req.KeyID})
+}
+
+// ── Multisig handlers ──
+
+func (s *Server) createMultisig(w http.ResponseWriter, r *http.Request) {
+	var req wire.MultisigCreateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	wallet, err := s.store.CreateMultisigWallet(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, wallet)
+}
+
+func (s *Server) getMultisigWallet(w http.ResponseWriter, r *http.Request) {
+	address := r.PathValue("address")
+	if address == "" {
+		writeError(w, http.StatusBadRequest, errors.New("address is required"))
+		return
+	}
+	info, err := s.store.GetMultisigWallet(address)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) multisigExec(w http.ResponseWriter, r *http.Request) {
+	var req wire.MultisigExecRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.MultisigExec(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) listMultisigWallets(w http.ResponseWriter, r *http.Request) {
+	signer := r.URL.Query().Get("signer")
+	wallets, err := s.store.ListMultisigWallets(signer)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wire.MultisigWalletListResponse{Wallets: wallets})
 }

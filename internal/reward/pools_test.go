@@ -18,6 +18,9 @@ func TestNewPoolsInitialBalances(t *testing.T) {
 	if p.RepairRemaining != RepairPoolInitial {
 		t.Fatalf("repair pool: expected %d got %d", RepairPoolInitial, p.RepairRemaining)
 	}
+	if p.FoundationRemaining != FoundationPoolInitial {
+		t.Fatalf("foundation pool: expected %d got %d", FoundationPoolInitial, p.FoundationRemaining)
+	}
 	if p.TokensReleased != 0 {
 		t.Fatalf("tokens released: expected 0 got %d", p.TokensReleased)
 	}
@@ -27,22 +30,28 @@ func TestReleaseEpochRewards(t *testing.T) {
 	p := NewPools()
 	// Use default release rates matching DefaultMiningParams()
 	const (
-		defaultStorageBPS   uint64 = 3
-		defaultRetrievalBPS uint64 = 20
-		defaultValidatorBPS uint64 = 2
+		defaultStorageBPS    uint64 = 3
+		defaultRetrievalBPS  uint64 = 20
+		defaultValidatorBPS  uint64 = 2
+		defaultFoundationBPS uint64 = 1
 	)
-	s1, r1, v1 := p.ReleaseEpochRewards(defaultStorageBPS, defaultRetrievalBPS, defaultValidatorBPS)
+	s1, r1, v1, f1 := p.ReleaseEpochRewards(defaultStorageBPS, defaultRetrievalBPS, defaultValidatorBPS, defaultFoundationBPS)
 
-	if s1 == 0 || r1 == 0 || v1 == 0 {
-		t.Fatalf("expected non-zero epoch release: storage=%d retrieval=%d validator=%d", s1, r1, v1)
+	if s1 == 0 || r1 == 0 || v1 == 0 || f1 == 0 {
+		t.Fatalf("expected non-zero epoch release: storage=%d retrieval=%d validator=%d foundation=%d", s1, r1, v1, f1)
 	}
-	if p.TokensReleased != s1+r1+v1 {
-		t.Fatalf("tokens released mismatch: %d != %d", p.TokensReleased, s1+r1+v1)
+	if p.TokensReleased != s1+r1+v1+f1 {
+		t.Fatalf("tokens released mismatch: %d != %d", p.TokensReleased, s1+r1+v1+f1)
 	}
 
 	expectedStorage := StoragePoolInitial - s1
 	if p.StorageRemaining != expectedStorage {
 		t.Fatalf("storage pool after release: expected %d got %d", expectedStorage, p.StorageRemaining)
+	}
+
+	expectedFoundation := FoundationPoolInitial - f1
+	if p.FoundationRemaining != expectedFoundation {
+		t.Fatalf("foundation pool after release: expected %d got %d", expectedFoundation, p.FoundationRemaining)
 	}
 }
 
@@ -70,15 +79,16 @@ func TestPayFromPool(t *testing.T) {
 
 func TestReleaseEpochDepletesPool(t *testing.T) {
 	p := &Pools{
-		StorageRemaining:   10,
-		RetrievalRemaining: 10,
-		ValidatorRemaining: 10,
-		RepairRemaining:    RepairPoolInitial,
+		StorageRemaining:    10,
+		RetrievalRemaining:  10,
+		ValidatorRemaining:  10,
+		RepairRemaining:     RepairPoolInitial,
+		FoundationRemaining: 10,
 	}
-	s, r, v := p.ReleaseEpochRewards(3, 20, 2)
-	total := s + r + v
-	if total == 0 || total > 30 {
-		t.Fatalf("unexpected release from tiny pools: %d+%d+%d=%d", s, r, v, total)
+	s, r, v, f := p.ReleaseEpochRewards(3, 20, 2, 1)
+	total := s + r + v + f
+	if total == 0 || total > 40 {
+		t.Fatalf("unexpected release from tiny pools: %d+%d+%d+%d=%d", s, r, v, f, total)
 	}
 }
 

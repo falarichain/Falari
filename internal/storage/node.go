@@ -12,12 +12,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"chain/internal/client"
 	chaincrypto "chain/internal/crypto"
 	"chain/internal/wire"
 )
@@ -30,6 +32,8 @@ type Node struct {
 	backend    StorageBackend
 	blockstore Blockstore
 	transport  transportCounters
+	chainURL   string
+	endpoint   string
 }
 
 type transportCounters struct {
@@ -101,6 +105,11 @@ func (n *Node) PrivateKey() ed25519.PrivateKey {
 
 func (n *Node) Blockstore() Blockstore {
 	return n.blockstore
+}
+
+func (n *Node) ConfigureChain(chainURL string, endpoint string) {
+	n.chainURL = strings.TrimRight(chainURL, "/")
+	n.endpoint = endpoint
 }
 
 func (n *Node) Status() wire.StorageNodeStatusResponse {
@@ -226,15 +235,9 @@ func (n *Node) ShardHashes() []string {
 	return hashes
 }
 
-func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, stake uint64, fundStake bool) error {
+func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, stake uint64) error {
 	if chainURL == "" {
 		return nil
-	}
-	if fundStake {
-		faucetReq := wire.FaucetRequest{Address: n.address, Amount: stake}
-		if err := postJSON(chainURL, "/faucet", faucetReq); err != nil {
-			return err
-		}
 	}
 	req := wire.RegisterMinerRequest{
 		MinerAddress:  n.address,
@@ -268,6 +271,9 @@ func (n *Node) Store(req wire.UploadRequest) (wire.MinerReceipt, error) {
 			return wire.MinerReceipt{}, err
 		}
 	}
+	if err := n.authorizeUpload(req, shardCID); err != nil {
+		return wire.MinerReceipt{}, err
+	}
 
 	if err := n.backend.PutBlock(StoredBlock{
 		CID:  shardCID,
@@ -298,6 +304,63 @@ func (n *Node) Store(req wire.UploadRequest) (wire.MinerReceipt, error) {
 		return wire.MinerReceipt{}, err
 	}
 	return receipt, nil
+}
+
+func (n *Node) authorizeUpload(req wire.UploadRequest, shardCID string) error {
+	if n.chainURL == "" {
+		return nil
+	}
+	if req.IntentID == "" {
+		return errors.New("intent id is required")
+	}
+	var intent wire.IntentView
+	if err := client.NewHTTP(n.chainURL).Get("/intents/"+url.PathEscape(req.IntentID), &intent); err != nil {
+		return fmt.Errorf("verify upload assignment: %w", err)
+	}
+	if intent.User != "" && req.User != "" && !strings.EqualFold(intent.User, req.User) {
+		return errors.New("upload user does not match intent")
+	}
+	if intent.FileRoot != "" && req.FileRoot != "" && intent.FileRoot != req.FileRoot {
+		return errors.New("upload file root does not match intent")
+	}
+	if req.SegmentID < 0 || req.ShardIndex < 0 {
+		return errors.New("invalid upload segment or shard index")
+	}
+	if req.SegmentID >= len(intent.Segments) {
+		return errors.New("upload segment is not in intent plan")
+	}
+	segment := intent.Segments[req.SegmentID]
+	if segment.SegmentID != req.SegmentID {
+		return errors.New("upload segment id mismatch")
+	}
+	if segment.SegmentRoot != "" && req.SegmentRoot != "" && segment.SegmentRoot != req.SegmentRoot {
+		return errors.New("upload segment root does not match intent")
+	}
+	if req.ShardIndex >= len(segment.ShardHashes) {
+		return errors.New("upload shard index is not in intent plan")
+	}
+	if expectedHash := segment.ShardHashes[req.ShardIndex]; expectedHash != "" && expectedHash != req.ShardHash {
+		return errors.New("upload shard hash does not match intent plan")
+	}
+	for _, assignment := range intent.Assignments {
+		if assignment.SegmentID != req.SegmentID || assignment.ShardIndex != req.ShardIndex {
+			continue
+		}
+		if !strings.EqualFold(assignment.MinerAddress, n.address) {
+			continue
+		}
+		if assignment.ShardHash != "" && assignment.ShardHash != req.ShardHash {
+			return errors.New("upload shard hash does not match assignment")
+		}
+		if assignment.ShardCID != "" && shardCID != "" && assignment.ShardCID != shardCID {
+			return errors.New("upload shard cid does not match assignment")
+		}
+		if assignment.ShardSize > 0 && assignment.ShardSize != req.ShardSize {
+			return errors.New("upload shard size does not match assignment")
+		}
+		return nil
+	}
+	return errors.New("upload shard is not assigned to this storage node")
 }
 
 func (n *Node) ReadShard(hash string) ([]byte, error) {

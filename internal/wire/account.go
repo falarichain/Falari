@@ -11,44 +11,46 @@ import (
 )
 
 type transferSigningPayload struct {
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Amount uint64 `json:"amount"`
-	Nonce  uint64 `json:"nonce"`
-	Fee    uint64 `json:"fee"`
+	ChainID string `json:"chain_id"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Amount  uint64 `json:"amount"`
+	Nonce   uint64 `json:"nonce"`
+	Fee     uint64 `json:"fee"`
 }
 
 func AccountAddress(publicKey *ecdsa.PublicKey) string {
 	return ethcrypto.PubkeyToAddress(*publicKey).Hex()
 }
 
-func TransferPayload(req TransferRequest) ([]byte, error) {
+func TransferPayload(req TransferRequest, chainID string) ([]byte, error) {
 	payload := transferSigningPayload{
-		From:   req.From,
-		To:     req.To,
-		Amount: req.Amount,
-		Nonce:  req.Nonce,
-		Fee:    req.Fee,
+		ChainID: chainID,
+		From:    req.From,
+		To:      req.To,
+		Amount:  req.Amount,
+		Nonce:   req.Nonce,
+		Fee:     req.Fee,
 	}
 	return json.Marshal(payload)
 }
 
-func TransferHash(req TransferRequest) ([]byte, error) {
-	payload, err := TransferPayload(req)
+func TransferHash(req TransferRequest, chainID string) ([]byte, error) {
+	payload, err := TransferPayload(req, chainID)
 	if err != nil {
 		return nil, err
 	}
 	return ethcrypto.Keccak256(payload), nil
 }
 
-func SignTransfer(req *TransferRequest, privateKey *ecdsa.PrivateKey) error {
+func SignTransfer(req *TransferRequest, privateKey *ecdsa.PrivateKey, chainID string) error {
 	if req.PublicKey == "" {
 		req.PublicKey = encodeHex(ethcrypto.FromECDSAPub(&privateKey.PublicKey))
 	}
 	if req.From == "" {
 		req.From = AccountAddress(&privateKey.PublicKey)
 	}
-	hash, err := TransferHash(*req)
+	hash, err := TransferHash(*req, chainID)
 	if err != nil {
 		return err
 	}
@@ -60,8 +62,8 @@ func SignTransfer(req *TransferRequest, privateKey *ecdsa.PrivateKey) error {
 	return nil
 }
 
-func VerifyTransferSignature(req TransferRequest) error {
-	_, address, err := recoverTransferSigner(req)
+func VerifyTransferSignature(req TransferRequest, chainID string) error {
+	_, address, err := recoverTransferSigner(req, chainID)
 	if err != nil {
 		return err
 	}
@@ -71,15 +73,15 @@ func VerifyTransferSignature(req TransferRequest) error {
 	return nil
 }
 
-func RecoverTransferPublicKey(req TransferRequest) (string, error) {
-	publicKey, _, err := recoverTransferSigner(req)
+func RecoverTransferPublicKey(req TransferRequest, chainID string) (string, error) {
+	publicKey, _, err := recoverTransferSigner(req, chainID)
 	if err != nil {
 		return "", err
 	}
 	return encodeHex(ethcrypto.FromECDSAPub(publicKey)), nil
 }
 
-func recoverTransferSigner(req TransferRequest) (*ecdsa.PublicKey, string, error) {
+func recoverTransferSigner(req TransferRequest, chainID string) (*ecdsa.PublicKey, string, error) {
 	signature, err := decodeHex(req.Signature)
 	if err != nil {
 		return nil, "", err
@@ -87,7 +89,7 @@ func recoverTransferSigner(req TransferRequest) (*ecdsa.PublicKey, string, error
 	if len(signature) != 65 {
 		return nil, "", errors.New("invalid transfer signature size")
 	}
-	hash, err := TransferHash(req)
+	hash, err := TransferHash(req, chainID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -99,7 +101,7 @@ func recoverTransferSigner(req TransferRequest) (*ecdsa.PublicKey, string, error
 }
 
 func IsSignedTransfer(req TransferRequest) bool {
-	return req.RawTx != "" || req.PublicKey != "" || req.Signature != ""
+	return req.PublicKey != "" || req.Signature != ""
 }
 
 func encodeHex(raw []byte) string {

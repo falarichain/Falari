@@ -101,10 +101,16 @@ func expireGovernanceAction(intent *Intent, now int64) {
 func (s *Store) TerminateDeal(req wire.TerminateDealRequest) (wire.TerminateDealResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+		return wire.VerifyTerminateDeal(req)
+	}); err != nil {
+		return wire.TerminateDealResponse{}, err
+	}
 	resp, err := s.terminateDealLocked(req, time.Now().Unix())
 	if err != nil {
 		return wire.TerminateDealResponse{}, err
 	}
+	s.consumeAccountNonceLocked(req.User)
 	s.recordTxLocked("terminate_deal", req.User, terminateDealTxPayload{Request: req, Response: resp})
 	if err := s.saveLocked(); err != nil {
 		return wire.TerminateDealResponse{}, err
@@ -170,10 +176,16 @@ func (s *Store) terminateDealLocked(req wire.TerminateDealRequest, now int64) (w
 func (s *Store) SetAccessPolicy(req wire.SetAccessPolicyRequest) (wire.SetAccessPolicyResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+		return wire.VerifySetAccessPolicy(req)
+	}); err != nil {
+		return wire.SetAccessPolicyResponse{}, err
+	}
 	resp, err := s.setAccessPolicyLocked(req, time.Now().Unix())
 	if err != nil {
 		return wire.SetAccessPolicyResponse{}, err
 	}
+	s.consumeAccountNonceLocked(req.User)
 	s.recordTxLocked("set_access_policy", req.User, setAccessPolicyTxPayload{Request: req, Response: resp})
 	if err := s.saveLocked(); err != nil {
 		return wire.SetAccessPolicyResponse{}, err

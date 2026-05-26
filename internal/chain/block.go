@@ -12,16 +12,23 @@ import (
 	"chain/internal/wire"
 )
 
-func (s *Store) recordTxLocked(txType, from string, payload any) {
+const (
+	defaultTargetBlockBytes  = 256 * 1024
+	defaultMaxBlockBytes     = 1 * 1024 * 1024
+	defaultMaxBlockTxs       = 200
+	defaultMaxTxBytes        = 16 * 1024
+	defaultMaxStorageTxBytes = 128 * 1024
+	defaultBlockSizeHeadroom = 8 * 1024
+	maxFutureBlockTimeSkew   = 30 * time.Second
+)
+
+func (s *Store) recordTxLocked(txType, from string, payload any) string {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		raw = []byte("{}")
 	}
 	payloadHash := chaincrypto.HashBytes(raw)
-	txID, err := randomID("tx")
-	if err != nil {
-		txID = chaincrypto.HashBytes([]byte(txType + from + payloadHash + strconv.FormatInt(time.Now().UnixNano(), 10)))
-	}
+	txID := chaincrypto.HashBytes([]byte(txType + ":" + payloadHash))
 	tx := wire.Transaction{
 		TxID:          txID,
 		Type:          txType,
@@ -33,12 +40,23 @@ func (s *Store) recordTxLocked(txType, from string, payload any) {
 	enrichTransactionMetadata(&tx)
 	accepted, err := s.enqueuePendingTxLocked(tx)
 	if err != nil || !accepted {
-		return
+		return txID
 	}
 	s.data.AppliedTxs[tx.TxID] = true
 	broadcaster := s.txBroadcaster
 	if broadcaster != nil {
 		go broadcaster.BroadcastTransaction(tx)
+	}
+	return txID
+}
+
+func (s *Store) removePendingTxLocked(txID string) {
+	for i, tx := range s.data.PendingTxs {
+		if tx.TxID == txID {
+			s.data.PendingTxs = append(s.data.PendingTxs[:i], s.data.PendingTxs[i+1:]...)
+			delete(s.data.AppliedTxs, txID)
+			return
+		}
 	}
 }
 
@@ -47,8 +65,20 @@ func (s *Store) AcceptTransaction(tx wire.Transaction) (bool, error) {
 		return false, err
 	}
 
+	if tx.AgentKeyID != "" || transactionRequiresSignature(tx.Type) {
+		if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
+			return false, err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if tx.Type == "transfer" {
+		if err := s.verifyTransferTxLocked(tx); err != nil {
+			return false, err
+		}
+	}
 
 	accepted, err := s.enqueuePendingTxLocked(tx)
 	if err != nil || !accepted {
@@ -63,26 +93,28 @@ func (s *Store) AcceptTransaction(tx wire.Transaction) (bool, error) {
 func (s *Store) ProduceBlock() (wire.ProduceBlockResponse, error) {
 	s.mu.Lock()
 
-	if len(s.data.PendingTxs) > 0 {
-		if s.blockProducer == nil {
-			s.mu.Unlock()
-			return wire.ProduceBlockResponse{}, errors.New("no block producer configured")
-		}
-		validator, ok := s.data.Validators[s.blockProducer.Address]
-		if !ok || validator.Status != wire.ValidatorStatusActive {
-			s.mu.Unlock()
-			return wire.ProduceBlockResponse{}, errors.New("block producer is not an active validator")
-		}
-		if validator.PublicKey != s.blockProducer.PublicKeyBase64() {
-			s.mu.Unlock()
-			return wire.ProduceBlockResponse{}, errors.New("block producer public key mismatch")
-		}
-		if err := s.validateLocalProducerTurnLocked(); err != nil {
-			s.mu.Unlock()
-			return wire.ProduceBlockResponse{}, err
-		}
+	if s.blockProducer == nil {
+		s.mu.Unlock()
+		return wire.ProduceBlockResponse{}, errors.New("no block producer configured")
 	}
-	block, produced := s.produceBlockLocked()
+	validator, ok := s.data.Validators[s.blockProducer.Address]
+	if !ok || validator.Status != wire.ValidatorStatusActive {
+		s.mu.Unlock()
+		return wire.ProduceBlockResponse{}, errors.New("block producer is not an active validator")
+	}
+	if validator.PublicKey != s.blockProducer.PublicKeyBase64() {
+		s.mu.Unlock()
+		return wire.ProduceBlockResponse{}, errors.New("block producer public key mismatch")
+	}
+	if err := s.validateLocalProducerTurnLocked(); err != nil {
+		s.mu.Unlock()
+		return wire.ProduceBlockResponse{}, err
+	}
+	block, produced, err := s.produceBlockLocked()
+	if err != nil {
+		s.mu.Unlock()
+		return wire.ProduceBlockResponse{}, err
+	}
 	if !produced {
 		s.mu.Unlock()
 		return wire.ProduceBlockResponse{Produced: false}, nil
@@ -121,6 +153,9 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	}
 	if block.PrevHash != prevHash {
 		return false, errors.New("block prev hash mismatch")
+	}
+	if err := s.validateBlockTimeLocked(block); err != nil {
+		return false, err
 	}
 	if err := s.validateBlockProducerTurnLocked(block); err != nil {
 		return false, err
@@ -166,6 +201,8 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 		s.data.ConsensusProposer = block.ProducerAddress
 	}
 	s.adjustFeeMarketAfterBlockLocked(block)
+	s.recordProposerTurnLocked(block.ProducerAddress, true)
+	s.releaseValidatorPerBlockLocked(block.TimeUnix, block.ProducerAddress)
 	s.removePendingTxsLocked(block.Transactions)
 	if err := s.saveLocked(); err != nil {
 		return false, err
@@ -173,29 +210,21 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	return true, nil
 }
 
-func (s *Store) produceBlockLocked() (wire.Block, bool) {
-	if len(s.data.PendingTxs) == 0 {
-		return wire.Block{}, false
-	}
+func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	if s.blockProducer == nil {
-		return wire.Block{}, false
+		return wire.Block{}, false, nil
 	}
 	validator, ok := s.data.Validators[s.blockProducer.Address]
 	if !ok || validator.Status != wire.ValidatorStatusActive {
-		return wire.Block{}, false
+		return wire.Block{}, false, nil
 	}
 	if validator.PublicKey != s.blockProducer.PublicKeyBase64() {
-		return wire.Block{}, false
+		return wire.Block{}, false, nil
 	}
 	txs := s.selectPendingTxsForBlockLocked()
-	if len(txs) == 0 {
-		return wire.Block{}, false
-	}
-	if err := s.applyPendingTransactionsForBlockLocked(txs, s.blockProducer.Address); err != nil {
-		return wire.Block{}, false
-	}
-	txLeaves := make([]string, 0, len(txs))
-	for _, tx := range txs {
+	appliedTxs, _ := s.applyPendingTransactionsForBlockLocked(txs, s.blockProducer.Address)
+	txLeaves := make([]string, 0, len(appliedTxs))
+	for _, tx := range appliedTxs {
 		txLeaves = append(txLeaves, txLeaf(tx))
 	}
 	prevHash := ""
@@ -209,7 +238,7 @@ func (s *Store) produceBlockLocked() (wire.Block, bool) {
 		PrevHash:          prevHash,
 		TxRoot:            chaincrypto.MerkleRoot(txLeaves),
 		StateRoot:         s.stateRootLocked(),
-		Transactions:      txs,
+		Transactions:      appliedTxs,
 		ProducerAddress:   s.blockProducer.Address,
 		ProducerPublicKey: s.blockProducer.PublicKeyBase64(),
 	}
@@ -218,13 +247,16 @@ func (s *Store) produceBlockLocked() (wire.Block, bool) {
 	block.Hash = blockHash(block)
 	s.prepareReceiptsForBlockLocked(&block)
 	if err := wire.SignBlock(&block, s.blockProducer.PrivateKey); err != nil {
-		return wire.Block{}, false
+		return wire.Block{}, false, err
 	}
 	vote, err := s.signLocalBlockVoteLocked(block)
 	if err != nil {
-		return wire.Block{}, false
+		return wire.Block{}, false, err
 	}
 	block.Finality = s.blockFinalityLocked(block, []wire.BlockVote{vote})
+	if blockEncodedSize(block) > defaultMaxBlockBytes {
+		return wire.Block{}, false, errors.New("block exceeds maximum size")
+	}
 	s.data.Blocks = append(s.data.Blocks, block)
 	if block.Finality.Finalized {
 		s.finalizeConsensusForBlockLocked(block)
@@ -235,14 +267,16 @@ func (s *Store) produceBlockLocked() (wire.Block, bool) {
 		s.data.ConsensusProposer = block.ProducerAddress
 	}
 	s.adjustFeeMarketAfterBlockLocked(block)
-	s.removePendingTxsLocked(txs)
-	for _, tx := range txs {
+	s.recordProposerTurnLocked(s.blockProducer.Address, true)
+	s.releaseValidatorPerBlockLocked(block.TimeUnix, s.blockProducer.Address)
+	s.removePendingTxsLocked(appliedTxs)
+	for _, tx := range appliedTxs {
 		s.data.ConfirmedTxs[tx.TxID] = true
 	}
-	s.markConsensusValidatorsFromTxsLocked(txs)
+	s.markConsensusValidatorsFromTxsLocked(appliedTxs)
 	validator.ProducedBlocks++
 	s.data.Validators[validator.Address] = validator
-	return block, true
+	return block, true, nil
 }
 
 func (s *Store) LatestBlock() (wire.Block, error) {
@@ -417,6 +451,12 @@ func validateBlockShape(block wire.Block) error {
 	if block.ProducerAddress == "" || block.ProducerPublicKey == "" {
 		return errors.New("block producer is required")
 	}
+	if len(block.Transactions) > defaultMaxBlockTxs {
+		return errors.New("block contains too many transactions")
+	}
+	if blockEncodedSize(block) > defaultMaxBlockBytes {
+		return errors.New("block exceeds maximum size")
+	}
 	if block.Hash != blockHash(block) {
 		return errors.New("block hash mismatch")
 	}
@@ -468,6 +508,31 @@ func (s *Store) validateBlockFinalityLocked(block wire.Block) error {
 	return nil
 }
 
+func (s *Store) validateBlockTimeLocked(block wire.Block) error {
+	now := time.Now().Add(maxFutureBlockTimeSkew).Unix()
+	if block.TimeUnix > now {
+		return errors.New("block time is too far in the future")
+	}
+	if len(s.data.Blocks) == 0 {
+		return nil
+	}
+	prev := s.data.Blocks[len(s.data.Blocks)-1]
+	if block.TimeUnix < prev.TimeUnix {
+		return errors.New("block time moves backwards")
+	}
+	return nil
+}
+
+func transactionRequiresSignature(txType string) bool {
+	switch txType {
+	case "create_intent", "batch_commit", "finalize", "settle_intent",
+		"permanent_fund_topup", "renew_deal", "terminate_deal",
+		"set_access_policy", "delegate_stake", "undelegate_stake":
+		return true
+	}
+	return false
+}
+
 func validateTransactionShape(tx wire.Transaction) error {
 	if tx.TxID == "" {
 		return errors.New("transaction id is required")
@@ -475,15 +540,38 @@ func validateTransactionShape(tx wire.Transaction) error {
 	if tx.Type == "" {
 		return errors.New("transaction type is required")
 	}
+	if transactionEncodedSize(tx) > maxTransactionBytes(tx.Type) {
+		return errors.New("transaction exceeds maximum size")
+	}
 	if chaincrypto.HashBytes(tx.Payload) != tx.PayloadHash {
 		return errors.New("transaction payload hash mismatch")
 	}
-	enrichTransactionMetadata(&tx)
+	expectedTxID := chaincrypto.HashBytes([]byte(tx.Type + ":" + tx.PayloadHash))
+	if tx.TxID != expectedTxID {
+		return errors.New("transaction id does not match content hash")
+	}
+	normalized := tx
+	enrichTransactionMetadata(&normalized)
+	if !transactionMetadataMatches(tx, normalized) {
+		return errors.New("transaction metadata does not match signed payload")
+	}
 	return nil
 }
 
 func txLeaf(tx wire.Transaction) string {
-	return chaincrypto.HashBytes([]byte(tx.TxID + ":" + tx.PayloadHash))
+	return wire.TransactionLeaf(tx)
+}
+
+func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction) bool {
+	switch tx.Type {
+	case "transfer", "multisig_exec":
+		return wire.NormalizeAddress(tx.From) == normalized.From &&
+			tx.Fee == normalized.Fee &&
+			tx.Nonce == normalized.Nonce &&
+			tx.NonceProtected == normalized.NonceProtected
+	default:
+		return true
+	}
 }
 
 func (s *Store) validateLocalProducerTurnLocked() error {
@@ -825,8 +913,26 @@ func (s *Store) selectPendingTxsForBlockLocked() []wire.Transaction {
 	selected := make([]wire.Transaction, 0, len(pending))
 	selectedIDs := map[string]bool{}
 	nextNonce := map[string]uint64{}
+	selectedBytes := 0
+	addTx := func(tx wire.Transaction, limitBytes int) bool {
+		if len(selected) >= defaultMaxBlockTxs {
+			return false
+		}
+		txBytes := transactionEncodedSize(tx)
+		if txBytes > maxTransactionBytes(tx.Type) {
+			return false
+		}
+		if selectedBytes+txBytes > limitBytes {
+			return false
+		}
+		selected = append(selected, tx)
+		selectedIDs[tx.TxID] = true
+		selectedBytes += txBytes
+		return true
+	}
+
 	for _, tx := range pending {
-		if !tx.NonceProtected || tx.From == "" {
+		if tx.From == "" {
 			continue
 		}
 		address := wire.NormalizeAddress(tx.From)
@@ -838,19 +944,17 @@ func (s *Store) selectPendingTxsForBlockLocked() []wire.Transaction {
 		if !s.data.AppliedTxs[tx.TxID] {
 			continue
 		}
-		selected = append(selected, tx)
-		selectedIDs[tx.TxID] = true
+		if !addTx(tx, defaultMaxBlockBytes-defaultBlockSizeHeadroom) {
+			return selected
+		}
 	}
 
+	targetBytes := defaultTargetBlockBytes - defaultBlockSizeHeadroom
 	for {
 		nextIndex := -1
 		for i, tx := range pending {
 			if selectedIDs[tx.TxID] {
 				continue
-			}
-			if !tx.NonceProtected {
-				nextIndex = i
-				break
 			}
 			address := wire.NormalizeAddress(tx.From)
 			if tx.Nonce == nextNonce[address] {
@@ -862,12 +966,11 @@ func (s *Store) selectPendingTxsForBlockLocked() []wire.Transaction {
 			break
 		}
 		tx := pending[nextIndex]
-		selected = append(selected, tx)
-		selectedIDs[tx.TxID] = true
-		if tx.NonceProtected {
-			address := wire.NormalizeAddress(tx.From)
-			nextNonce[address]++
+		if !addTx(tx, targetBytes) {
+			break
 		}
+		address := wire.NormalizeAddress(tx.From)
+		nextNonce[address]++
 	}
 	return selected
 }
@@ -876,9 +979,6 @@ func sortPendingTxs(txs []wire.Transaction) {
 	sort.SliceStable(txs, func(i, j int) bool {
 		if txs[i].Fee != txs[j].Fee {
 			return txs[i].Fee > txs[j].Fee
-		}
-		if txs[i].NonceProtected != txs[j].NonceProtected {
-			return txs[i].NonceProtected
 		}
 		if !sameAddress(txs[i].From, txs[j].From) {
 			return wire.NormalizeAddress(txs[i].From) < wire.NormalizeAddress(txs[j].From)
@@ -905,15 +1005,59 @@ func enrichTransactionMetadata(tx *wire.Transaction) {
 			tx.From = wire.NormalizeAddress(req.From)
 		}
 		tx.Fee = req.Fee
-		if wire.IsSignedTransfer(req) {
-			tx.NonceProtected = true
-			tx.Nonce = req.Nonce
+		tx.NonceProtected = true
+		tx.Nonce = req.Nonce
+	case "multisig_exec":
+		var payload multisigExecTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
 		}
+		tx.From = wire.NormalizeAddress(payload.Request.Wallet)
+		tx.Fee = payload.Request.Fee
+		tx.NonceProtected = true
+		tx.Nonce = payload.Request.Nonce
 	}
 }
 
 func sameAddress(a string, b string) bool {
 	return wire.NormalizeAddress(a) == wire.NormalizeAddress(b)
+}
+
+func transactionEncodedSize(tx wire.Transaction) int {
+	raw, err := json.Marshal(tx)
+	if err != nil {
+		return defaultMaxBlockBytes + 1
+	}
+	return len(raw)
+}
+
+func blockEncodedSize(block wire.Block) int {
+	raw, err := json.Marshal(block)
+	if err != nil {
+		return defaultMaxBlockBytes + 1
+	}
+	return len(raw)
+}
+
+func maxTransactionBytes(txType string) int {
+	if isStorageMetadataTransaction(txType) {
+		return defaultMaxStorageTxBytes
+	}
+	return defaultMaxTxBytes
+}
+
+func isStorageMetadataTransaction(txType string) bool {
+	switch txType {
+	case "create_intent", "batch_commit", "finalize_deal", "settle_intent",
+		"renew_deal", "permanent_fund_topup", "terminate_deal",
+		"set_access_policy", "submit_delete_receipt", "submit_retrieval_receipt",
+		"generate_challenges", "create_repair_tasks", "start_epoch",
+		"submit_proof", "finalize_epoch", "create_collection", "append_record",
+		"create_key_envelope", "create_share", "revoke_share":
+		return true
+	default:
+		return false
+	}
 }
 
 func blockHash(block wire.Block) string {

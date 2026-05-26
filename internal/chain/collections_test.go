@@ -10,28 +10,34 @@ import (
 )
 
 func TestCollectionAppendRecordIndexesFinalizedIntent(t *testing.T) {
-	store, _, resp := setupCommittedAssignedIntent(t)
-	if _, err := store.Finalize(wire.FinalizeRequest{
+	store, _, resp, alice := setupCommittedAssignedIntent(t)
+	finReq := wire.FinalizeRequest{
 		IntentID:     resp.IntentID,
-		User:         "alice",
+		User:         alice.Addr,
 		ManifestRoot: chaincrypto.HashBytes([]byte("manifest")),
-	}); err != nil {
+	}
+	signFinalize(t, store, &finReq, alice)
+	if _, err := store.Finalize(finReq); err != nil {
 		t.Fatal(err)
 	}
-	collectionResp, err := store.CreateCollection(wire.CreateCollectionRequest{
-		User: "alice",
+	collReq := wire.CreateCollectionRequest{
+		User: alice.Addr,
 		Name: "agent-memory",
-	})
+	}
+	signCreateCollection(t, store, &collReq, alice)
+	collectionResp, err := store.CreateCollection(collReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordResp, err := store.AppendRecord(wire.AppendRecordRequest{
+	appendReq := wire.AppendRecordRequest{
 		CollectionID: collectionResp.Collection.CollectionID,
 		IntentID:     resp.IntentID,
 		Kind:         "memory",
 		Key:          "session/1",
 		Metadata:     map[string]string{"agent": "demo"},
-	})
+	}
+	signAppendRecord(t, store, &appendReq, alice)
+	recordResp, err := store.AppendRecord(appendReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,34 +72,42 @@ func TestCollectionAppendRecordIndexesFinalizedIntent(t *testing.T) {
 }
 
 func TestCollectionRecordsSupportsFiltersAndLatestLimit(t *testing.T) {
-	store, _, resp := setupCommittedAssignedIntent(t)
-	if _, err := store.Finalize(wire.FinalizeRequest{
+	store, _, resp, alice := setupCommittedAssignedIntent(t)
+	finReq := wire.FinalizeRequest{
 		IntentID:     resp.IntentID,
-		User:         "alice",
+		User:         alice.Addr,
 		ManifestRoot: chaincrypto.HashBytes([]byte("manifest")),
-	}); err != nil {
+	}
+	signFinalize(t, store, &finReq, alice)
+	if _, err := store.Finalize(finReq); err != nil {
 		t.Fatal(err)
 	}
-	collectionResp, err := store.CreateCollection(wire.CreateCollectionRequest{User: "alice", Name: "agent-memory"})
+	collReq2 := wire.CreateCollectionRequest{User: alice.Addr, Name: "agent-memory"}
+	signCreateCollection(t, store, &collReq2, alice)
+	collectionResp, err := store.CreateCollection(collReq2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.AppendRecord(wire.AppendRecordRequest{
+	appendReq1 := wire.AppendRecordRequest{
 		CollectionID: collectionResp.Collection.CollectionID,
 		IntentID:     resp.IntentID,
 		Kind:         "memory",
 		Key:          "session/1",
-	})
+	}
+	signAppendRecord(t, store, &appendReq1, alice)
+	first, err := store.AppendRecord(appendReq1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.AppendRecord(wire.AppendRecordRequest{
+	appendReq2 := wire.AppendRecordRequest{
 		CollectionID: collectionResp.Collection.CollectionID,
 		IntentID:     resp.IntentID,
 		ParentRecord: first.Record.RecordID,
 		Kind:         "summary",
 		Key:          "session/1",
-	})
+	}
+	signAppendRecord(t, store, &appendReq2, alice)
+	second, err := store.AppendRecord(appendReq2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,22 +143,28 @@ func TestCollectionAppendRejectsUnfinalizedIntent(t *testing.T) {
 	registerTestMiner(t, store, "miner_a", "http://miner-a", 100)
 	registerTestMiner(t, store, "miner_b", "http://miner-b", 100)
 	registerTestMiner(t, store, "miner_c", "http://miner-c", 100)
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", Balance: 100}
-	intentResp, err := store.CreateIntent(testRepairIntentRequest())
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(100))
+	intentResp, err := store.CreateIntent(testRepairIntentRequest(t, store, alice))
 	if err != nil {
 		t.Fatal(err)
 	}
-	collectionResp, err := store.CreateCollection(wire.CreateCollectionRequest{
-		User: "alice",
+	collReq := wire.CreateCollectionRequest{
+		User: alice.Addr,
 		Name: "agent-memory",
-	})
+	}
+	signCreateCollection(t, store, &collReq, alice)
+	collectionResp, err := store.CreateCollection(collReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.AppendRecord(wire.AppendRecordRequest{
+	appendReq := wire.AppendRecordRequest{
 		CollectionID: collectionResp.Collection.CollectionID,
+		User:         alice.Addr,
 		IntentID:     intentResp.IntentID,
-	})
+	}
+	signAppendRecord(t, store, &appendReq, alice)
+	_, err = store.AppendRecord(appendReq)
 	if err == nil {
 		t.Fatal("expected unfinalized intent to be rejected")
 	}
@@ -160,7 +180,7 @@ func TestCollectionAndRecordRequireSignatureForEthereumOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	address := wire.AccountAddress(&privateKey.PublicKey)
-	store.data.Accounts[address] = wire.Account{Address: address, Balance: 100}
+	store.data.Accounts[address] = wire.Account{Address: address, Balance: gfTokens(100)}
 
 	if _, err := store.CreateCollection(wire.CreateCollectionRequest{
 		User: address,
@@ -174,6 +194,7 @@ func TestCollectionAndRecordRequireSignatureForEthereumOwner(t *testing.T) {
 		Name:  "signed-memory",
 		Nonce: 0,
 	}
+	createReq.ChainID = store.data.ChainID
 	if err := wire.SignCreateCollection(&createReq, privateKey); err != nil {
 		t.Fatal(err)
 	}
@@ -203,6 +224,7 @@ func TestCollectionAndRecordRequireSignatureForEthereumOwner(t *testing.T) {
 		Key:          "session/eth",
 		Nonce:        1,
 	}
+	appendReq.ChainID = store.data.ChainID
 	if err := wire.SignAppendRecord(&appendReq, privateKey); err != nil {
 		t.Fatal(err)
 	}

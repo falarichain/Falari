@@ -1,0 +1,90 @@
+package chain
+
+import (
+	"errors"
+	"slices"
+	"time"
+
+	"chain/internal/wire"
+)
+
+func (s *Store) verifyAgentRequestLocked(chainID string, keyID string, agentNonce uint64, master string, operation string, spend uint64, verify func(agentPub string) error) error {
+	if chainID == "" {
+		return errors.New("chain_id is required")
+	}
+	if chainID != s.data.ChainID {
+		return errors.New("request chain_id mismatch")
+	}
+	key, ok := s.data.AgentKeys[keyID]
+	if !ok {
+		return errors.New("agent key not found")
+	}
+	if key.Revoked {
+		return errors.New("agent key has been revoked")
+	}
+	if key.ExpiresAt > 0 && time.Now().Unix() > key.ExpiresAt {
+		return errors.New("agent key expired")
+	}
+	if !sameAddress(key.Master, master) {
+		return errors.New("agent key master mismatch")
+	}
+	if !agentKeyAllowsOperation(key.Permissions, operation) {
+		return errors.New("agent key lacks permission: " + operation)
+	}
+	if agentNonce != key.Nonce {
+		return errors.New("invalid agent nonce")
+	}
+	if err := verify(key.AgentPub); err != nil {
+		return err
+	}
+	nowUnix := time.Now().Unix()
+	if nowUnix > key.DayResetAt {
+		key.UsedToday = 0
+		key.DayResetAt = startOfNextDay()
+	}
+	if key.DailyLimit > 0 && key.UsedToday+spend > key.DailyLimit {
+		return errors.New("agent key daily limit exceeded")
+	}
+	if key.TotalLimit > 0 && key.UsedTotal+spend > key.TotalLimit {
+		return errors.New("agent key total limit exceeded")
+	}
+	key.Nonce++
+	key.UsedToday += spend
+	key.UsedTotal += spend
+	return nil
+}
+
+func agentKeyAllowsOperation(permissions []string, operation string) bool {
+	if slices.Contains(permissions, operation) {
+		return true
+	}
+	for _, alias := range agentPermissionAliases(operation) {
+		if slices.Contains(permissions, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+func agentPermissionAliases(operation string) []string {
+	switch operation {
+	case "finalize_deal":
+		return []string{"finalize"}
+	case "create_collection":
+		return []string{"collection_create"}
+	case "create_share":
+		return []string{"share_create"}
+	case "revoke_share":
+		return []string{"share_revoke"}
+	default:
+		return nil
+	}
+}
+
+func requestUsesAgent(keyID string) bool {
+	return keyID != ""
+}
+
+func normalizeRequestUser(user string) string {
+	return wire.NormalizeAddress(user)
+}

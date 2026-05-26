@@ -7,11 +7,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"chain/internal/chain"
-	"chain/internal/wire"
+	"chain/internal/middleware"
 )
 
 func main() {
@@ -29,13 +30,46 @@ func main() {
 	validatorKey := flag.String("validator-key", "./data/validator.json", "validator identity file path")
 	validatorEndpoint := flag.String("validator-endpoint", "", "public validator endpoint")
 	validatorStake := flag.Uint64("validator-stake", 0, "validator stake locked from its account")
-	validatorFaucet := flag.Bool("validator-faucet", true, "request dev faucet funds for validator stake before registration")
 	peers := flag.String("peers", "", "comma-separated peer chain node URLs")
 	p2pListen := flag.String("p2p-listen", "", "comma-separated libp2p listen multiaddrs, disabled when empty")
 	p2pPeers := flag.String("p2p-peers", "", "comma-separated libp2p peer multiaddrs")
 	p2pTopic := flag.String("p2p-topic", "storage-chain/devnet", "libp2p gossipsub topic")
 	syncInterval := flag.Duration("sync-interval", 5*time.Second, "peer block sync interval, disabled when 0")
+	corsOrigins := flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
+	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")
+	rateLimitBurst := flag.Int("rate-limit-burst", 0, "rate limit burst size (default: rps+1)")
+	production := flag.Bool("production", false, "enable production mode with strict safety checks")
 	flag.Parse()
+
+	if *production {
+		var errs []string
+		if *p2pTopic == "storage-chain/devnet" || *p2pTopic == "storage-chain/providers/devnet" {
+			errs = append(errs, "production mode requires a non-default --p2p-topic")
+		}
+		if *validatorEndpoint == "" {
+			errs = append(errs, "production mode requires explicit --validator-endpoint")
+		}
+		if *rateLimitRPS <= 0 {
+			errs = append(errs, "production mode requires --rate-limit-rps to be set")
+		}
+		if len(errs) > 0 {
+			for _, e := range errs {
+				log.Printf("PRODUCTION CHECK FAILED: %s", e)
+			}
+			os.Exit(1)
+		}
+		log.Println("production mode enabled: all safety checks passed")
+	}
+
+	var origins []string
+	if *corsOrigins != "" {
+		for _, o := range strings.Split(*corsOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+	}
 
 	store, err := chain.OpenStoreWithGenesis(*state, *genesis)
 	if err != nil {
@@ -49,11 +83,6 @@ func main() {
 	endpoint := *validatorEndpoint
 	if endpoint == "" {
 		endpoint = "http://localhost" + *addr
-	}
-	if *validatorStake > 0 && *validatorFaucet {
-		if _, err := store.Faucet(wire.FaucetRequest{Address: identity.Address, Amount: *validatorStake}); err != nil {
-			log.Fatalf("fund validator stake: %v", err)
-		}
 	}
 	registration, err := identity.RegistrationRequest(endpoint, *validatorStake)
 	if err != nil {
@@ -92,13 +121,24 @@ func main() {
 	})
 	store.StartIntentSettlementScheduler(chain.IntentSettlementSchedulerConfig{Interval: *settleInterval})
 	store.StartAutoRenewScheduler(*renewInterval)
+	store.SetBlockInterval(*blockInterval)
 	store.StartBlockProducer(*blockInterval)
+	store.StartBlockTimeoutChecker(*blockInterval)
 	network.StartBlockSync(*syncInterval)
 
 	server := chain.NewServer(store, network)
+	handler := middleware.Chain(
+		middleware.CORS(origins),
+		middleware.RateLimit(*rateLimitRPS, *rateLimitBurst),
+	)(server.Routes())
 	httpServer := &http.Server{
-		Addr:    *addr,
-		Handler: server.Routes(),
+		Addr:              *addr,
+		Handler:           handler,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {

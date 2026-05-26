@@ -2,7 +2,9 @@ package wire
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 )
@@ -83,7 +85,7 @@ type consensusVotePayload struct {
 func BlockPayload(block Block) ([]byte, error) {
 	txLeaves := make([]string, 0, len(block.Transactions))
 	for _, tx := range block.Transactions {
-		txLeaves = append(txLeaves, tx.TxID+":"+tx.PayloadHash)
+		txLeaves = append(txLeaves, TransactionLeaf(tx))
 	}
 	payload := blockSigningPayload{
 		Height:          block.Height,
@@ -94,6 +96,40 @@ func BlockPayload(block Block) ([]byte, error) {
 		TxLeaves:        txLeaves,
 	}
 	return json.Marshal(payload)
+}
+
+func TransactionLeaf(tx Transaction) string {
+	raw, _ := json.Marshal(struct {
+		TxID           string `json:"tx_id"`
+		Type           string `json:"type"`
+		From           string `json:"from,omitempty"`
+		Nonce          uint64 `json:"nonce,omitempty"`
+		NonceProtected bool   `json:"nonce_protected,omitempty"`
+		AgentKeyID     string `json:"agent_key_id,omitempty"`
+		AgentNonce     uint64 `json:"agent_nonce,omitempty"`
+		Fee            uint64 `json:"fee,omitempty"`
+		PayloadHash    string `json:"payload_hash"`
+		CreatedAtUnix  int64  `json:"created_at_unix"`
+		Signature      string `json:"signature,omitempty"`
+		PublicKey      string `json:"public_key,omitempty"`
+		DeadlineUnix   int64  `json:"deadline_unix,omitempty"`
+	}{
+		TxID:           tx.TxID,
+		Type:           tx.Type,
+		From:           NormalizeAddress(tx.From),
+		Nonce:          tx.Nonce,
+		NonceProtected: tx.NonceProtected,
+		AgentKeyID:     tx.AgentKeyID,
+		AgentNonce:     tx.AgentNonce,
+		Fee:            tx.Fee,
+		PayloadHash:    tx.PayloadHash,
+		CreatedAtUnix:  tx.CreatedAtUnix,
+		Signature:      tx.Signature,
+		PublicKey:      tx.PublicKey,
+		DeadlineUnix:   tx.DeadlineUnix,
+	})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func SignBlock(block *Block, privateKey ed25519.PrivateKey) error {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	falaridht "chain/internal/dht"
+	"chain/internal/middleware"
 	"chain/internal/storage"
 )
 
@@ -22,7 +23,6 @@ func main() {
 	endpoint := flag.String("endpoint", "", "public storage endpoint registered on chain")
 	capacity := flag.Uint64("capacity", 1<<40, "declared storage capacity in bytes")
 	stake := flag.Uint64("stake", 1000, "declared miner stake")
-	faucet := flag.Bool("faucet", true, "request dev faucet funds for stake before registration")
 	autoProve := flag.Bool("auto-prove", true, "poll chain node and automatically submit assigned storage proofs")
 	proveInterval := flag.Duration("prove-interval", 2*time.Second, "automatic proof polling interval")
 	autoRepair := flag.Bool("auto-repair", true, "poll chain node and automatically execute assigned repair tasks")
@@ -36,7 +36,44 @@ func main() {
 	dhtBootstrap := flag.String("dht-bootstrap", "", "comma-separated DHT bootstrap peer multiaddrs")
 	dhtNamespace := flag.String("dht-namespace", falaridht.DefaultProtocolPrefix, "DHT protocol namespace prefix")
 	dhtRepublish := flag.Duration("dht-republish", falaridht.DefaultRepublishInterval, "DHT provider record republish interval")
+	corsOrigins := flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
+	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")
+	rateLimitBurst := flag.Int("rate-limit-burst", 0, "rate limit burst size (default: rps+1)")
+	production := flag.Bool("production", false, "enable production mode with strict safety checks")
 	flag.Parse()
+
+	if *production {
+		var errs []string
+		if *p2pTopic == "storage-chain/providers/devnet" || *p2pTopic == "storage-chain/devnet" {
+			errs = append(errs, "production mode requires a non-default --p2p-topic")
+		}
+		if *endpoint == "" {
+			errs = append(errs, "production mode requires explicit --endpoint")
+		}
+		if *rateLimitRPS <= 0 {
+			errs = append(errs, "production mode requires --rate-limit-rps to be set")
+		}
+		if *chainURL == "" {
+			errs = append(errs, "production mode requires --chain to register on-chain")
+		}
+		if len(errs) > 0 {
+			for _, e := range errs {
+				log.Printf("PRODUCTION CHECK FAILED: %s", e)
+			}
+			os.Exit(1)
+		}
+		log.Println("production mode enabled: all safety checks passed")
+	}
+
+	var origins []string
+	if *corsOrigins != "" {
+		for _, o := range strings.Split(*corsOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+	}
 
 	node, err := storage.OpenNode(*data)
 	if err != nil {
@@ -46,8 +83,9 @@ func main() {
 	if registeredEndpoint == "" {
 		registeredEndpoint = "http://localhost" + *addr
 	}
+	node.ConfigureChain(*chainURL, registeredEndpoint)
 	if *chainURL != "" {
-		if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake, *faucet); err != nil {
+		if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake); err != nil {
 			log.Fatalf("register storage node: %v", err)
 		}
 		log.Printf("registered storage node %s endpoint=%s capacity=%d stake=%d", node.Address(), registeredEndpoint, *capacity, *stake)
@@ -101,9 +139,18 @@ func main() {
 
 	log.Printf("storage node %s listening on %s", node.Address(), *addr)
 	server := storage.NewServerWithProviderNetwork(node, providerNetwork)
+	handler := middleware.Chain(
+		middleware.CORS(origins),
+		middleware.RateLimit(*rateLimitRPS, *rateLimitBurst),
+	)(server.Routes())
 	httpServer := &http.Server{
-		Addr:    *addr,
-		Handler: server.Routes(),
+		Addr:              *addr,
+		Handler:           handler,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {

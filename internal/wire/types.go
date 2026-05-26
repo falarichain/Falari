@@ -88,27 +88,37 @@ type StorageAssignment struct {
 }
 
 type CreateIntentRequest struct {
-	User         string              `json:"user"`
-	FileName     string              `json:"file_name"`
-	FileSize     int64               `json:"file_size"`
-	SegmentSize  int64               `json:"segment_size"`
-	FileRoot     string              `json:"file_root"`
-	SegmentRoots []string            `json:"segment_roots"`
-	Segments     []SegmentPlan       `json:"segments"`
-	Erasure      ErasurePolicy       `json:"erasure"`
-	Encryption   *EncryptionMetadata `json:"encryption,omitempty"`
-	Policy       StoragePolicy       `json:"policy"`
-	LockedFee    uint64              `json:"locked_fee"`
-	DeadlineUnix int64               `json:"deadline_unix"`
+	ChainID        string              `json:"chain_id,omitempty"`
+	User           string              `json:"user"`
+	FileName       string              `json:"file_name"`
+	FileSize       int64               `json:"file_size"`
+	SegmentSize    int64               `json:"segment_size"`
+	FileRoot       string              `json:"file_root"`
+	SegmentRoots   []string            `json:"segment_roots"`
+	Segments       []SegmentPlan       `json:"segments"`
+	Erasure        ErasurePolicy       `json:"erasure"`
+	Encryption     *EncryptionMetadata `json:"encryption,omitempty"`
+	Policy         StoragePolicy       `json:"policy"`
+	LockedFee      uint64              `json:"locked_fee"`
+	DeadlineUnix   int64               `json:"deadline_unix"`
+	Nonce          uint64              `json:"nonce,omitempty"`
+	Signature      string              `json:"signature,omitempty"`
+	PublicKey      string              `json:"public_key,omitempty"`
+	AgentKeyID     string              `json:"agent_key_id,omitempty"`
+	AgentNonce     uint64              `json:"agent_nonce,omitempty"`
+	AgentPublicKey string              `json:"agent_public_key,omitempty"`
+	AgentSignature string              `json:"agent_signature,omitempty"`
 }
 
 type CreateIntentResponse struct {
-	IntentID    string              `json:"intent_id"`
-	Status      string              `json:"status"`
-	RequiredFee uint64              `json:"required_fee"`
-	LockedFee   uint64              `json:"locked_fee"`
-	BurnedFee   uint64              `json:"burned_fee,omitempty"`
-	Assignments []StorageAssignment `json:"assignments,omitempty"`
+	IntentID      string              `json:"intent_id"`
+	Status        string              `json:"status"`
+	RequiredFee   uint64              `json:"required_fee"`
+	LockedFee     uint64              `json:"locked_fee"`
+	BurnedFee     uint64              `json:"burned_fee,omitempty"`
+	RetrievalFee  uint64              `json:"retrieval_fee,omitempty"`
+	FoundationFee uint64              `json:"foundation_fee,omitempty"`
+	Assignments   []StorageAssignment `json:"assignments,omitempty"`
 }
 
 type StoragePricing struct {
@@ -136,9 +146,13 @@ type PermanentStorageFund struct {
 }
 
 type PermanentFundTopUpRequest struct {
-	IntentID string `json:"intent_id"`
-	User     string `json:"user"`
-	Amount   uint64 `json:"amount"`
+	ChainID   string `json:"chain_id,omitempty"`
+	IntentID  string `json:"intent_id"`
+	User      string `json:"user"`
+	Amount    uint64 `json:"amount"`
+	Nonce     uint64 `json:"nonce,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 type PermanentFundTopUpResponse struct {
@@ -150,6 +164,8 @@ type StorageFeePool struct {
 	TotalPaid               uint64 `json:"total_paid"`
 	TotalRefunded           uint64 `json:"total_refunded"`
 	TotalBurned             uint64 `json:"total_burned,omitempty"`
+	TotalToRetrieval        uint64 `json:"total_to_retrieval,omitempty"`
+	TotalToFoundation       uint64 `json:"total_to_foundation,omitempty"`
 	TransferredToRewardPool uint64 `json:"transferred_to_reward_pool,omitempty"`
 	RepairPoolTransferred   uint64 `json:"repair_pool_transferred,omitempty"`
 	PermanentFundBalance    uint64 `json:"permanent_fund_balance"`
@@ -172,58 +188,65 @@ type DealEscrow struct {
 }
 
 type ChainStatusResponse struct {
-	Status                 string         `json:"status"`
-	Height                 uint64         `json:"height"`
-	LatestBlockHash        string         `json:"latest_block_hash,omitempty"`
-	LatestBlockTimeUnix    int64          `json:"latest_block_time_unix,omitempty"`
-	LatestFinalizedHeight  uint64         `json:"latest_finalized_height,omitempty"`
-	PendingTransactions    int            `json:"pending_transactions"`
-	Accounts               int            `json:"accounts"`
-	Intents                int            `json:"intents"`
-	UploadingIntents       int            `json:"uploading_intents"`
-	PartialIntents         int            `json:"partial_intents"`
-	FinalizedIntents       int            `json:"finalized_intents"`
-	ExpiredIntents         int            `json:"expired_intents"`
-	Deals                  int            `json:"deals"`
-	Collections            int            `json:"collections"`
-	DataRecords            int            `json:"data_records"`
-	Miners                 int            `json:"miners"`
-	ActiveMiners           int            `json:"active_miners"`
-	CapacityBytes          uint64         `json:"capacity_bytes"`
-	UsedBytes              uint64         `json:"used_bytes"`
-	ReservedBytes          uint64         `json:"reserved_bytes"`
-	Validators             int            `json:"validators"`
-	ConsensusValidators    int            `json:"consensus_validators"`
-	EpochRound             uint64         `json:"epoch_round,omitempty"`
-	EpochsFinalized        uint64         `json:"epochs_finalized,omitempty"`
-	PendingChallenges      int            `json:"pending_challenges"`
-	ActiveEpochs           int            `json:"active_epochs"`
-	PendingRepairTasks     int            `json:"pending_repair_tasks"`
-	CompletedRepairTasks   int            `json:"completed_repair_tasks"`
-	DealsAtRisk            int            `json:"deals_at_risk,omitempty"`
-	DealsCritical          int            `json:"deals_critical,omitempty"`
-	TotalStorageRewards    uint64         `json:"total_storage_rewards,omitempty"`
-	TotalRetrievalRewards  uint64         `json:"total_retrieval_rewards,omitempty"`
-	TotalRepairRewards     uint64         `json:"total_repair_rewards,omitempty"`
-	TotalMiningPending     uint64         `json:"total_mining_pending,omitempty"`
-	PendingMiningBuckets   int            `json:"pending_mining_buckets,omitempty"`
-	StorageFeePool         StorageFeePool `json:"storage_fee_pool,omitempty"`
-	TotalSlashed           uint64         `json:"total_slashed,omitempty"`
-	TotalSupply            uint64         `json:"total_supply,omitempty"`
-	StoragePoolRemaining   uint64         `json:"storage_pool_remaining,omitempty"`
-	RetrievalPoolRemaining uint64         `json:"retrieval_pool_remaining,omitempty"`
-	ValidatorPoolRemaining uint64         `json:"validator_pool_remaining,omitempty"`
-	RepairPoolRemaining    uint64         `json:"repair_pool_remaining,omitempty"`
-	TokensReleased         uint64         `json:"tokens_released,omitempty"`
-	RetrievalReceipts      int            `json:"retrieval_receipts"`
-	RetrievalBytes         uint64         `json:"retrieval_bytes"`
-	FeeMarket              FeeMarket      `json:"fee_market"`
-	StoragePricing         StoragePricing `json:"storage_pricing"`
-	PeerCount              int            `json:"peer_count,omitempty"`
-	Peers                  []string       `json:"peers,omitempty"`
-	LibP2PEnabled          bool           `json:"libp2p_enabled,omitempty"`
-	LibP2PID               string         `json:"libp2p_id,omitempty"`
-	LibP2PAddrs            []string       `json:"libp2p_addrs,omitempty"`
+	ChainID                  string         `json:"chain_id,omitempty"`
+	Status                   string         `json:"status"`
+	Height                   uint64         `json:"height"`
+	LatestBlockHash          string         `json:"latest_block_hash,omitempty"`
+	LatestBlockTimeUnix      int64          `json:"latest_block_time_unix,omitempty"`
+	LatestFinalizedHeight    uint64         `json:"latest_finalized_height,omitempty"`
+	PendingTransactions      int            `json:"pending_transactions"`
+	Accounts                 int            `json:"accounts"`
+	Intents                  int            `json:"intents"`
+	UploadingIntents         int            `json:"uploading_intents"`
+	PartialIntents           int            `json:"partial_intents"`
+	FinalizedIntents         int            `json:"finalized_intents"`
+	ExpiredIntents           int            `json:"expired_intents"`
+	Deals                    int            `json:"deals"`
+	Collections              int            `json:"collections"`
+	DataRecords              int            `json:"data_records"`
+	Miners                   int            `json:"miners"`
+	ActiveMiners             int            `json:"active_miners"`
+	CapacityBytes            uint64         `json:"capacity_bytes"`
+	UsedBytes                uint64         `json:"used_bytes"`
+	ReservedBytes            uint64         `json:"reserved_bytes"`
+	Validators               int            `json:"validators"`
+	ConsensusValidators      int            `json:"consensus_validators"`
+	EpochRound               uint64         `json:"epoch_round,omitempty"`
+	EpochsFinalized          uint64         `json:"epochs_finalized,omitempty"`
+	PendingChallenges        int            `json:"pending_challenges"`
+	ActiveEpochs             int            `json:"active_epochs"`
+	PendingRepairTasks       int            `json:"pending_repair_tasks"`
+	CompletedRepairTasks     int            `json:"completed_repair_tasks"`
+	DealsAtRisk              int            `json:"deals_at_risk,omitempty"`
+	DealsCritical            int            `json:"deals_critical,omitempty"`
+	TotalStorageRewards      uint64         `json:"total_storage_rewards,omitempty"`
+	TotalRetrievalRewards    uint64         `json:"total_retrieval_rewards,omitempty"`
+	TotalRepairRewards       uint64         `json:"total_repair_rewards,omitempty"`
+	TotalMiningPending       uint64         `json:"total_mining_pending,omitempty"`
+	PendingMiningBuckets     int            `json:"pending_mining_buckets,omitempty"`
+	StorageFeePool           StorageFeePool `json:"storage_fee_pool,omitempty"`
+	TotalSlashed             uint64         `json:"total_slashed,omitempty"`
+	TotalSupply              uint64         `json:"total_supply,omitempty"`
+	StoragePoolRemaining     uint64         `json:"storage_pool_remaining,omitempty"`
+	RetrievalPoolRemaining   uint64         `json:"retrieval_pool_remaining,omitempty"`
+	ValidatorPoolRemaining   uint64         `json:"validator_pool_remaining,omitempty"`
+	ValidatorRewardPerBlock  uint64         `json:"validator_reward_per_block,omitempty"`
+	AverageAvailabilityBPS   uint64         `json:"average_availability_bps,omitempty"`
+	ValidatorsBelowThreshold int            `json:"validators_below_threshold,omitempty"`
+	RepairPoolRemaining      uint64         `json:"repair_pool_remaining,omitempty"`
+	FoundationPoolRemaining  uint64         `json:"foundation_pool_remaining,omitempty"`
+	FoundationAddress        string         `json:"foundation_address,omitempty"`
+	RetrievalAddress         string         `json:"retrieval_address,omitempty"`
+	TokensReleased           uint64         `json:"tokens_released,omitempty"`
+	RetrievalReceipts        int            `json:"retrieval_receipts"`
+	RetrievalBytes           uint64         `json:"retrieval_bytes"`
+	FeeMarket                FeeMarket      `json:"fee_market"`
+	StoragePricing           StoragePricing `json:"storage_pricing"`
+	PeerCount                int            `json:"peer_count,omitempty"`
+	Peers                    []string       `json:"peers,omitempty"`
+	LibP2PEnabled            bool           `json:"libp2p_enabled,omitempty"`
+	LibP2PID                 string         `json:"libp2p_id,omitempty"`
+	LibP2PAddrs              []string       `json:"libp2p_addrs,omitempty"`
 }
 
 type StorageNodeStatusResponse struct {
@@ -327,9 +350,17 @@ type MinerReceipt struct {
 }
 
 type BatchCommitRequest struct {
-	IntentID string         `json:"intent_id"`
-	User     string         `json:"user"`
-	Receipts []MinerReceipt `json:"receipts"`
+	ChainID        string         `json:"chain_id,omitempty"`
+	IntentID       string         `json:"intent_id"`
+	User           string         `json:"user"`
+	Receipts       []MinerReceipt `json:"receipts"`
+	Nonce          uint64         `json:"nonce,omitempty"`
+	Signature      string         `json:"signature,omitempty"`
+	PublicKey      string         `json:"public_key,omitempty"`
+	AgentKeyID     string         `json:"agent_key_id,omitempty"`
+	AgentNonce     uint64         `json:"agent_nonce,omitempty"`
+	AgentPublicKey string         `json:"agent_public_key,omitempty"`
+	AgentSignature string         `json:"agent_signature,omitempty"`
 }
 
 type BatchCommitResponse struct {
@@ -340,9 +371,17 @@ type BatchCommitResponse struct {
 }
 
 type FinalizeRequest struct {
-	IntentID     string `json:"intent_id"`
-	User         string `json:"user"`
-	ManifestRoot string `json:"manifest_root"`
+	ChainID        string `json:"chain_id,omitempty"`
+	IntentID       string `json:"intent_id"`
+	User           string `json:"user"`
+	ManifestRoot   string `json:"manifest_root"`
+	Nonce          uint64 `json:"nonce,omitempty"`
+	Signature      string `json:"signature,omitempty"`
+	PublicKey      string `json:"public_key,omitempty"`
+	AgentKeyID     string `json:"agent_key_id,omitempty"`
+	AgentNonce     uint64 `json:"agent_nonce,omitempty"`
+	AgentPublicKey string `json:"agent_public_key,omitempty"`
+	AgentSignature string `json:"agent_signature,omitempty"`
 }
 
 type FinalizeResponse struct {
@@ -388,8 +427,12 @@ type IntentView struct {
 }
 
 type SettleIntentRequest struct {
-	IntentID string `json:"intent_id"`
-	User     string `json:"user,omitempty"`
+	ChainID   string `json:"chain_id,omitempty"`
+	IntentID  string `json:"intent_id"`
+	User      string `json:"user,omitempty"`
+	Nonce     uint64 `json:"nonce,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 type SettleIntentResponse struct {
@@ -400,9 +443,13 @@ type SettleIntentResponse struct {
 }
 
 type RenewDealRequest struct {
-	IntentID string `json:"intent_id"`
-	User     string `json:"user"`
-	Duration int64  `json:"duration"`
+	ChainID   string `json:"chain_id,omitempty"`
+	IntentID  string `json:"intent_id"`
+	User      string `json:"user"`
+	Duration  int64  `json:"duration"`
+	Nonce     uint64 `json:"nonce,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 type RenewDealResponse struct {
@@ -415,9 +462,13 @@ type RenewDealResponse struct {
 }
 
 type TerminateDealRequest struct {
-	IntentID string `json:"intent_id"`
-	User     string `json:"user"`
-	Reason   string `json:"reason,omitempty"`
+	ChainID   string `json:"chain_id,omitempty"`
+	IntentID  string `json:"intent_id"`
+	User      string `json:"user"`
+	Reason    string `json:"reason,omitempty"`
+	Nonce     uint64 `json:"nonce,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 type TerminateDealResponse struct {
@@ -432,10 +483,14 @@ type TerminateDealResponse struct {
 }
 
 type SetAccessPolicyRequest struct {
+	ChainID      string `json:"chain_id,omitempty"`
 	IntentID     string `json:"intent_id"`
 	User         string `json:"user"`
 	AccessStatus string `json:"access_status"`
 	ReasonHash   string `json:"reason_hash,omitempty"`
+	Nonce        uint64 `json:"nonce,omitempty"`
+	Signature    string `json:"signature,omitempty"`
+	PublicKey    string `json:"public_key,omitempty"`
 }
 
 type SetAccessPolicyResponse struct {
@@ -526,6 +581,7 @@ type GovernanceOperator struct {
 	Permissions   []string `json:"permissions"`
 	Enabled       bool     `json:"enabled"`
 	CreatedAtUnix int64    `json:"created_at_unix,omitempty"`
+	Nonce         uint64   `json:"nonce,omitempty"`
 }
 
 type DeleteReceipt struct {
@@ -645,6 +701,7 @@ type CollectionRecordFilter struct {
 }
 
 type CreateCollectionRequest struct {
+	ChainID     string            `json:"chain_id,omitempty"`
 	User        string            `json:"user"`
 	Name        string            `json:"name"`
 	Description string            `json:"description,omitempty"`
@@ -659,6 +716,7 @@ type CreateCollectionResponse struct {
 }
 
 type AppendRecordRequest struct {
+	ChainID      string            `json:"chain_id,omitempty"`
 	CollectionID string            `json:"collection_id"`
 	User         string            `json:"user"`
 	IntentID     string            `json:"intent_id"`
@@ -1031,20 +1089,26 @@ const (
 )
 
 const (
-	TokenTotalSupply          uint64 = 10_000_000_000
-	TokenMiningSupply         uint64 = 9_000_000_000
-	TokenStoragePoolInitial   uint64 = 6_000_000_000
-	TokenRetrievalPoolInitial uint64 = 1_000_000_000
-	TokenValidatorPoolInitial uint64 = 1_000_000_000
-	TokenRepairPoolInitial    uint64 = 1_000_000_000
+	TokenDecimals        = 8
+	TokenSymbol          = "GF"
+	TokenUnit     uint64 = 100_000_000 // 10^8, one GF in smallest units
+
+	TokenTotalSupply           uint64 = 10_000_000_000 * TokenUnit
+	TokenMiningSupply          uint64 = 9_000_000_000 * TokenUnit
+	TokenStoragePoolInitial    uint64 = 6_000_000_000 * TokenUnit
+	TokenRetrievalPoolInitial  uint64 = 1_000_000_000 * TokenUnit
+	TokenValidatorPoolInitial  uint64 = 1_000_000_000 * TokenUnit
+	TokenRepairPoolInitial     uint64 = 1_000_000_000 * TokenUnit
+	TokenFoundationPoolInitial uint64 = 1_000_000_000 * TokenUnit
 )
 
 type RewardPools struct {
-	StoragePoolRemaining   uint64 `json:"storage_pool_remaining"`
-	RetrievalPoolRemaining uint64 `json:"retrieval_pool_remaining"`
-	ValidatorPoolRemaining uint64 `json:"validator_pool_remaining"`
-	RepairPoolRemaining    uint64 `json:"repair_pool_remaining"`
-	TokensReleased         uint64 `json:"tokens_released"`
+	StoragePoolRemaining    uint64 `json:"storage_pool_remaining"`
+	RetrievalPoolRemaining  uint64 `json:"retrieval_pool_remaining"`
+	ValidatorPoolRemaining  uint64 `json:"validator_pool_remaining"`
+	RepairPoolRemaining     uint64 `json:"repair_pool_remaining"`
+	FoundationPoolRemaining uint64 `json:"foundation_pool_remaining"`
+	TokensReleased          uint64 `json:"tokens_released"`
 }
 
 type MinerStats struct {
@@ -1118,15 +1182,6 @@ type Account struct {
 	PendingMiningRewards uint64 `json:"pending_mining_rewards,omitempty"`
 }
 
-type FaucetRequest struct {
-	Address string `json:"address"`
-	Amount  uint64 `json:"amount"`
-}
-
-type FaucetResponse struct {
-	Account Account `json:"account"`
-}
-
 type TransferRequest struct {
 	From      string `json:"from"`
 	To        string `json:"to"`
@@ -1135,16 +1190,11 @@ type TransferRequest struct {
 	Fee       uint64 `json:"fee,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
 	Signature string `json:"signature,omitempty"`
-	RawTx     string `json:"raw_tx,omitempty"`
 }
 
 type TransferResponse struct {
 	From Account `json:"from"`
 	To   Account `json:"to"`
-}
-
-type RawTransactionRequest struct {
-	RawTx string `json:"raw_tx"`
 }
 
 type Transaction struct {
@@ -1159,6 +1209,9 @@ type Transaction struct {
 	PayloadHash    string          `json:"payload_hash"`
 	Payload        json.RawMessage `json:"payload"`
 	CreatedAtUnix  int64           `json:"created_at_unix"`
+	Signature      string          `json:"signature,omitempty"`
+	PublicKey      string          `json:"public_key,omitempty"`
+	DeadlineUnix   int64           `json:"deadline_unix,omitempty"`
 }
 
 type TransactionReceipt struct {
@@ -1308,21 +1361,31 @@ type MempoolResponse struct {
 }
 
 type ValidatorInfo struct {
-	Address           string `json:"address"`
-	PublicKey         string `json:"public_key"`
-	Endpoint          string `json:"endpoint,omitempty"`
-	Stake             uint64 `json:"stake"`
-	DelegatedStake    uint64 `json:"delegated_stake,omitempty"`
-	SelfStake         uint64 `json:"self_stake,omitempty"`
-	Status            string `json:"status"`
-	Consensus         bool   `json:"consensus"`
-	RegisteredAtUnix  int64  `json:"registered_at_unix"`
-	ProducedBlocks    uint64 `json:"produced_blocks"`
-	Slashed           uint64 `json:"slashed"`
-	EvidenceCount     uint64 `json:"evidence_count"`
-	DelegatorCount    int    `json:"delegator_count,omitempty"`
-	Rewards           uint64 `json:"rewards,omitempty"`
-	DelegationRewards uint64 `json:"delegation_rewards,omitempty"`
+	Address              string `json:"address"`
+	PublicKey            string `json:"public_key"`
+	Endpoint             string `json:"endpoint,omitempty"`
+	Stake                uint64 `json:"stake"`
+	DelegatedStake       uint64 `json:"delegated_stake,omitempty"`
+	SelfStake            uint64 `json:"self_stake,omitempty"`
+	Status               string `json:"status"`
+	Consensus            bool   `json:"consensus"`
+	RegisteredAtUnix     int64  `json:"registered_at_unix"`
+	ProducedBlocks       uint64 `json:"produced_blocks"`
+	Slashed              uint64 `json:"slashed"`
+	EvidenceCount        uint64 `json:"evidence_count"`
+	DelegatorCount       int    `json:"delegator_count,omitempty"`
+	Rewards              uint64 `json:"rewards,omitempty"`
+	DelegationRewards    uint64 `json:"delegation_rewards,omitempty"`
+	AvailabilityScoreBPS uint64 `json:"availability_score_bps,omitempty"`
+}
+
+// ValidatorTurnWindow tracks a sliding window of proposer turn results
+// for availability scoring. Uses a ring buffer of fixed capacity.
+type ValidatorTurnWindow struct {
+	Successes uint64 `json:"successes"`
+	Misses    uint64 `json:"misses"`
+	Turns     []bool `json:"turns,omitempty"`
+	Head      int    `json:"head"`
 }
 
 type StakeDelegation struct {
@@ -1333,9 +1396,13 @@ type StakeDelegation struct {
 }
 
 type DelegateStakeRequest struct {
+	ChainID   string `json:"chain_id,omitempty"`
 	Delegator string `json:"delegator"`
 	Validator string `json:"validator"`
 	Amount    uint64 `json:"amount"`
+	Nonce     uint64 `json:"nonce,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 type DelegateStakeResponse struct {
@@ -1346,9 +1413,13 @@ type DelegateStakeResponse struct {
 }
 
 type UndelegateStakeRequest struct {
+	ChainID   string `json:"chain_id,omitempty"`
 	Delegator string `json:"delegator"`
 	Validator string `json:"validator"`
 	Amount    uint64 `json:"amount"`
+	Nonce     uint64 `json:"nonce,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 type UndelegateStakeResponse struct {
@@ -1424,6 +1495,7 @@ type ShareRecord struct {
 }
 
 type CreateKeyEnvelopeRequest struct {
+	ChainID          string             `json:"chain_id,omitempty"`
 	IntentID         string             `json:"intent_id"`
 	Owner            string             `json:"owner"`
 	Recipient        string             `json:"recipient"`
@@ -1433,6 +1505,9 @@ type CreateKeyEnvelopeRequest struct {
 	Nonce            string             `json:"nonce,omitempty"`
 	KDF              *PasscodeKDFParams `json:"kdf,omitempty"`
 	ExpiresAtUnix    int64              `json:"expires_at_unix,omitempty"`
+	AccountNonce     uint64             `json:"account_nonce,omitempty"`
+	PublicKey        string             `json:"public_key,omitempty"`
+	Signature        string             `json:"signature,omitempty"`
 }
 
 type CreateKeyEnvelopeResponse struct {
@@ -1440,6 +1515,7 @@ type CreateKeyEnvelopeResponse struct {
 }
 
 type CreateAddressShareRequest struct {
+	ChainID          string             `json:"chain_id,omitempty"`
 	IntentID         string             `json:"intent_id"`
 	Owner            string             `json:"owner"`
 	Recipient        string             `json:"recipient"`
@@ -1448,9 +1524,13 @@ type CreateAddressShareRequest struct {
 	Nonce            string             `json:"nonce,omitempty"`
 	KDF              *PasscodeKDFParams `json:"kdf,omitempty"`
 	ExpiresAtUnix    int64              `json:"expires_at_unix,omitempty"`
+	AccountNonce     uint64             `json:"account_nonce,omitempty"`
+	PublicKey        string             `json:"public_key,omitempty"`
+	Signature        string             `json:"signature,omitempty"`
 }
 
 type CreatePasscodeShareRequest struct {
+	ChainID          string             `json:"chain_id,omitempty"`
 	IntentID         string             `json:"intent_id"`
 	Owner            string             `json:"owner"`
 	Mode             string             `json:"mode,omitempty"`
@@ -1459,6 +1539,9 @@ type CreatePasscodeShareRequest struct {
 	Nonce            string             `json:"nonce,omitempty"`
 	KDF              *PasscodeKDFParams `json:"kdf"`
 	ExpiresAtUnix    int64              `json:"expires_at_unix,omitempty"`
+	AccountNonce     uint64             `json:"account_nonce,omitempty"`
+	PublicKey        string             `json:"public_key,omitempty"`
+	Signature        string             `json:"signature,omitempty"`
 }
 
 type CreateShareResponse struct {
@@ -1467,8 +1550,12 @@ type CreateShareResponse struct {
 }
 
 type RevokeShareRequest struct {
-	ShareID string `json:"share_id"`
-	Owner   string `json:"owner"`
+	ChainID      string `json:"chain_id,omitempty"`
+	ShareID      string `json:"share_id"`
+	Owner        string `json:"owner"`
+	AccountNonce uint64 `json:"account_nonce,omitempty"`
+	PublicKey    string `json:"public_key,omitempty"`
+	Signature    string `json:"signature,omitempty"`
 }
 
 type ListSharesResponse struct {
@@ -1494,6 +1581,7 @@ type AgentKey struct {
 }
 
 type RegisterAgentKeyRequest struct {
+	ChainID     string   `json:"chain_id,omitempty"`
 	Master      string   `json:"master"`
 	Name        string   `json:"name"`
 	AgentPub    string   `json:"agent_pub"`
@@ -1501,6 +1589,7 @@ type RegisterAgentKeyRequest struct {
 	DailyLimit  uint64   `json:"daily_limit"`
 	TotalLimit  uint64   `json:"total_limit"`
 	ExpiresAt   int64    `json:"expires_at"`
+	Nonce       uint64   `json:"nonce"`
 	Signature   string   `json:"signature"`
 }
 
@@ -1509,6 +1598,7 @@ type RegisterAgentKeyResponse struct {
 }
 
 type RevokeAgentKeyRequest struct {
+	ChainID   string `json:"chain_id,omitempty"`
 	KeyID     string `json:"key_id"`
 	Master    string `json:"master"`
 	Nonce     uint64 `json:"nonce"`
@@ -1543,22 +1633,22 @@ type BlacklistResponse struct {
 
 // GovernanceProposal is a signed governance action proposal stored in state.
 type GovernanceProposal struct {
-	ProposalID                      string   `json:"proposal_id"`
-	Proposer                        string   `json:"proposer"`
-	ProposerSignature               string   `json:"proposer_signature"`
-	IntentID                        string   `json:"intent_id,omitempty"`
-	Action                          string   `json:"action"`
-	ReasonHash                      string   `json:"reason_hash"`
-	ExpiresAtUnix                   int64    `json:"expires_at_unix,omitempty"`
-	PreserveStorage                 bool     `json:"preserve_storage,omitempty"`
-	AppealDeadlineUnix              int64    `json:"appeal_deadline_unix,omitempty"`
-	TargetOperator                  string   `json:"target_operator,omitempty"`
-	TargetPublicKey                 string   `json:"target_public_key,omitempty"`
-	TargetPermissions               []string `json:"target_permissions,omitempty"`
-	TargetDataModerationThresholdNum   int `json:"target_data_moderation_threshold_num,omitempty"`
-	TargetDataModerationThresholdDen   int `json:"target_data_moderation_threshold_den,omitempty"`
-	TargetOperatorChangeThresholdNum   int `json:"target_operator_change_threshold_num,omitempty"`
-	TargetOperatorChangeThresholdDen   int `json:"target_operator_change_threshold_den,omitempty"`
+	ProposalID                       string   `json:"proposal_id"`
+	Proposer                         string   `json:"proposer"`
+	ProposerSignature                string   `json:"proposer_signature"`
+	IntentID                         string   `json:"intent_id,omitempty"`
+	Action                           string   `json:"action"`
+	ReasonHash                       string   `json:"reason_hash"`
+	ExpiresAtUnix                    int64    `json:"expires_at_unix,omitempty"`
+	PreserveStorage                  bool     `json:"preserve_storage,omitempty"`
+	AppealDeadlineUnix               int64    `json:"appeal_deadline_unix,omitempty"`
+	TargetOperator                   string   `json:"target_operator,omitempty"`
+	TargetPublicKey                  string   `json:"target_public_key,omitempty"`
+	TargetPermissions                []string `json:"target_permissions,omitempty"`
+	TargetDataModerationThresholdNum int      `json:"target_data_moderation_threshold_num,omitempty"`
+	TargetDataModerationThresholdDen int      `json:"target_data_moderation_threshold_den,omitempty"`
+	TargetOperatorChangeThresholdNum int      `json:"target_operator_change_threshold_num,omitempty"`
+	TargetOperatorChangeThresholdDen int      `json:"target_operator_change_threshold_den,omitempty"`
 	// ── Target mining params (for update_mining_params action) ──
 	TargetStorageReleaseRateBPS       uint64 `json:"target_storage_release_rate_bps,omitempty"`
 	TargetRetrievalReleaseRateBPS     uint64 `json:"target_retrieval_release_rate_bps,omitempty"`
@@ -1570,14 +1660,27 @@ type GovernanceProposal struct {
 	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
 	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
 	TargetRepairRewardPerShard        uint64 `json:"target_repair_reward_per_shard,omitempty"`
-	TargetRepairPoolTakeoverBPS uint64 `json:"target_repair_pool_takeover_bps,omitempty"`
+	TargetRepairPoolTakeoverBPS       uint64 `json:"target_repair_pool_takeover_bps,omitempty"`
 	TargetRepairPoolSubsidyBPS        uint64 `json:"target_repair_pool_subsidy_bps,omitempty"`
 	TargetMinerDegradeThreshold       uint64 `json:"target_miner_degrade_threshold,omitempty"`
 	TargetStorageProofSamples         int    `json:"target_storage_proof_samples,omitempty"`
 	TargetValidatorCommissionBPS      uint64 `json:"target_validator_commission_bps,omitempty"`
 	TargetRetrievalWeightBPS          uint64 `json:"target_retrieval_weight_bps,omitempty"`
-	Status                          string   `json:"status"`
-	CreatedAtUnix                   int64    `json:"created_at_unix"`
+	TargetFoundationReleaseRateBPS    uint64 `json:"target_foundation_release_rate_bps,omitempty"`
+	TargetFoundationAddress           string `json:"target_foundation_address,omitempty"`
+	TargetRetrievalAddress            string `json:"target_retrieval_address,omitempty"`
+	TargetStorageAnnualRateBPS        uint64 `json:"target_storage_annual_rate_bps,omitempty"`
+	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`
+	TargetValidatorAnnualRateBPS      uint64 `json:"target_validator_annual_rate_bps,omitempty"`
+	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`
+	TargetReleaseCoefficientBPS       uint64 `json:"target_release_coefficient_bps,omitempty"`
+	TargetAvailabilityWindowSize      uint64 `json:"target_availability_window_size,omitempty"`
+	TargetAvailabilityThresholdBPS    uint64 `json:"target_availability_threshold_bps,omitempty"`
+	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
+	TargetMaxConsensusValidators      uint64 `json:"target_max_consensus_validators,omitempty"`
+	TargetMinConsensusValidators      uint64 `json:"target_min_consensus_validators,omitempty"`
+	Status                            string `json:"status"`
+	CreatedAtUnix                     int64  `json:"created_at_unix"`
 }
 
 // GovernanceVote is a signed vote on a governance proposal.
@@ -1591,39 +1694,52 @@ type GovernanceVote struct {
 
 // CreateGovernanceProposalRequest is the HTTP request to create a governance proposal.
 type CreateGovernanceProposalRequest struct {
-	Proposer                           string   `json:"proposer"`
-	IntentID                           string   `json:"intent_id,omitempty"`
-	Action                             string   `json:"action"`
-	ReasonHash                         string   `json:"reason_hash"`
-	ExpiresAtUnix                      int64    `json:"expires_at_unix,omitempty"`
-	PreserveStorage                    bool     `json:"preserve_storage,omitempty"`
-	AppealDeadlineUnix                 int64    `json:"appeal_deadline_unix,omitempty"`
-	TargetOperator                     string   `json:"target_operator,omitempty"`
-	TargetPublicKey                    string   `json:"target_public_key,omitempty"`
-	TargetPermissions                  []string `json:"target_permissions,omitempty"`
-	TargetDataModerationThresholdNum   int      `json:"target_data_moderation_threshold_num,omitempty"`
-	TargetDataModerationThresholdDen   int      `json:"target_data_moderation_threshold_den,omitempty"`
-	TargetOperatorChangeThresholdNum   int      `json:"target_operator_change_threshold_num,omitempty"`
-	TargetOperatorChangeThresholdDen   int      `json:"target_operator_change_threshold_den,omitempty"`
+	Proposer                         string   `json:"proposer"`
+	IntentID                         string   `json:"intent_id,omitempty"`
+	Action                           string   `json:"action"`
+	ReasonHash                       string   `json:"reason_hash"`
+	ExpiresAtUnix                    int64    `json:"expires_at_unix,omitempty"`
+	PreserveStorage                  bool     `json:"preserve_storage,omitempty"`
+	AppealDeadlineUnix               int64    `json:"appeal_deadline_unix,omitempty"`
+	TargetOperator                   string   `json:"target_operator,omitempty"`
+	TargetPublicKey                  string   `json:"target_public_key,omitempty"`
+	TargetPermissions                []string `json:"target_permissions,omitempty"`
+	TargetDataModerationThresholdNum int      `json:"target_data_moderation_threshold_num,omitempty"`
+	TargetDataModerationThresholdDen int      `json:"target_data_moderation_threshold_den,omitempty"`
+	TargetOperatorChangeThresholdNum int      `json:"target_operator_change_threshold_num,omitempty"`
+	TargetOperatorChangeThresholdDen int      `json:"target_operator_change_threshold_den,omitempty"`
 	// ── Target mining params (for update_mining_params action) ──
-	TargetStorageReleaseRateBPS       uint64   `json:"target_storage_release_rate_bps,omitempty"`
-	TargetRetrievalReleaseRateBPS     uint64   `json:"target_retrieval_release_rate_bps,omitempty"`
-	TargetValidatorReleaseRateBPS     uint64   `json:"target_validator_release_rate_bps,omitempty"`
-	TargetStoredBytesWeightBPS        uint64   `json:"target_stored_bytes_weight_bps,omitempty"`
-	TargetProofScoreWeightBPS         uint64   `json:"target_proof_score_weight_bps,omitempty"`
-	TargetAvailabilityWeightBPS       uint64   `json:"target_availability_weight_bps,omitempty"`
-	TargetDecentralizationWeightBPS   uint64   `json:"target_decentralization_weight_bps,omitempty"`
-	TargetRetrievalRewardPerMiB       uint64   `json:"target_retrieval_reward_per_mib,omitempty"`
-	TargetMaxRetrievalRewardPerWindow uint64   `json:"target_max_retrieval_reward_per_window,omitempty"`
-	TargetRepairRewardPerShard        uint64   `json:"target_repair_reward_per_shard,omitempty"`
-	TargetRepairPoolTakeoverBPS       uint64   `json:"target_repair_pool_takeover_bps,omitempty"`
-	TargetRepairPoolSubsidyBPS        uint64   `json:"target_repair_pool_subsidy_bps,omitempty"`
-	TargetMinerDegradeThreshold       uint64   `json:"target_miner_degrade_threshold,omitempty"`
-	TargetStorageProofSamples         int      `json:"target_storage_proof_samples,omitempty"`
-	TargetValidatorCommissionBPS      uint64   `json:"target_validator_commission_bps,omitempty"`
-	TargetRetrievalWeightBPS          uint64   `json:"target_retrieval_weight_bps,omitempty"`
-	Signature                          string   `json:"signature"`
-	CreatedAtUnix                      int64    `json:"created_at_unix"`
+	TargetStorageReleaseRateBPS       uint64 `json:"target_storage_release_rate_bps,omitempty"`
+	TargetRetrievalReleaseRateBPS     uint64 `json:"target_retrieval_release_rate_bps,omitempty"`
+	TargetValidatorReleaseRateBPS     uint64 `json:"target_validator_release_rate_bps,omitempty"`
+	TargetStoredBytesWeightBPS        uint64 `json:"target_stored_bytes_weight_bps,omitempty"`
+	TargetProofScoreWeightBPS         uint64 `json:"target_proof_score_weight_bps,omitempty"`
+	TargetAvailabilityWeightBPS       uint64 `json:"target_availability_weight_bps,omitempty"`
+	TargetDecentralizationWeightBPS   uint64 `json:"target_decentralization_weight_bps,omitempty"`
+	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
+	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
+	TargetRepairRewardPerShard        uint64 `json:"target_repair_reward_per_shard,omitempty"`
+	TargetRepairPoolTakeoverBPS       uint64 `json:"target_repair_pool_takeover_bps,omitempty"`
+	TargetRepairPoolSubsidyBPS        uint64 `json:"target_repair_pool_subsidy_bps,omitempty"`
+	TargetMinerDegradeThreshold       uint64 `json:"target_miner_degrade_threshold,omitempty"`
+	TargetStorageProofSamples         int    `json:"target_storage_proof_samples,omitempty"`
+	TargetValidatorCommissionBPS      uint64 `json:"target_validator_commission_bps,omitempty"`
+	TargetRetrievalWeightBPS          uint64 `json:"target_retrieval_weight_bps,omitempty"`
+	TargetFoundationReleaseRateBPS    uint64 `json:"target_foundation_release_rate_bps,omitempty"`
+	TargetFoundationAddress           string `json:"target_foundation_address,omitempty"`
+	TargetRetrievalAddress            string `json:"target_retrieval_address,omitempty"`
+	TargetStorageAnnualRateBPS        uint64 `json:"target_storage_annual_rate_bps,omitempty"`
+	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`
+	TargetValidatorAnnualRateBPS      uint64 `json:"target_validator_annual_rate_bps,omitempty"`
+	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`
+	TargetReleaseCoefficientBPS       uint64 `json:"target_release_coefficient_bps,omitempty"`
+	TargetAvailabilityWindowSize      uint64 `json:"target_availability_window_size,omitempty"`
+	TargetAvailabilityThresholdBPS    uint64 `json:"target_availability_threshold_bps,omitempty"`
+	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
+	TargetMaxConsensusValidators      uint64 `json:"target_max_consensus_validators,omitempty"`
+	TargetMinConsensusValidators      uint64 `json:"target_min_consensus_validators,omitempty"`
+	Signature                         string `json:"signature"`
+	CreatedAtUnix                     int64  `json:"created_at_unix"`
 }
 
 // CreateGovernanceProposalResponse is the response after creating a proposal.
@@ -1656,23 +1772,82 @@ type ExecuteGovernanceProposalRequest struct {
 
 // ExecuteGovernanceProposalResponse is the response after executing a proposal.
 type ExecuteGovernanceProposalResponse struct {
-	Proposal         GovernanceProposal       `json:"proposal"`
+	Proposal         GovernanceProposal           `json:"proposal"`
 	GovernanceResult GovernanceDealActionResponse `json:"governance_result"`
 }
 
 // GovernanceProposalListResponse is the response for listing proposals.
 type GovernanceProposalListResponse struct {
-	Proposals []GovernanceProposal      `json:"proposals"`
+	Proposals []GovernanceProposal        `json:"proposals"`
 	Votes     map[string][]GovernanceVote `json:"votes"`
 }
 
 // GovernanceOperatorListResponse is the response for listing governance operators.
 type GovernanceOperatorListResponse struct {
-	Operators                     []GovernanceOperator `json:"operators"`
-	DataModerationThreshold       int                  `json:"data_moderation_threshold"`
-	OperatorChangeThreshold       int                  `json:"operator_change_threshold"`
-	DataModerationThresholdNum    int                  `json:"data_moderation_threshold_num"`
-	DataModerationThresholdDen    int                  `json:"data_moderation_threshold_den"`
-	OperatorChangeThresholdNum    int                  `json:"operator_change_threshold_num"`
-	OperatorChangeThresholdDen    int                  `json:"operator_change_threshold_den"`
+	Operators                  []GovernanceOperator `json:"operators"`
+	DataModerationThreshold    int                  `json:"data_moderation_threshold"`
+	OperatorChangeThreshold    int                  `json:"operator_change_threshold"`
+	DataModerationThresholdNum int                  `json:"data_moderation_threshold_num"`
+	DataModerationThresholdDen int                  `json:"data_moderation_threshold_den"`
+	OperatorChangeThresholdNum int                  `json:"operator_change_threshold_num"`
+	OperatorChangeThresholdDen int                  `json:"operator_change_threshold_den"`
+}
+
+// ── Multisig Wallet ──
+
+// MultisigWallet represents an on-chain M-of-N multisig wallet.
+type MultisigWallet struct {
+	Address       string   `json:"address"`
+	Signers       []string `json:"signers"`
+	Threshold     uint8    `json:"threshold"`
+	Nonce         uint64   `json:"nonce"`
+	Salt          uint64   `json:"salt"`
+	CreatedAtUnix int64    `json:"created_at_unix"`
+}
+
+// MultisigCreateRequest is the HTTP request to register a multisig wallet.
+type MultisigCreateRequest struct {
+	Signers   []string `json:"signers"`
+	Threshold uint8    `json:"threshold"`
+	Salt      uint64   `json:"salt"`
+	Signature string   `json:"signature"`
+}
+
+// MultisigExecRequest is the HTTP request to execute a multisig operation.
+type MultisigExecRequest struct {
+	Wallet     string              `json:"wallet"`
+	Operation  string              `json:"operation"`
+	Payload    json.RawMessage     `json:"payload"`
+	Nonce      uint64              `json:"nonce"`
+	Fee        uint64              `json:"fee"`
+	Signatures []MultisigSignature `json:"signatures"`
+}
+
+// MultisigSignature is one signer's contribution to a multisig execution.
+type MultisigSignature struct {
+	Signer    string `json:"signer"`
+	Signature string `json:"signature"`
+}
+
+// MultisigTransferPayload is the inner payload for a "transfer" operation.
+type MultisigTransferPayload struct {
+	To     string `json:"to"`
+	Amount uint64 `json:"amount"`
+}
+
+// MultisigExecResponse is returned after a successful multisig execution.
+type MultisigExecResponse struct {
+	Wallet           MultisigWallet    `json:"wallet"`
+	TransferResponse *TransferResponse `json:"transfer_response,omitempty"`
+}
+
+// MultisigWalletInfo enriches a wallet with its current balance.
+type MultisigWalletInfo struct {
+	Wallet  MultisigWallet `json:"wallet"`
+	Balance uint64         `json:"balance"`
+}
+
+// MultisigWalletListResponse is the response for listing multisig wallets.
+type MultisigWalletListResponse struct {
+	Wallets []MultisigWalletInfo `json:"wallets"`
 }

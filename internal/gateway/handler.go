@@ -2,14 +2,18 @@ package gateway
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +21,8 @@ import (
 	chaincrypto "chain/internal/crypto"
 	falaridht "chain/internal/dht"
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 type Config struct {
@@ -52,6 +58,14 @@ type agentKeyCtx struct {
 	Master     string
 	Address    string
 	PrivateKey string
+}
+
+type agentUploadAuth struct {
+	ChainID    string
+	KeyID      string
+	Master     string
+	Nonce      uint64
+	PrivateKey *ecdsa.PrivateKey
 }
 
 func New(cfg Config) (*Handler, error) {
@@ -106,7 +120,7 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(1 << 30); err != nil {
+	if err := r.ParseMultipartForm(256 << 20); err != nil { // 256 MB max
 		writeError(w, http.StatusBadRequest, fmt.Errorf("parse multipart: %w", err))
 		return
 	}
@@ -118,8 +132,9 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	fileName := header.Filename
-	if fileName == "" {
+	// Sanitize filename: strip path components to prevent directory traversal
+	fileName := filepath.Base(header.Filename)
+	if fileName == "" || fileName == "." || fileName == ".." {
 		fileName = "upload.bin"
 	}
 
@@ -159,7 +174,18 @@ func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize
 		return nil, fmt.Errorf("compute erasure plan: %w", err)
 	}
 
+	chainClient := client.NewHTTP(h.cfg.ChainURL)
+	chainID, err := h.chainID(chainClient)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := h.agentUploadAuth(chainClient, ak, chainID)
+	if err != nil {
+		return nil, err
+	}
+
 	intentReq := wire.CreateIntentRequest{
+		ChainID:      chainID,
 		User:         ak.Master,
 		FileName:     fileName,
 		FileSize:     planFileSize,
@@ -177,24 +203,44 @@ func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize
 			Duration: 86400 * 365,
 		},
 		DeadlineUnix: time.Now().Add(24 * time.Hour).Unix(),
+		AgentKeyID:   auth.KeyID,
+		AgentNonce:   auth.Nonce,
 	}
 
-	chainClient := client.NewHTTP(h.cfg.ChainURL)
+	var quote wire.StorageQuoteResponse
+	if err := chainClient.Post("/storage/quote", wire.StorageQuoteRequest{
+		FileSize: planFileSize,
+		Erasure:  intentReq.Erasure,
+		Policy:   intentReq.Policy,
+	}, &quote); err != nil {
+		return nil, fmt.Errorf("storage quote: %w", err)
+	}
+	intentReq.LockedFee = quote.RequiredFee
+	if err := wire.SignCreateIntentAgent(&intentReq, auth.PrivateKey); err != nil {
+		return nil, fmt.Errorf("sign create intent with agent key: %w", err)
+	}
 
 	var intentResp wire.CreateIntentResponse
 	if err := chainClient.Post("/intents", intentReq, &intentResp); err != nil {
 		return nil, fmt.Errorf("create intent: %w", err)
 	}
+	auth.Nonce++
 
-	if err := h.uploadSegments(intentResp.IntentID, planFileRoot, planSegmentRoots, planSegments, fileSize, filePath); err != nil {
+	if err := h.uploadSegments(&auth, intentResp.IntentID, planFileRoot, planSegmentRoots, planSegments, intentResp.Assignments, fileSize, filePath); err != nil {
 		return nil, err
 	}
 
 	manifestRoot := chaincrypto.HashBytes([]byte(planFileRoot + ":" + fileName))
 	finalizeReq := wire.FinalizeRequest{
+		ChainID:      auth.ChainID,
 		IntentID:     intentResp.IntentID,
 		User:         ak.Master,
 		ManifestRoot: manifestRoot,
+		AgentKeyID:   auth.KeyID,
+		AgentNonce:   auth.Nonce,
+	}
+	if err := wire.SignFinalizeAgent(&finalizeReq, auth.PrivateKey); err != nil {
+		return nil, fmt.Errorf("sign finalize with agent key: %w", err)
 	}
 	var finalizeResp wire.FinalizeResponse
 	if err := chainClient.Post("/finalize", finalizeReq, &finalizeResp); err != nil {
@@ -214,8 +260,9 @@ func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize
 	}, nil
 }
 
-func (h *Handler) uploadSegments(intentID, fileRoot string, segmentRoots []string, segments []wire.SegmentPlan, fileSize int64, filePath string) error {
+func (h *Handler) uploadSegments(auth *agentUploadAuth, intentID, fileRoot string, segmentRoots []string, segments []wire.SegmentPlan, assignments []wire.StorageAssignment, fileSize int64, filePath string) error {
 	totalShards := h.cfg.DataShards + h.cfg.ParityShards
+	chainClient := client.NewHTTP(h.cfg.ChainURL)
 
 	for segIdx := range segments {
 		segBytes := segmentBytes(fileSize, int64(segIdx), h.cfg.SegmentSize)
@@ -258,7 +305,23 @@ func (h *Handler) uploadSegments(intentID, fileRoot string, segmentRoots []strin
 					return
 				}
 
-				endpoint := h.cfg.StorageEndpoints[shardIndex%len(h.cfg.StorageEndpoints)]
+				assignment, ok := uploadAssignment(assignments, segIdx, shardIndex)
+				if !ok {
+					mu.Lock()
+					firstErr = fmt.Errorf("missing storage assignment for segment %d shard %d", segIdx, shardIndex)
+					mu.Unlock()
+					return
+				}
+				endpoint := assignment.Endpoint
+				if endpoint == "" && len(h.cfg.StorageEndpoints) > 0 {
+					endpoint = h.cfg.StorageEndpoints[shardIndex%len(h.cfg.StorageEndpoints)]
+				}
+				if endpoint == "" {
+					mu.Lock()
+					firstErr = fmt.Errorf("storage assignment missing endpoint for segment %d shard %d", segIdx, shardIndex)
+					mu.Unlock()
+					return
+				}
 				shardData, err := os.ReadFile(shard.Path)
 				if err != nil {
 					mu.Lock()
@@ -269,12 +332,14 @@ func (h *Handler) uploadSegments(intentID, fileRoot string, segmentRoots []strin
 
 				uploadReq := wire.UploadRequest{
 					IntentID:    intentID,
+					User:        auth.Master,
 					FileRoot:    fileRoot,
 					SegmentID:   segIdx,
 					SegmentRoot: segmentRoots[segIdx],
 					ShardIndex:  shardIndex,
 					ShardID:     fmt.Sprintf("%s:%d:%d", intentID, segIdx, shardIndex),
 					ShardHash:   shard.Hash,
+					ShardCID:    assignment.ShardCID,
 					ShardSize:   shard.Size,
 					DataBase64:  base64.StdEncoding.EncodeToString(shardData),
 				}
@@ -301,19 +366,99 @@ func (h *Handler) uploadSegments(intentID, fileRoot string, segmentRoots []strin
 			return firstErr
 		}
 
-		chainClient := client.NewHTTP(h.cfg.ChainURL)
 		batchReq := wire.BatchCommitRequest{
-			IntentID: intentID,
-			Receipts: receipts,
+			ChainID:    auth.ChainID,
+			IntentID:   intentID,
+			User:       auth.Master,
+			Receipts:   receipts,
+			AgentKeyID: auth.KeyID,
+			AgentNonce: auth.Nonce,
+		}
+		if err := wire.SignBatchCommitAgent(&batchReq, auth.PrivateKey); err != nil {
+			return fmt.Errorf("sign batch commit segment %d with agent key: %w", segIdx, err)
 		}
 		var batchResp wire.BatchCommitResponse
 		if err := chainClient.Post("/batch-commits", batchReq, &batchResp); err != nil {
 			return fmt.Errorf("batch commit segment %d: %w", segIdx, err)
 		}
+		auth.Nonce++
 		_ = batchResp
 	}
 
 	return nil
+}
+
+func (h *Handler) chainID(chainClient *client.HTTP) (string, error) {
+	var status wire.ChainStatusResponse
+	if err := chainClient.Get("/status", &status); err != nil {
+		return "", fmt.Errorf("chain status: %w", err)
+	}
+	if status.ChainID == "" {
+		return "", errors.New("chain status did not include chain_id")
+	}
+	return status.ChainID, nil
+}
+
+func (h *Handler) agentUploadAuth(chainClient *client.HTTP, ak *agentKeyCtx, chainID string) (agentUploadAuth, error) {
+	privateKey, err := ethcrypto.HexToECDSA(strings.TrimPrefix(ak.PrivateKey, "0x"))
+	if err != nil {
+		return agentUploadAuth{}, fmt.Errorf("parse agent private key: %w", err)
+	}
+	agentAddress := wire.AccountAddress(&privateKey.PublicKey)
+	if !strings.EqualFold(agentAddress, ak.Address) {
+		return agentUploadAuth{}, errors.New("agent private key does not match api key address")
+	}
+	var resp wire.ListAgentKeysResponse
+	if err := chainClient.Get("/agent-keys?master="+url.QueryEscape(ak.Master), &resp); err != nil {
+		return agentUploadAuth{}, fmt.Errorf("load agent key state: %w", err)
+	}
+	for _, key := range resp.Keys {
+		if key.KeyID != ak.AgentKeyID {
+			continue
+		}
+		if !strings.EqualFold(key.Master, ak.Master) {
+			return agentUploadAuth{}, errors.New("agent key master mismatch")
+		}
+		if key.Revoked {
+			return agentUploadAuth{}, errors.New("agent key has been revoked")
+		}
+		if key.ExpiresAt > 0 && time.Now().Unix() > key.ExpiresAt {
+			return agentUploadAuth{}, errors.New("agent key expired")
+		}
+		agentPub := hex.EncodeToString(ethcrypto.FromECDSAPub(&privateKey.PublicKey))
+		if !strings.EqualFold(agentPub, key.AgentPub) {
+			return agentUploadAuth{}, errors.New("agent private key does not match registered public key")
+		}
+		if !agentPermission(key.Permissions, "create_intent") || !agentPermission(key.Permissions, "batch_commit") || !agentPermission(key.Permissions, "finalize") {
+			return agentUploadAuth{}, errors.New("agent key lacks upload permissions")
+		}
+		return agentUploadAuth{
+			ChainID:    chainID,
+			KeyID:      key.KeyID,
+			Master:     wire.NormalizeAddress(ak.Master),
+			Nonce:      key.Nonce,
+			PrivateKey: privateKey,
+		}, nil
+	}
+	return agentUploadAuth{}, errors.New("agent key not found on chain")
+}
+
+func agentPermission(permissions []string, permission string) bool {
+	for _, p := range permissions {
+		if p == permission {
+			return true
+		}
+	}
+	return false
+}
+
+func uploadAssignment(assignments []wire.StorageAssignment, segmentID int, shardIndex int) (wire.StorageAssignment, bool) {
+	for _, assignment := range assignments {
+		if assignment.SegmentID == segmentID && assignment.ShardIndex == shardIndex {
+			return assignment, true
+		}
+	}
+	return wire.StorageAssignment{}, false
 }
 
 func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {

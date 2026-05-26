@@ -23,11 +23,13 @@ import (
 
 var levelDBStateKey = []byte("state:snapshot")
 
-const defaultBaseFee uint64 = 1
+const defaultBaseFee uint64 = 100_000_000
 const defaultTargetBlockTxs = 10
-const defaultStorageBasePrice uint64 = 1
-const defaultStorageMinimumFee uint64 = 1
+const defaultStorageBasePrice uint64 = 100_000_000
+const defaultStorageMinimumFee uint64 = 100_000_000
 const defaultStorageBurnBPS uint64 = 300
+const defaultStorageRetrievalBPS uint64 = 300
+const defaultStorageFoundationBPS uint64 = 300
 const defaultPermanentStorageDuration = int64(100 * 365 * 24 * 60 * 60)
 const defaultRetrievalRateWindow = int64(3600)
 const defaultRetrievalRateDecayDivisor uint64 = 2
@@ -47,65 +49,77 @@ type Intent struct {
 }
 
 type State struct {
-	Intents                 map[string]*Intent                        `json:"intents"`
-	Deals                   map[string]string                         `json:"deals"`
-	Challenges              map[string]wire.StorageChallenge          `json:"challenges"`
-	Proofs                  map[string]wire.StorageProof              `json:"proofs"`
-	Epochs                  map[string]wire.ProofEpoch                `json:"epochs"`
-	Miners                  map[string]wire.MinerStats                `json:"miners"`
-	Accounts                map[string]wire.Account                   `json:"accounts"`
-	Blocks                  []wire.Block                              `json:"blocks"`
-	PendingTxs              []wire.Transaction                        `json:"pending_txs"`
-	Receipts                map[string]wire.TransactionReceipt        `json:"receipts"`
-	Validators              map[string]wire.ValidatorInfo             `json:"validators"`
-	ConsensusValidators     map[string]bool                           `json:"consensus_validators"`
-	ValidatorEvidence       map[string]wire.ValidatorEvidence         `json:"validator_evidence"`
-	ConsensusVotes          map[string]wire.ConsensusVote             `json:"consensus_votes"`
-	FeeMarket               wire.FeeMarket                            `json:"fee_market"`
-	FeeChargedTxs           map[string]bool                           `json:"fee_charged_txs"`
-	StoragePricing          wire.StoragePricing                       `json:"storage_pricing"`
-	StorageFeePool          wire.StorageFeePool                       `json:"storage_fee_pool"`
-	DealEscrows             map[string]wire.DealEscrow                `json:"deal_escrows"`
-	PermanentStorageFunds   map[string]wire.PermanentStorageFund      `json:"permanent_storage_funds"`
-	RepairTasks             map[string]wire.RepairTask                `json:"repair_tasks"`
-	ProviderRecords         map[string]wire.StorageProviderRecord     `json:"provider_records"`
-	DeleteTasks             map[string]wire.DeleteTask                `json:"delete_tasks"`
-	GovernanceAudits        []wire.GovernanceAuditRecord              `json:"governance_audits"`
-	GovernanceOperators     map[string]wire.GovernanceOperator        `json:"governance_operators"`
-	DeleteReceipts          map[string]wire.DeleteReceipt             `json:"delete_receipts"`
-	RetrievalReceipts       map[string]wire.RetrievalReceipt          `json:"retrieval_receipts"`
-	RetrievalWindows        map[string]wire.RetrievalRateWindow       `json:"retrieval_windows"`
-	PendingRetrievalRewards map[string]wire.PendingRetrievalReward    `json:"pending_retrieval_rewards"`
-	MiningRewardVestings    map[string]wire.MiningRewardVestingBucket `json:"mining_reward_vestings"`
-	StakeDelegations        map[string]wire.StakeDelegation           `json:"stake_delegations"`
-	DealHealths             map[string]wire.DealHealth                `json:"deal_healths"`
-	RewardPools             *reward.Pools                             `json:"reward_pools"`
-	MiningParams            *MiningParams                             `json:"mining_params"`
-	Collections             map[string]wire.DataCollection            `json:"collections"`
-	DataRecords             map[string]wire.DataRecord                `json:"data_records"`
-	CollectionRecords       map[string][]string                       `json:"collection_records"`
-	KeyEnvelopes            map[string]wire.KeyEnvelope               `json:"key_envelopes"`
-	ShareRecords            map[string]wire.ShareRecord               `json:"share_records"`
-	AppliedTxs              map[string]bool                           `json:"applied_txs"`
-	ConfirmedTxs            map[string]bool                           `json:"confirmed_txs"`
-	EpochRound              uint64                                    `json:"epoch_round"`
-	ConsensusHeight         uint64                                    `json:"consensus_height"`
-	ConsensusRound          uint64                                    `json:"consensus_round"`
-	ConsensusPhase          string                                    `json:"consensus_phase"`
-	ConsensusProposer       string                                    `json:"consensus_proposer"`
-	UpgradePlan             consensus.UpgradePlan                     `json:"upgrade_plan"`
-	AgentKeys               map[string]*wire.AgentKey                 `json:"agent_keys"`
-	BlacklistedShards       map[string]wire.BlacklistEntry            `json:"blacklisted_shards"`
-	GovernanceProposals     map[string]wire.GovernanceProposal        `json:"governance_proposals"`
-	GovernanceVotes         map[string][]wire.GovernanceVote          `json:"governance_votes"`
+	ChainID                    string                                    `json:"chain_id"`
+	Intents                    map[string]*Intent                        `json:"intents"`
+	Deals                      map[string]string                         `json:"deals"`
+	Challenges                 map[string]wire.StorageChallenge          `json:"challenges"`
+	Proofs                     map[string]wire.StorageProof              `json:"proofs"`
+	Epochs                     map[string]wire.ProofEpoch                `json:"epochs"`
+	Miners                     map[string]wire.MinerStats                `json:"miners"`
+	Accounts                   map[string]wire.Account                   `json:"accounts"`
+	Blocks                     []wire.Block                              `json:"blocks"`
+	PendingTxs                 []wire.Transaction                        `json:"pending_txs"`
+	Receipts                   map[string]wire.TransactionReceipt        `json:"receipts"`
+	Validators                 map[string]wire.ValidatorInfo             `json:"validators"`
+	ConsensusValidators        map[string]bool                           `json:"consensus_validators"`
+	ValidatorEvidence          map[string]wire.ValidatorEvidence         `json:"validator_evidence"`
+	ConsensusVotes             map[string]wire.ConsensusVote             `json:"consensus_votes"`
+	FeeMarket                  wire.FeeMarket                            `json:"fee_market"`
+	FeeChargedTxs              map[string]bool                           `json:"fee_charged_txs"`
+	StoragePricing             wire.StoragePricing                       `json:"storage_pricing"`
+	StorageFeePool             wire.StorageFeePool                       `json:"storage_fee_pool"`
+	DealEscrows                map[string]wire.DealEscrow                `json:"deal_escrows"`
+	PermanentStorageFunds      map[string]wire.PermanentStorageFund      `json:"permanent_storage_funds"`
+	RepairTasks                map[string]wire.RepairTask                `json:"repair_tasks"`
+	ProviderRecords            map[string]wire.StorageProviderRecord     `json:"provider_records"`
+	DeleteTasks                map[string]wire.DeleteTask                `json:"delete_tasks"`
+	GovernanceAudits           []wire.GovernanceAuditRecord              `json:"governance_audits"`
+	GovernanceOperators        map[string]wire.GovernanceOperator        `json:"governance_operators"`
+	OperatorNonces             map[string]uint64                         `json:"operator_nonces,omitempty"`
+	DeleteReceipts             map[string]wire.DeleteReceipt             `json:"delete_receipts"`
+	RetrievalReceipts          map[string]wire.RetrievalReceipt          `json:"retrieval_receipts"`
+	RetrievalWindows           map[string]wire.RetrievalRateWindow       `json:"retrieval_windows"`
+	PendingRetrievalRewards    map[string]wire.PendingRetrievalReward    `json:"pending_retrieval_rewards"`
+	MiningRewardVestings       map[string]wire.MiningRewardVestingBucket `json:"mining_reward_vestings"`
+	StakeDelegations           map[string]wire.StakeDelegation           `json:"stake_delegations"`
+	DealHealths                map[string]wire.DealHealth                `json:"deal_healths"`
+	RewardPools                *reward.Pools                             `json:"reward_pools"`
+	MiningParams               *MiningParams                             `json:"mining_params"`
+	Collections                map[string]wire.DataCollection            `json:"collections"`
+	DataRecords                map[string]wire.DataRecord                `json:"data_records"`
+	CollectionRecords          map[string][]string                       `json:"collection_records"`
+	KeyEnvelopes               map[string]wire.KeyEnvelope               `json:"key_envelopes"`
+	ShareRecords               map[string]wire.ShareRecord               `json:"share_records"`
+	AppliedTxs                 map[string]bool                           `json:"applied_txs"`
+	ConfirmedTxs               map[string]bool                           `json:"confirmed_txs"`
+	EpochRound                 uint64                                    `json:"epoch_round"`
+	ConsensusHeight            uint64                                    `json:"consensus_height"`
+	ConsensusRound             uint64                                    `json:"consensus_round"`
+	ConsensusPhase             string                                    `json:"consensus_phase"`
+	ConsensusProposer          string                                    `json:"consensus_proposer"`
+	UpgradePlan                consensus.UpgradePlan                     `json:"upgrade_plan"`
+	AgentKeys                  map[string]*wire.AgentKey                 `json:"agent_keys"`
+	BlacklistedShards          map[string]wire.BlacklistEntry            `json:"blacklisted_shards"`
+	GovernanceProposals        map[string]wire.GovernanceProposal        `json:"governance_proposals"`
+	GovernanceVotes            map[string][]wire.GovernanceVote          `json:"governance_votes"`
+	MultisigWallets            map[string]*wire.MultisigWallet           `json:"multisig_wallets"`
+	FoundationAddress          string                                    `json:"foundation_address,omitempty"`
+	RetrievalAddress           string                                    `json:"retrieval_address,omitempty"`
+	LastReleaseAtUnix          int64                                     `json:"last_release_at_unix,omitempty"`
+	LastValidatorReleaseAtUnix int64                                     `json:"last_validator_release_at_unix,omitempty"`
+
+	// Validator availability scoring — per-validator ring buffer of proposer turn results.
+	ProposerTurns map[string]*wire.ValidatorTurnWindow `json:"proposer_turns,omitempty"`
+	// Timestamp when the current consensus round started (for timeout detection).
+	ConsensusRoundStartedAtUnix int64 `json:"consensus_round_started_at_unix,omitempty"`
 
 	// Governance threshold configuration (numerator/denominator).
 	// DataModerationThreshold applies to freeze/block/legal_hold/appeal.
 	// OperatorChangeThreshold applies to add/remove/update_operator and update_config.
-	DataModerationThresholdNum   int `json:"data_moderation_threshold_num"`
-	DataModerationThresholdDen   int `json:"data_moderation_threshold_den"`
-	OperatorChangeThresholdNum   int `json:"operator_change_threshold_num"`
-	OperatorChangeThresholdDen   int `json:"operator_change_threshold_den"`
+	DataModerationThresholdNum int `json:"data_moderation_threshold_num"`
+	DataModerationThresholdDen int `json:"data_moderation_threshold_den"`
+	OperatorChangeThresholdNum int `json:"operator_change_threshold_num"`
+	OperatorChangeThresholdDen int `json:"operator_change_threshold_den"`
 }
 
 type Store struct {
@@ -117,6 +131,12 @@ type Store struct {
 	broadcaster     BlockBroadcaster
 	txBroadcaster   TransactionBroadcaster
 	voteBroadcaster ConsensusVoteBroadcaster
+	blockInterval   time.Duration
+}
+
+// SetBlockInterval configures the block production interval for per-block reward calculations.
+func (s *Store) SetBlockInterval(d time.Duration) {
+	s.blockInterval = d
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -234,11 +254,18 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 	}
 	if doc.RewardPools != nil {
 		state.RewardPools = &reward.Pools{
-			StorageRemaining:   doc.RewardPools.StoragePoolRemaining,
-			RetrievalRemaining: doc.RewardPools.RetrievalPoolRemaining,
-			ValidatorRemaining: doc.RewardPools.ValidatorPoolRemaining,
-			RepairRemaining:    doc.RewardPools.RepairPoolRemaining,
+			StorageRemaining:    doc.RewardPools.StoragePoolRemaining,
+			RetrievalRemaining:  doc.RewardPools.RetrievalPoolRemaining,
+			ValidatorRemaining:  doc.RewardPools.ValidatorPoolRemaining,
+			RepairRemaining:     doc.RewardPools.RepairPoolRemaining,
+			FoundationRemaining: doc.RewardPools.FoundationPoolRemaining,
 		}
+	}
+	if doc.FoundationAddress != "" {
+		state.FoundationAddress = wire.NormalizeAddress(doc.FoundationAddress)
+	}
+	if doc.RetrievalAddress != "" {
+		state.RetrievalAddress = wire.NormalizeAddress(doc.RetrievalAddress)
 	}
 	for _, operator := range doc.GovernanceOperators {
 		key := ""
@@ -269,11 +296,13 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 	state.DataModerationThresholdDen = doc.DataModerationThresholdDen
 	state.OperatorChangeThresholdNum = doc.OperatorChangeThresholdNum
 	state.OperatorChangeThresholdDen = doc.OperatorChangeThresholdDen
+	state.ChainID = doc.ChainID
 	return state
 }
 
 func newState() State {
 	return State{
+		ChainID:                 "falari-dev",
 		Intents:                 map[string]*Intent{},
 		Deals:                   map[string]string{},
 		Challenges:              map[string]wire.StorageChallenge{},
@@ -298,6 +327,7 @@ func newState() State {
 		DeleteTasks:             map[string]wire.DeleteTask{},
 		GovernanceAudits:        []wire.GovernanceAuditRecord{},
 		GovernanceOperators:     map[string]wire.GovernanceOperator{},
+		OperatorNonces:          map[string]uint64{},
 		DeleteReceipts:          map[string]wire.DeleteReceipt{},
 		RetrievalReceipts:       map[string]wire.RetrievalReceipt{},
 		RetrievalWindows:        map[string]wire.RetrievalRateWindow{},
@@ -305,6 +335,7 @@ func newState() State {
 		MiningRewardVestings:    map[string]wire.MiningRewardVestingBucket{},
 		StakeDelegations:        map[string]wire.StakeDelegation{},
 		DealHealths:             map[string]wire.DealHealth{},
+		ProposerTurns:           map[string]*wire.ValidatorTurnWindow{},
 		Collections:             map[string]wire.DataCollection{},
 		DataRecords:             map[string]wire.DataRecord{},
 		CollectionRecords:       map[string][]string{},
@@ -315,6 +346,7 @@ func newState() State {
 		AgentKeys:               map[string]*wire.AgentKey{},
 		GovernanceProposals:     map[string]wire.GovernanceProposal{},
 		GovernanceVotes:         map[string][]wire.GovernanceVote{},
+		MultisigWallets:         map[string]*wire.MultisigWallet{},
 		// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 		DataModerationThresholdNum: 1,
 		DataModerationThresholdDen: 3,
@@ -324,6 +356,9 @@ func newState() State {
 }
 
 func normalizeState(state *State) {
+	if state.ChainID == "" {
+		state.ChainID = "falari-dev"
+	}
 	if state.Intents == nil {
 		state.Intents = map[string]*Intent{}
 	}
@@ -405,6 +440,9 @@ func normalizeState(state *State) {
 	if state.GovernanceOperators == nil {
 		state.GovernanceOperators = map[string]wire.GovernanceOperator{}
 	}
+	if state.OperatorNonces == nil {
+		state.OperatorNonces = map[string]uint64{}
+	}
 	if state.DeleteReceipts == nil {
 		state.DeleteReceipts = map[string]wire.DeleteReceipt{}
 	}
@@ -425,6 +463,9 @@ func normalizeState(state *State) {
 	}
 	if state.DealHealths == nil {
 		state.DealHealths = map[string]wire.DealHealth{}
+	}
+	if state.ProposerTurns == nil {
+		state.ProposerTurns = map[string]*wire.ValidatorTurnWindow{}
 	}
 	if state.Collections == nil {
 		state.Collections = map[string]wire.DataCollection{}
@@ -455,6 +496,9 @@ func normalizeState(state *State) {
 	}
 	if state.GovernanceVotes == nil {
 		state.GovernanceVotes = map[string][]wire.GovernanceVote{}
+	}
+	if state.MultisigWallets == nil {
+		state.MultisigWallets = map[string]*wire.MultisigWallet{}
 	}
 	// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 	if state.DataModerationThresholdNum == 0 || state.DataModerationThresholdDen == 0 {
@@ -557,6 +601,7 @@ func defaultStoragePricing() wire.StoragePricing {
 }
 
 func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentResponse, error) {
+	req.User = wire.NormalizeAddress(req.User)
 	if req.User == "" {
 		return wire.CreateIntentResponse{}, errors.New("user is required")
 	}
@@ -597,11 +642,50 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 	if userAccount.Balance < req.LockedFee {
 		return wire.CreateIntentResponse{}, errors.New("insufficient balance for storage fee")
 	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "create_intent", req.LockedFee, func(agentPub string) error {
+			return wire.VerifyCreateIntentAgent(req, agentPub)
+		}); err != nil {
+			return wire.CreateIntentResponse{}, err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyCreateIntent(req)
+		}); err != nil {
+			return wire.CreateIntentResponse{}, err
+		}
+		s.consumeAccountNonceLocked(req.User)
+	}
+	userAccount = s.accountLocked(req.User)
 	burnAmount := req.LockedFee * defaultStorageBurnBPS / 10_000
-	minerPortion := req.LockedFee - burnAmount
+	retrievalAmount := req.LockedFee * defaultStorageRetrievalBPS / 10_000
+	foundationAmount := req.LockedFee * defaultStorageFoundationBPS / 10_000
+	minerPortion := req.LockedFee - burnAmount - retrievalAmount - foundationAmount
 	userAccount.Balance -= req.LockedFee
 	userAccount.LockedStorage += minerPortion
 	s.data.Accounts[userAccount.Address] = userAccount
+
+	// Transfer retrieval and foundation shares to their addresses (or burn if unconfigured).
+	actualRetrieval := uint64(0)
+	actualFoundation := uint64(0)
+	if retrievalAmount > 0 && s.data.RetrievalAddress != "" {
+		retAcc := s.accountLocked(s.data.RetrievalAddress)
+		retAcc.Balance += retrievalAmount
+		s.data.Accounts[retAcc.Address] = retAcc
+		actualRetrieval = retrievalAmount
+		s.data.StorageFeePool.TotalToRetrieval = saturatingAdd(s.data.StorageFeePool.TotalToRetrieval, retrievalAmount)
+	} else {
+		burnAmount += retrievalAmount
+	}
+	if foundationAmount > 0 && s.data.FoundationAddress != "" {
+		fndAcc := s.accountLocked(s.data.FoundationAddress)
+		fndAcc.Balance += foundationAmount
+		s.data.Accounts[fndAcc.Address] = fndAcc
+		actualFoundation = foundationAmount
+		s.data.StorageFeePool.TotalToFoundation = saturatingAdd(s.data.StorageFeePool.TotalToFoundation, foundationAmount)
+	} else {
+		burnAmount += foundationAmount
+	}
 
 	intentID, err := randomID("intent")
 	if err != nil {
@@ -651,7 +735,7 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 	if err := s.saveLocked(); err != nil {
 		return wire.CreateIntentResponse{}, err
 	}
-	return wire.CreateIntentResponse{IntentID: intentID, Status: wire.StatusUploading, RequiredFee: quote.RequiredFee, LockedFee: req.LockedFee, BurnedFee: burnAmount, Assignments: assignments}, nil
+	return wire.CreateIntentResponse{IntentID: intentID, Status: wire.StatusUploading, RequiredFee: quote.RequiredFee, LockedFee: req.LockedFee, BurnedFee: burnAmount, RetrievalFee: actualRetrieval, FoundationFee: actualFoundation, Assignments: assignments}, nil
 }
 
 func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitResponse, error) {
@@ -676,6 +760,36 @@ func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitRespon
 		intent.Status = wire.StatusExpired
 		_ = s.saveLocked()
 		return wire.BatchCommitResponse{}, errors.New("intent expired")
+	}
+
+	for _, receipt := range req.Receipts {
+		if err := validateReceipt(intent, receipt); err != nil {
+			return wire.BatchCommitResponse{}, err
+		}
+		if err := s.validateReceiptAssignmentLocked(intent, receipt); err != nil {
+			return wire.BatchCommitResponse{}, err
+		}
+		miner, err := s.registeredMinerLocked(receipt.MinerAddress, receipt.MinerPublicKey)
+		if err != nil {
+			return wire.BatchCommitResponse{}, err
+		}
+		if miner.UsedBytes+uint64(receipt.ShardSize) > miner.CapacityBytes {
+			return wire.BatchCommitResponse{}, errors.New("miner capacity exceeded")
+		}
+	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "batch_commit", 0, func(agentPub string) error {
+			return wire.VerifyBatchCommitAgent(req, agentPub)
+		}); err != nil {
+			return wire.BatchCommitResponse{}, err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyBatchCommit(req)
+		}); err != nil {
+			return wire.BatchCommitResponse{}, err
+		}
+		s.consumeAccountNonceLocked(req.User)
 	}
 
 	for _, receipt := range req.Receipts {
@@ -769,6 +883,20 @@ func (s *Store) Finalize(req wire.FinalizeRequest) (wire.FinalizeResponse, error
 	if committedSegments(intent) != len(intent.SegmentRoots) {
 		return wire.FinalizeResponse{}, errors.New("not all segments are committed")
 	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "finalize", 0, func(agentPub string) error {
+			return wire.VerifyFinalizeAgent(req, agentPub)
+		}); err != nil {
+			return wire.FinalizeResponse{}, err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyFinalize(req)
+		}); err != nil {
+			return wire.FinalizeResponse{}, err
+		}
+		s.consumeAccountNonceLocked(req.User)
+	}
 
 	dealID, err := randomID("deal")
 	if err != nil {
@@ -786,11 +914,12 @@ func (s *Store) Finalize(req wire.FinalizeRequest) (wire.FinalizeResponse, error
 	intent.UpdatedAt = now
 	s.activateDealEscrowLocked(intent, now)
 	s.data.Deals[dealID] = intent.IntentID
-	s.recordTxLocked("finalize_deal", req.User, map[string]any{
-		"intent_id":     intent.IntentID,
-		"deal_id":       dealID,
-		"user":          req.User,
-		"manifest_root": req.ManifestRoot,
+	s.recordTxLocked("finalize_deal", req.User, finalizeDealTxPayload{
+		Request:      req,
+		IntentID:     intent.IntentID,
+		DealID:       dealID,
+		User:         req.User,
+		ManifestRoot: req.ManifestRoot,
 	})
 
 	if err := s.saveLocked(); err != nil {
@@ -814,10 +943,19 @@ func (s *Store) SettleIntent(req wire.SettleIntentRequest) (wire.SettleIntentRes
 	if req.User != "" && req.User != intent.User {
 		return wire.SettleIntentResponse{}, errors.New("intent user mismatch")
 	}
+	if req.User == "" {
+		req.User = intent.User
+	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+		return wire.VerifySettleIntent(req)
+	}); err != nil {
+		return wire.SettleIntentResponse{}, err
+	}
 	resp, err := s.settleIntentLocked(intent, time.Now().Unix())
 	if err != nil {
 		return wire.SettleIntentResponse{}, err
 	}
+	s.consumeAccountNonceLocked(req.User)
 	s.recordTxLocked("settle_intent", intent.User, settleIntentTxPayload{
 		Request:       req,
 		Response:      resp,
@@ -1303,29 +1441,31 @@ func (s *Store) Account(address string) (wire.Account, error) {
 	return s.accountLocked(wire.NormalizeAddress(address)), nil
 }
 
-func (s *Store) Faucet(req wire.FaucetRequest) (wire.FaucetResponse, error) {
-	req.Address = wire.NormalizeAddress(req.Address)
-	if req.Address == "" {
-		return wire.FaucetResponse{}, errors.New("address is required")
+// CreditBalance credits tokens to an account. This is an internal method only
+// used for testing and genesis initialization. It is NOT exposed via HTTP.
+func (s *Store) CreditBalance(address string, amount uint64) error {
+	address = wire.NormalizeAddress(address)
+	if address == "" {
+		return errors.New("address is required")
 	}
-	if req.Amount == 0 {
-		return wire.FaucetResponse{}, errors.New("amount must be positive")
+	if amount == 0 {
+		return errors.New("amount must be positive")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	account := s.accountLocked(req.Address)
-	account.Balance += req.Amount
-	s.data.Accounts[req.Address] = account
-	s.recordTxLocked("faucet", req.Address, map[string]any{
-		"address": req.Address,
-		"amount":  req.Amount,
+	account := s.accountLocked(address)
+	account.Balance += amount
+	s.data.Accounts[address] = account
+	s.recordTxLocked("genesis_credit", address, map[string]any{
+		"address": address,
+		"amount":  amount,
 	})
 	if err := s.saveLocked(); err != nil {
-		return wire.FaucetResponse{}, err
+		return err
 	}
-	return wire.FaucetResponse{Account: account}, nil
+	return nil
 }
 
 func (s *Store) Transfer(req wire.TransferRequest) (wire.TransferResponse, error) {
@@ -1335,23 +1475,23 @@ func (s *Store) Transfer(req wire.TransferRequest) (wire.TransferResponse, error
 	if req.Amount == 0 {
 		return wire.TransferResponse{}, errors.New("amount must be positive")
 	}
+	if !wire.IsSignedTransfer(req) {
+		return wire.TransferResponse{}, errors.New("unsigned transfers are not supported; signature and public key are required")
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	txID := s.recordTxLocked("transfer", req.From, req)
 	from, to, err := s.applyTransferLocked(req)
 	if err != nil {
+		s.removePendingTxLocked(txID)
 		return wire.TransferResponse{}, err
 	}
-	s.recordTxLocked("transfer", req.From, req)
 	if err := s.saveLocked(); err != nil {
 		return wire.TransferResponse{}, err
 	}
 	return wire.TransferResponse{From: from, To: to}, nil
-}
-
-func (s *Store) SubmitRawTransaction(req wire.RawTransactionRequest) (wire.TransferResponse, error) {
-	return wire.TransferResponse{}, errors.New("raw EVM transactions are no longer supported; use POST /transfers for native transfers")
 }
 
 func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMinerResponse, error) {
@@ -1469,6 +1609,7 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 	}
 	s.data.Accounts[account.Address] = account
 	s.data.Validators[req.Address] = existing
+	s.data.ConsensusValidators[req.Address] = true
 	s.recordTxLocked("register_validator", req.Address, map[string]any{
 		"address":    req.Address,
 		"public_key": req.PublicKey,
@@ -1526,6 +1667,7 @@ func (s *Store) Validators() wire.ListValidatorsResponse {
 	validators := make([]wire.ValidatorInfo, 0, len(s.data.Validators))
 	for _, validator := range s.data.Validators {
 		validator.Consensus = s.data.ConsensusValidators[validator.Address]
+		validator.AvailabilityScoreBPS = s.availabilityScoreLocked(validator.Address)
 		validators = append(validators, validator)
 	}
 	return wire.ListValidatorsResponse{Validators: validators}

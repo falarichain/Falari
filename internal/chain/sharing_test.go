@@ -12,6 +12,8 @@ func TestCreateAddressAndPasscodeShares(t *testing.T) {
 		t.Fatal(err)
 	}
 	intent := testLifecycleIntent()
+	alice := newTestUser(t)
+	intent.User = alice.Addr
 	intent.Encryption = &wire.EncryptionMetadata{
 		Algorithm:            "AES-256-GCM/segment-v1",
 		KeyHash:              "key_hash",
@@ -22,14 +24,20 @@ func TestCreateAddressAndPasscodeShares(t *testing.T) {
 	intent.AccessStatus = wire.AccessStatusPrivate
 	store.data.Intents[intent.IntentID] = intent
 
-	addressShare, err := store.CreateAddressShare(wire.CreateAddressShareRequest{
+	addressReq := wire.CreateAddressShareRequest{
+		ChainID:          store.data.ChainID,
 		IntentID:         intent.IntentID,
 		Owner:            intent.User,
 		Recipient:        "bob",
 		Algorithm:        "x25519-aeskw-v1",
 		EncryptedDataKey: "encrypted_for_bob",
 		Nonce:            "nonce_bob",
-	})
+		AccountNonce:     store.accountLocked(intent.User).Nonce,
+	}
+	if err := wire.SignCreateAddressShare(&addressReq, alice.Key); err != nil {
+		t.Fatal(err)
+	}
+	addressShare, err := store.CreateAddressShare(addressReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +48,8 @@ func TestCreateAddressAndPasscodeShares(t *testing.T) {
 		t.Fatalf("unexpected address envelope: %+v", addressShare.Envelope)
 	}
 
-	passcodeShare, err := store.CreatePasscodeShare(wire.CreatePasscodeShareRequest{
+	passcodeReq := wire.CreatePasscodeShareRequest{
+		ChainID:          store.data.ChainID,
 		IntentID:         intent.IntentID,
 		Owner:            intent.User,
 		Mode:             wire.ShareModeLinkFragment,
@@ -52,7 +61,12 @@ func TestCreateAddressAndPasscodeShares(t *testing.T) {
 			Salt:       "salt",
 			Iterations: 310000,
 		},
-	})
+		AccountNonce: store.accountLocked(intent.User).Nonce,
+	}
+	if err := wire.SignCreatePasscodeShare(&passcodeReq, alice.Key); err != nil {
+		t.Fatal(err)
+	}
+	passcodeShare, err := store.CreatePasscodeShare(passcodeReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +85,16 @@ func TestCreateAddressAndPasscodeShares(t *testing.T) {
 		t.Fatalf("expected two shares and envelopes, got %+v", listed)
 	}
 
-	if err := store.RevokeShare(wire.RevokeShareRequest{ShareID: addressShare.Share.ShareID, Owner: intent.User}); err != nil {
+	revokeReq := wire.RevokeShareRequest{
+		ChainID:      store.data.ChainID,
+		ShareID:      addressShare.Share.ShareID,
+		Owner:        intent.User,
+		AccountNonce: store.accountLocked(intent.User).Nonce,
+	}
+	if err := wire.SignRevokeShare(&revokeReq, alice.Key); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeShare(revokeReq); err != nil {
 		t.Fatal(err)
 	}
 	active, err := store.ListShares(intent.IntentID, intent.User, "", "", false)
@@ -89,6 +112,8 @@ func TestAddressShareRecipientIsCaseInsensitive(t *testing.T) {
 		t.Fatal(err)
 	}
 	intent := testLifecycleIntent()
+	alice := newTestUser(t)
+	intent.User = alice.Addr
 	intent.Encryption = &wire.EncryptionMetadata{
 		Algorithm:            "AES-256-GCM/segment-v1",
 		KeyHash:              "key_hash",
@@ -100,7 +125,8 @@ func TestAddressShareRecipientIsCaseInsensitive(t *testing.T) {
 	store.data.Intents[intent.IntentID] = intent
 
 	mixedCaseRecipient := "0xAbCDEFabcdefABCDefabCDefABcdefabCDEFABCD"
-	addressShare, err := store.CreateAddressShare(wire.CreateAddressShareRequest{
+	addressReq := wire.CreateAddressShareRequest{
+		ChainID:          store.data.ChainID,
 		IntentID:         intent.IntentID,
 		Owner:            intent.User,
 		Recipient:        mixedCaseRecipient,
@@ -112,7 +138,12 @@ func TestAddressShareRecipientIsCaseInsensitive(t *testing.T) {
 			Salt:       "salt",
 			Iterations: 310000,
 		},
-	})
+		AccountNonce: store.accountLocked(intent.User).Nonce,
+	}
+	if err := wire.SignCreateAddressShare(&addressReq, alice.Key); err != nil {
+		t.Fatal(err)
+	}
+	addressShare, err := store.CreateAddressShare(addressReq)
 	if err != nil {
 		t.Fatal(err)
 	}

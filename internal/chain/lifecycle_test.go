@@ -15,7 +15,8 @@ func TestSetAccessPolicyBlocksManifestAndProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	intent := testLifecycleIntent()
+	alice := newTestUser(t)
+	intent := testLifecycleIntentWithUser(alice.Addr)
 	store.data.Intents[intent.IntentID] = intent
 	store.data.Deals[intent.DealID] = intent.IntentID
 	store.data.Miners["miner_lifecycle"] = wire.MinerStats{
@@ -23,19 +24,21 @@ func TestSetAccessPolicyBlocksManifestAndProviders(t *testing.T) {
 		PublicKey:     "miner_pub",
 		Endpoint:      "http://miner",
 		CapacityBytes: 100,
-		Stake:         10,
+		Stake:         gfTokens(10),
 		Status:        "active",
 	}
 
 	if _, err := store.Manifest(intent.IntentID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SetAccessPolicy(wire.SetAccessPolicyRequest{
+	sapReq := wire.SetAccessPolicyRequest{
 		IntentID:     intent.IntentID,
 		User:         intent.User,
 		AccessStatus: wire.AccessStatusBlocked,
 		ReasonHash:   "reason_hash",
-	}); err != nil {
+	}
+	signSetAccessPolicy(t, store, &sapReq, alice)
+	if _, err := store.SetAccessPolicy(sapReq); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Manifest(intent.IntentID); err == nil {
@@ -55,12 +58,13 @@ func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	alice := newTestUser(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	minerPublicKey := base64.StdEncoding.EncodeToString(publicKey)
-	intent := testLifecycleIntent()
+	intent := testLifecycleIntentWithUser(alice.Addr)
 	intent.Receipts[0][0] = wire.MinerReceipt{
 		MinerAddress:   "miner_lifecycle",
 		MinerPublicKey: minerPublicKey,
@@ -69,18 +73,20 @@ func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testin
 	}
 	store.data.Intents[intent.IntentID] = intent
 	store.data.Deals[intent.DealID] = intent.IntentID
-	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, LockedStorage: 10}
+	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, LockedStorage: gfTokens(10)}
 	store.data.Miners["miner_lifecycle"] = wire.MinerStats{
 		MinerAddress:  "miner_lifecycle",
 		PublicKey:     minerPublicKey,
 		Endpoint:      "http://miner",
 		CapacityBytes: 100,
 		UsedBytes:     32,
-		Stake:         10,
+		Stake:         gfTokens(10),
 		Status:        "active",
 	}
 
-	terminated, err := store.TerminateDeal(wire.TerminateDealRequest{IntentID: intent.IntentID, User: intent.User})
+	tdReq := wire.TerminateDealRequest{IntentID: intent.IntentID, User: intent.User}
+	signTerminateDeal(t, store, &tdReq, alice)
+	terminated, err := store.TerminateDeal(tdReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +102,7 @@ func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testin
 	if account := store.accountLocked(intent.User); account.Balance != 0 || account.LockedStorage != 0 {
 		t.Fatalf("expected locked storage burn (no refund), got %+v", account)
 	}
-	if terminated.BurnedFee != 10 {
+	if terminated.BurnedFee != gfTokens(10) {
 		t.Fatalf("expected 10 tokens burned, got %d", terminated.BurnedFee)
 	}
 
@@ -294,7 +300,8 @@ func TestDeleteTaskRetainsPhysicalShardWhenSharedByActiveIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	intentA := testLifecycleIntent()
+	alice := newTestUser(t)
+	intentA := testLifecycleIntentWithUser(alice.Addr)
 	intentA.IntentID = "intent_a"
 	intentA.DealID = "deal_a"
 	intentA.Receipts[0][0] = wire.MinerReceipt{
@@ -303,7 +310,7 @@ func TestDeleteTaskRetainsPhysicalShardWhenSharedByActiveIntent(t *testing.T) {
 		ShardHash:      "shared_shard",
 		ShardSize:      32,
 	}
-	intentB := testLifecycleIntent()
+	intentB := testLifecycleIntentWithUser(alice.Addr)
 	intentB.IntentID = "intent_b"
 	intentB.DealID = "deal_b"
 	intentB.Receipts[0][0] = wire.MinerReceipt{
@@ -314,9 +321,11 @@ func TestDeleteTaskRetainsPhysicalShardWhenSharedByActiveIntent(t *testing.T) {
 	}
 	store.data.Intents[intentA.IntentID] = intentA
 	store.data.Intents[intentB.IntentID] = intentB
-	store.data.Accounts[intentA.User] = wire.Account{Address: intentA.User, LockedStorage: 10}
+	store.data.Accounts[intentA.User] = wire.Account{Address: intentA.User, LockedStorage: gfTokens(10)}
 
-	resp, err := store.TerminateDeal(wire.TerminateDealRequest{IntentID: intentA.IntentID, User: intentA.User})
+	tdReq := wire.TerminateDealRequest{IntentID: intentA.IntentID, User: intentA.User}
+	signTerminateDeal(t, store, &tdReq, alice)
+	resp, err := store.TerminateDeal(tdReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,12 +343,13 @@ func TestDeleteTasksQueryFiltersByStatusAndIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	alice := newTestUser(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	minerPublicKey := base64.StdEncoding.EncodeToString(publicKey)
-	intent := testLifecycleIntent()
+	intent := testLifecycleIntentWithUser(alice.Addr)
 	intent.Receipts[0][0] = wire.MinerReceipt{
 		MinerAddress:   "miner_lifecycle",
 		MinerPublicKey: minerPublicKey,
@@ -347,15 +357,17 @@ func TestDeleteTasksQueryFiltersByStatusAndIntent(t *testing.T) {
 		ShardSize:      32,
 	}
 	store.data.Intents[intent.IntentID] = intent
-	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, LockedStorage: 10}
+	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, LockedStorage: gfTokens(10)}
 	store.data.Miners["miner_lifecycle"] = wire.MinerStats{
 		MinerAddress: "miner_lifecycle",
 		PublicKey:    minerPublicKey,
-		Stake:        10,
+		Stake:        gfTokens(10),
 		Status:       "active",
 		UsedBytes:    32,
 	}
-	terminated, err := store.TerminateDeal(wire.TerminateDealRequest{IntentID: intent.IntentID, User: intent.User})
+	tdReq := wire.TerminateDealRequest{IntentID: intent.IntentID, User: intent.User}
+	signTerminateDeal(t, store, &tdReq, alice)
+	terminated, err := store.TerminateDeal(tdReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +409,7 @@ func testLifecycleIntent() *Intent {
 			Erasure:          wire.ErasurePolicy{DataShards: 1, ParityShards: 0, ShardSize: 32},
 			Policy:           wire.StoragePolicy{Duration: int64(365 * 24 * time.Hour / time.Second)},
 			ExpiresAtUnix:    time.Now().Add(365 * 24 * time.Hour).Unix(),
-			LockedFee:        10,
+			LockedFee:        gfTokens(10),
 			Status:           wire.StatusFinalized,
 			StorageStatus:    wire.StorageStatusActive,
 			AccessStatus:     wire.AccessStatusPublic,

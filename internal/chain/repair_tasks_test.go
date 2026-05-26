@@ -8,7 +8,7 @@ import (
 )
 
 func TestCreateRepairTasksAssignsReplacementAndReservesCapacity(t *testing.T) {
-	store, miners, resp := setupCommittedAssignedIntent(t)
+	store, miners, resp, _ := setupCommittedAssignedIntent(t)
 	assignment := resp.Assignments[0]
 	oldMinerBefore := store.data.Miners[assignment.MinerAddress]
 
@@ -43,7 +43,7 @@ func TestCreateRepairTasksAssignsReplacementAndReservesCapacity(t *testing.T) {
 }
 
 func TestRepairCommitCompletesTaskAndMovesUsedBytes(t *testing.T) {
-	store, miners, resp := setupCommittedAssignedIntent(t)
+	store, miners, resp, alice := setupCommittedAssignedIntent(t)
 	oldAssignment := resp.Assignments[0]
 	repair, err := store.CreateRepairTasks(wire.CreateRepairRequest{
 		IntentID:          resp.IntentID,
@@ -55,13 +55,15 @@ func TestRepairCommitCompletesTaskAndMovesUsedBytes(t *testing.T) {
 	task := repair.Tasks[0]
 	oldMinerBefore := store.data.Miners[oldAssignment.MinerAddress]
 	newMinerBefore := store.data.Miners[task.Assignment.MinerAddress]
-	receipt := testAssignmentReceipt(t, resp.IntentID, task.Assignment, miners[task.Assignment.MinerAddress])
+	receipt := testAssignmentReceipt(t, resp.IntentID, task.Assignment, miners[task.Assignment.MinerAddress], alice.Addr)
 
-	if _, err := store.BatchCommit(wire.BatchCommitRequest{
+	bcReq := wire.BatchCommitRequest{
 		IntentID: resp.IntentID,
-		User:     "alice",
+		User:     alice.Addr,
 		Receipts: []wire.MinerReceipt{receipt},
-	}); err != nil {
+	}
+	signBatchCommit(t, store, &bcReq, alice)
+	if _, err := store.BatchCommit(bcReq); err != nil {
 		t.Fatal(err)
 	}
 	oldMinerAfter := store.data.Miners[oldAssignment.MinerAddress]
@@ -87,7 +89,7 @@ func TestRepairCommitCompletesTaskAndMovesUsedBytes(t *testing.T) {
 }
 
 func TestFinalizeEpochCreatesRepairTaskForMissedProof(t *testing.T) {
-	store, _, resp := setupCommittedAssignedIntent(t)
+	store, _, resp, _ := setupCommittedAssignedIntent(t)
 	intent := store.data.Intents[resp.IntentID]
 	intent.Status = wire.StatusFinalized
 	intent.DealID = "deal_auto_repair"
@@ -146,7 +148,7 @@ func TestFinalizeEpochCreatesRepairTaskForMissedProof(t *testing.T) {
 }
 
 func TestRepairPlanIncludesPendingRepairTasks(t *testing.T) {
-	store, _, resp := setupCommittedAssignedIntent(t)
+	store, _, resp, _ := setupCommittedAssignedIntent(t)
 	assignment := resp.Assignments[0]
 	repair, err := store.CreateRepairTasks(wire.CreateRepairRequest{
 		IntentID:          resp.IntentID,
@@ -164,7 +166,7 @@ func TestRepairPlanIncludesPendingRepairTasks(t *testing.T) {
 	}
 }
 
-func setupCommittedAssignedIntent(t *testing.T) (*Store, map[string]testMinerIdentity, wire.CreateIntentResponse) {
+func setupCommittedAssignedIntent(t *testing.T) (*Store, map[string]testMinerIdentity, wire.CreateIntentResponse, testUser) {
 	t.Helper()
 	store, err := OpenStore("")
 	if err != nil {
@@ -175,32 +177,50 @@ func setupCommittedAssignedIntent(t *testing.T) (*Store, map[string]testMinerIde
 		"miner_b": registerTestMiner(t, store, "miner_b", "http://miner-b", 10),
 		"miner_c": registerTestMiner(t, store, "miner_c", "http://miner-c", 10),
 	}
-	store.data.Accounts["alice"] = wire.Account{Address: "alice", Balance: 10}
-	resp, err := store.CreateIntent(testRepairIntentRequest())
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(10))
+	resp, err := store.CreateIntent(testRepairIntentRequest(t, store, alice))
 	if err != nil {
 		t.Fatal(err)
 	}
 	receipts := make([]wire.MinerReceipt, 0, len(resp.Assignments))
 	for _, assignment := range resp.Assignments {
-		receipts = append(receipts, testAssignmentReceipt(t, resp.IntentID, assignment, miners[assignment.MinerAddress]))
+		receipts = append(receipts, testAssignmentReceipt(t, resp.IntentID, assignment, miners[assignment.MinerAddress], alice.Addr))
 	}
-	if _, err := store.BatchCommit(wire.BatchCommitRequest{
+	bcReq := wire.BatchCommitRequest{
 		IntentID: resp.IntentID,
-		User:     "alice",
+		User:     alice.Addr,
 		Receipts: receipts,
-	}); err != nil {
+	}
+	signBatchCommit(t, store, &bcReq, alice)
+	if _, err := store.BatchCommit(bcReq); err != nil {
 		t.Fatal(err)
 	}
-	return store, miners, resp
+	return store, miners, resp, alice
 }
 
-func testRepairIntentRequest() wire.CreateIntentRequest {
-	req := testAssignedIntentRequest(0)
-	req.Erasure = wire.ErasurePolicy{DataShards: 2, ParityShards: 1}
-	req.Segments[0].ShardHashes = []string{
-		"shard-a",
-		"shard-b",
-		"shard-c",
+func testRepairIntentRequest(t *testing.T, store *Store, u testUser) wire.CreateIntentRequest {
+	t.Helper()
+	req := wire.CreateIntentRequest{
+		User:         u.Addr,
+		FileName:     "file.bin",
+		FileSize:     6,
+		SegmentSize:  6,
+		FileRoot:     "file-root",
+		SegmentRoots: []string{"segment-root"},
+		Segments: []wire.SegmentPlan{{
+			SegmentID:   0,
+			SegmentRoot: "segment-root",
+			ShardHashes: []string{
+				"shard-a",
+				"shard-b",
+				"shard-c",
+			},
+		}},
+		Erasure:      wire.ErasurePolicy{DataShards: 2, ParityShards: 1},
+		Policy:       wire.StoragePolicy{Duration: int64(30 * 24 * time.Hour / time.Second)},
+		DeadlineUnix: time.Now().Add(time.Hour).Unix(),
 	}
+	signCreateIntent(t, store, &req, u)
 	return req
 }
