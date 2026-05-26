@@ -172,10 +172,13 @@ func setupCommittedAssignedIntent(t *testing.T) (*Store, map[string]testMinerIde
 	if err != nil {
 		t.Fatal(err)
 	}
+	mA := registerTestMiner(t, store, "miner_a", "http://miner-a", 10)
+	mB := registerTestMiner(t, store, "miner_b", "http://miner-b", 10)
+	mC := registerTestMiner(t, store, "miner_c", "http://miner-c", 10)
 	miners := map[string]testMinerIdentity{
-		"miner_a": registerTestMiner(t, store, "miner_a", "http://miner-a", 10),
-		"miner_b": registerTestMiner(t, store, "miner_b", "http://miner-b", 10),
-		"miner_c": registerTestMiner(t, store, "miner_c", "http://miner-c", 10),
+		mA.Address: mA,
+		mB.Address: mB,
+		mC.Address: mC,
 	}
 	alice := newTestUser(t)
 	fundAccount(store, alice.Addr, gfTokens(10))

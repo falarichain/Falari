@@ -2,15 +2,21 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"os"
 	"strings"
 	"time"
 
+	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,32 +36,30 @@ func main() {
 	log.Println("Connected to database. Seeding mock data...")
 
 	// Clear existing data
-	pool.Exec(ctx, `TRUNCATE TABLE daily_stats, storage_proofs, proof_epochs, shard_assignments, intents, transactions, blocks, accounts, miners, validators CASCADE`)
+	pool.Exec(ctx, `TRUNCATE TABLE daily_stats, storage_proofs, proof_epochs, shard_assignments, intents, transactions, blocks, accounts, miners, validators, unbonding_entries CASCADE`)
 	pool.Exec(ctx, `INSERT INTO sync_state (key, value) VALUES ('latest_height', '0') ON CONFLICT (key) DO UPDATE SET value = '0'`)
 
 	now := time.Now().Unix()
 	daySec := int64(86400)
 
-	// ====== Addresses ======
-	accounts := []struct{ addr, pk string }{
-		{"falari1q8hckq0v4l7dj9y8ldx2wzfjw9kxpq3lqp9x50", "ed25519pub1a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0"},
-		{"falari1p9ms8vrl7t8xq5n4z9qedwxy6h7a5s3d2f1g0a", "ed25519pub1b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9b1"},
-		{"falari1qve9f3l8d8k2j7h6g5f4e3d2c1b0a9z8y7x6w", "ed25519pub1c1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9c2"},
-		{"falari1m4n5b6v7c8x9z0a1s2d3f4g5h6j7k8l9p0q1w", "ed25519pub1d1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9d3"},
-		{"falari1k2j3h4g5f6d7s8a9p0o9i8u7y6t5r4e3w2q1", "ed25519pub1e1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9e4"},
-		{"falari1z9x8c7v6b5n4m3a2s1d2f3g4h5j6k7l8p9o0", "ed25519pub1f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9f5"},
-		// Miner addresses
-		{"falari1miner01abcdefghijklmnopqrstuvwxyz", "ed25519pub1m01abcdefghijklmnopqrstuvwxyz0123456789ab"},
-		{"falari1miner02bcdefghijklmnopqrstuvwxyza", "ed25519pub1m02bcdefghijklmnopqrstuvwxyza0123456789bc"},
-		{"falari1miner03cdefghijklmnopqrstuvwxyzab", "ed25519pub1m03cdefghijklmnopqrstuvwxyzab0123456789cd"},
-		{"falari1miner04defghijklmnopqrstuvwxyzabc", "ed25519pub1m04defghijklmnopqrstuvwxyzabc0123456789de"},
-		{"falari1miner05efghijklmnopqrstuvwxyzabcd", "ed25519pub1m05efghijklmnopqrstuvwxyzabcd0123456789ef"},
-		// Validator addresses
-		{"falari1val01abcdefghijklmnopqrstuvwxyz", "ed25519pub1v01abcdefghijklmnopqrstuvwxyz0123456789fg"},
-		{"falari1val02bcdefghijklmnopqrstuvwxyza", "ed25519pub1v02bcdefghijklmnopqrstuvwxyza0123456789gh"},
-		{"falari1val03cdefghijklmnopqrstuvwxyzab", "ed25519pub1v03cdefghijklmnopqrstuvwxyzab0123456789hi"},
-		{"falari1val04defghijklmnopqrstuvwxyzabc", "ed25519pub1v04defghijklmnopqrstuvwxyzabc0123456789ij"},
-		{"falari1val05efghijklmnopqrstuvwxyzabcd", "ed25519pub1v05efghijklmnopqrstuvwxyzabcd0123456789jk"},
+	// ====== ECDSA key generation ======
+	keyNames := []string{
+		"user0", "user1", "user2", "user3", "user4", "user5",
+		"miner0", "miner1", "miner2", "miner3", "miner4",
+		"val0", "val1", "val2", "val3", "val4",
+		"val0_op", "val1_op", "val2_op", "val3_op", "val4_op",
+	}
+	keys := make([]*ecdsa.PrivateKey, len(keyNames))
+	for i, name := range keyNames {
+		keys[i] = deterministicKey(name)
+	}
+	type acct struct{ addr, pub string }
+	accounts := make([]acct, len(keyNames))
+	for i := range keyNames {
+		accounts[i] = acct{
+			addr: wire.AccountAddress(&keys[i].PublicKey),
+			pub:  wire.EncodeHex(ethcrypto.CompressPubkey(&keys[i].PublicKey)),
+		}
 	}
 
 	// ====== Accounts ======
@@ -65,89 +69,84 @@ func main() {
 			INSERT INTO accounts (address, public_key, balance, nonce, locked_stake, locked_storage, first_seen_height, last_updated_height)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (address) DO NOTHING
-		`, a.addr, a.pk, randomInt(1000000, 50000000), randomInt(0, 100), randomInt(0, 1000000), randomInt(0, 500000), 1, 20)
+		`, a.addr, a.pub, randomInt(1000000, 50000000), randomInt(0, 100), randomInt(0, 1000000), randomInt(0, 500000), 1, 20)
 		if err != nil {
 			log.Fatalf("Insert account: %v", err)
 		}
 	}
 	log.Printf("  -> %d accounts", len(accounts))
 
-	// ====== Miners ======
+	// ====== Miners (accounts 6..10) ======
 	log.Println("Inserting miners...")
-	miners := []string{"falari1miner01abcdefghijklmnopqrstuvwxyz", "falari1miner02bcdefghijklmnopqrstuvwxyza", "falari1miner03cdefghijklmnopqrstuvwxyzab", "falari1miner04defghijklmnopqrstuvwxyzabc", "falari1miner05efghijklmnopqrstuvwxyzabcd"}
 	minerEndpoints := []string{"https://node1.falari.io:9090", "https://node2.falari.io:9090", "https://node3.falari.io:9090", "https://node4.falari.io:9090", "https://node5.falari.io:9090"}
-	minerPKs := []string{"ed25519pub1m01", "ed25519pub1m02", "ed25519pub1m03", "ed25519pub1m04", "ed25519pub1m05"}
 	minerStatuses := []string{"active", "active", "active", "maintenance", "active"}
 
-	for i, addr := range miners {
-		pk := minerPKs[i]
-		ep := minerEndpoints[i]
-		st := minerStatuses[i]
+	for i := 0; i < 5; i++ {
+		m := accounts[6+i]
 		_, err := pool.Exec(ctx, `
 			INSERT INTO miners (miner_address, public_key, endpoint, capacity_bytes, used_bytes, reserved_bytes, stake, status,
 				proof_success, proof_failure, consecutive_failures, rewards, storage_rewards, retrieval_success, retrieval_bytes, retrieval_rewards, repair_rewards, slashed,
 				effective_weight, speed_score, anti_spam_score, registered_at_unix, last_seen_unix)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 			ON CONFLICT (miner_address) DO NOTHING
-		`, addr, pk, ep,
-			randomInt64(500000000000, 2000000000000), // capacity 500GB-2TB
-			randomInt64(100000000000, 1500000000000), // used
-			randomInt64(10000000000, 100000000000),  // reserved
-			randomInt64(100000000, 10000000000),     // stake
-			st,
-			randomInt64(100, 5000), // proof_success
-			randomInt64(0, 50),     // proof_failure
-			int64(i*2),             // consecutive_failures
-			randomInt64(1000000, 50000000), // rewards
-			randomInt64(1000000, 30000000), // storage_rewards
-			randomInt64(50, 1000),          // retrieval_success
-			randomInt64(500000000, 50000000000), // retrieval_bytes
-			randomInt64(500000, 10000000),       // retrieval_rewards
-			randomInt64(100000, 5000000),        // repair_rewards
-			randomInt64(0, 2000000),             // slashed
-			randomInt64(50, 100),    // effective_weight
-			randomInt64(70, 100),    // speed_score
-			randomInt64(80, 100),    // anti_spam_score
-			now-int64(30+daysAgo(i*5)), // registered_at
-			now-int64(i*2*3600),        // last_seen
+		`, m.addr, m.pub, minerEndpoints[i],
+			randomInt64(500000000000, 2000000000000),
+			randomInt64(100000000000, 1500000000000),
+			randomInt64(10000000000, 100000000000),
+			randomInt64(100000000, 10000000000),
+			minerStatuses[i],
+			randomInt64(100, 5000),
+			randomInt64(0, 50),
+			int64(i*2),
+			randomInt64(1000000, 50000000),
+			randomInt64(1000000, 30000000),
+			randomInt64(50, 1000),
+			randomInt64(500000000, 50000000000),
+			randomInt64(500000, 10000000),
+			randomInt64(100000, 5000000),
+			randomInt64(0, 2000000),
+			randomInt64(50, 100),
+			randomInt64(70, 100),
+			randomInt64(80, 100),
+			now-int64(30+daysAgo(i*5)),
+			now-int64(i*2*3600),
 		)
 		if err != nil {
 			log.Fatalf("Insert miner: %v", err)
 		}
 	}
-	log.Printf("  -> %d miners", len(miners))
+	log.Println("  -> 5 miners")
 
-	// ====== Validators ======
+	// ====== Validators (accounts 11..15, operators 16..20) ======
 	log.Println("Inserting validators...")
-	validators := []string{"falari1val01abcdefghijklmnopqrstuvwxyz", "falari1val02bcdefghijklmnopqrstuvwxyza", "falari1val03cdefghijklmnopqrstuvwxyzab", "falari1val04defghijklmnopqrstuvwxyzabc", "falari1val05efghijklmnopqrstuvwxyzabcd"}
-	valPKs := []string{"ed25519pub1v01", "ed25519pub1v02", "ed25519pub1v03", "ed25519pub1v04", "ed25519pub1v05"}
-	for i, addr := range validators {
-		pk := valPKs[i]
-		consensus := i < 3 // first 3 in consensus
+	for i := 0; i < 5; i++ {
+		owner := accounts[11+i]
+		operator := accounts[16+i]
+		consensus := i < 3
 		_, err := pool.Exec(ctx, `
-			INSERT INTO validators (validator_address, public_key, endpoint, stake, delegated_stake, self_stake, status, consensus,
+			INSERT INTO validators (owner_address, operator_address, operator_public_key, endpoint, stake, delegated_stake, self_stake, status, consensus,
 				produced_blocks, slashed, evidence_count, delegator_count, rewards, delegation_rewards, registered_at_unix)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-			ON CONFLICT (validator_address) DO NOTHING
-		`, addr, pk, fmt.Sprintf("https://val%d.falari.io:26657", i+1),
-			randomInt64(500000000, 10000000000),    // stake
-			randomInt64(100000000, 5000000000),     // delegated_stake
-			randomInt64(400000000, 5000000000),     // self_stake
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			ON CONFLICT (owner_address) DO NOTHING
+		`, owner.addr, operator.addr, operator.pub, fmt.Sprintf("https://val%d.falari.io:26657", i+1),
+			randomInt64(500000000, 10000000000),
+			randomInt64(100000000, 5000000000),
+			randomInt64(400000000, 5000000000),
 			"active",
 			consensus,
-			randomInt64(50, 5000),            // produced_blocks
-			randomInt64(0, 1000000),           // slashed
-			randomInt64(0, 5),                // evidence_count
-			randomInt(5, 50),                 // delegator_count
-			randomInt64(100000, 50000000),    // rewards
-			randomInt64(50000, 20000000),     // delegation_rewards
+			randomInt64(50, 5000),
+			randomInt64(0, 1000000),
+			randomInt64(0, 5),
+			randomInt(5, 50),
+			randomInt64(100000, 50000000),
+			randomInt64(50000, 20000000),
 			now-int64(60+daysAgo(i*3)),
 		)
 		if err != nil {
 			log.Fatalf("Insert validator: %v", err)
 		}
 	}
-	log.Printf("  -> %d validators", len(validators))
+	log.Println("  -> 5 validators")
 
 	// ====== Intents ======
 	log.Println("Inserting intents...")
@@ -200,19 +199,18 @@ func main() {
 
 	// ====== Blocks ======
 	log.Println("Inserting blocks...")
-	producers := []string{"falari1val01abcdefghijklmnopqrstuvwxyz", "falari1val02bcdefghijklmnopqrstuvwxyza", "falari1val03cdefghijklmnopqrstuvwxyzab"}
 	blockIDs := make([]int64, 0)
 	for i := int64(1); i <= 20; i++ {
 		blockTime := now - (21-i)*int64(10) // 10s apart
-		producer := producers[int(i)%len(producers)]
-		txCount := int64(3 + randIntN(6)) // 3-8 txs per block
+		valIdx := 11 + int(i)%3              // first 3 validators are producers
+		txCount := int64(3 + randIntN(6))    // 3-8 txs per block
 		_, err := pool.Exec(ctx, `
 			INSERT INTO blocks (height, hash, prev_hash, round, time_unix, tx_root, state_root, receipts_root,
 				producer_address, producer_public_key, signature, finalized, voting_power, total_power, tx_count)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (height) DO NOTHING
 		`, i, randomHash(), randomHash(), i, blockTime, randomHash(), randomHash(), randomHash(),
-			producer, "ed25519pub1v0"+fmt.Sprint((i%5)+1), randomHex(128), true,
+			accounts[valIdx].addr, accounts[valIdx].pub, randomHex(128), true,
 			randomInt64(50000, 100000), 100000, txCount)
 		if err != nil {
 			log.Fatalf("Insert block %d: %v", i, err)
@@ -225,9 +223,9 @@ func main() {
 	log.Println("Inserting transactions...")
 	txTypes := []string{"transfer", "create_intent", "batch_commit", "register_miner", "register_validator", "finalize", "stake", "unstake"}
 	type txPlan struct {
-		txType string
-		from   string
-		to     string
+		txType  string
+		from    string
+		to      string
 		payload map[string]interface{}
 	}
 	var txPlans []txPlan
@@ -257,17 +255,17 @@ func main() {
 					"shard_size":    randomInt64(65536, 16777216),
 				}
 			case "register_miner":
-				minerAddr := miners[randIntN(len(miners))]
+				mi := 6 + randIntN(5)
 				plan.payload = map[string]interface{}{
-					"miner_address": minerAddr,
+					"miner_address": accounts[mi].addr,
 					"endpoint":      minerEndpoints[randIntN(len(minerEndpoints))],
 					"capacity":      randomInt64(100000000000, 2000000000000),
 					"stake":         randomInt64(10000000, 1000000000),
 				}
 			case "register_validator":
-				valAddr := validators[randIntN(len(validators))]
+				vi := 11 + randIntN(5)
 				plan.payload = map[string]interface{}{
-					"address":  valAddr,
+					"address":  accounts[vi].addr,
 					"endpoint": fmt.Sprintf("https://val%d.falari.io:26657", randIntN(5)+1),
 					"stake":    randomInt64(100000000, 5000000000),
 				}
@@ -282,9 +280,9 @@ func main() {
 				intentIdx := randIntN(len(intentIDs))
 				plan.payload = map[string]interface{}{"intent_id": intentIDs[intentIdx]}
 			case "stake":
-				plan.payload = map[string]interface{}{"amount": randomInt64(1000000, 100000000), "validator": validators[randIntN(3)]}
+				plan.payload = map[string]interface{}{"amount": randomInt64(1000000, 100000000), "validator": accounts[11+randIntN(3)].addr}
 			case "unstake":
-				plan.payload = map[string]interface{}{"amount": randomInt64(500000, 50000000), "validator": validators[randIntN(5)]}
+				plan.payload = map[string]interface{}{"amount": randomInt64(500000, 50000000), "validator": accounts[11+randIntN(5)].addr}
 			}
 			txPlans = append(txPlans, plan)
 			txIdx++
@@ -324,12 +322,12 @@ func main() {
 		for seg := 0; seg < numSegments; seg++ {
 			numShards := 3 + randIntN(7)
 			for sh := 0; sh < numShards; sh++ {
-				miner := miners[randIntN(len(miners))]
+				minerAddr := accounts[6+randIntN(5)].addr
 				_, err := pool.Exec(ctx, `
 					INSERT INTO shard_assignments (intent_id, segment_id, shard_index, miner_address, miner_endpoint, shard_hash, shard_cid, shard_size, committed, committed_at)
 					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 					ON CONFLICT (intent_id, segment_id, shard_index) DO NOTHING
-				`, intentID, seg, sh, miner, "https://miner.falari.io:9090", randomHash(),
+				`, intentID, seg, sh, minerAddr, "https://miner.falari.io:9090", randomHash(),
 					"bafybei"+randomHex(40), randomInt64(65536, 16777216),
 					randIntN(2) == 1, time.Now().Add(-time.Duration(randIntN(72))*time.Hour))
 				if err != nil {
@@ -368,12 +366,12 @@ func main() {
 	for i := 0; i < 30; i++ {
 		challengeID := "CHALL-" + randomHex(16)
 		intentID := intentIDs[randIntN(len(intentIDs))]
-		miner := miners[randIntN(len(miners))]
+		minerAddr := accounts[6+randIntN(5)].addr
 		status := []string{"accepted", "accepted", "accepted", "accepted", "rejected", "missed", "pending"}[randIntN(7)]
 		_, err := pool.Exec(ctx, `
 			INSERT INTO storage_proofs (challenge_id, epoch_id, intent_id, miner_address, shard_hash, proof_type, status, reward, slashed, submitted_at_unix)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		`, challengeID, "EPOCH-"+randomHex(12), intentID, miner, randomHash(),
+		`, challengeID, "EPOCH-"+randomHex(12), intentID, minerAddr, randomHash(),
 			[]string{"spacetime", "merkle", "zk-snark", "zak"}[randIntN(4)],
 			status,
 			randomInt64(1000, 100000), randomInt64(0, 50000),
@@ -411,8 +409,8 @@ func main() {
 	log.Println("Mock data seeding complete!")
 	log.Println("==============================")
 	log.Printf("  Accounts:    %d", len(accounts))
-	log.Printf("  Miners:      %d", len(miners))
-	log.Printf("  Validators:  %d", len(validators))
+	log.Printf("  Miners:      5")
+	log.Printf("  Validators:  5")
 	log.Printf("  Intents:     %d", len(intentsData))
 	log.Printf("  Blocks:      20")
 	log.Printf("  Txs:         %d", len(txPlans))
@@ -420,6 +418,20 @@ func main() {
 	log.Printf("  Proofs:      30")
 	log.Printf("  Epochs:      8")
 	log.Printf("  Daily Stats: 7")
+}
+
+// deterministicKey generates a reproducible ECDSA private key from a seed string.
+func deterministicKey(seed string) *ecdsa.PrivateKey {
+	h := sha256.Sum256([]byte(seed))
+	k := new(big.Int).SetBytes(h[:])
+	curve := ethcrypto.S256()
+	k.Mod(k, new(big.Int).Sub(curve.Params().N, big.NewInt(1)))
+	k.Add(k, big.NewInt(1))
+	key, err := ethcrypto.ToECDSA(k.Bytes())
+	if err != nil {
+		log.Fatalf("deterministic key from %q: %v", seed, err)
+	}
+	return key
 }
 
 func randomHash() string {

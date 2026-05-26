@@ -2,6 +2,7 @@ package chain
 
 import (
 	"errors"
+	"strconv"
 	"time"
 
 	"chain/internal/wire"
@@ -28,6 +29,9 @@ func (s *Store) DelegateStake(req wire.DelegateStakeRequest) (wire.DelegateStake
 	}
 	if req.Amount == 0 {
 		return wire.DelegateStakeResponse{}, errors.New("delegate amount must be positive")
+	}
+	if req.Amount < wire.MinDelegationAmount {
+		return wire.DelegateStakeResponse{}, errors.New("delegate amount is below minimum (1000 tokens)")
 	}
 
 	s.mu.Lock()
@@ -136,8 +140,23 @@ func (s *Store) UndelegateStake(req wire.UndelegateStakeRequest) (wire.Undelegat
 
 	s.consumeAccountNonceLocked(req.Delegator)
 	account := s.accountLocked(req.Delegator)
-	account.Balance += released
+	account.UnbondingBalance += released
 	s.data.Accounts[req.Delegator] = account
+
+	// Create unbonding entry with 7-day lock.
+	now := time.Now().Unix()
+	unbondingID := req.Delegator + ":" + req.Validator + ":" + strconv.FormatInt(now, 10)
+	if s.data.UnbondingEntries == nil {
+		s.data.UnbondingEntries = map[string]wire.UnbondingEntry{}
+	}
+	s.data.UnbondingEntries[unbondingID] = wire.UnbondingEntry{
+		ID:            unbondingID,
+		Delegator:     req.Delegator,
+		Validator:     req.Validator,
+		Amount:        released,
+		CreatedAtUnix: now,
+		MaturesAtUnix: now + wire.UnbondingPeriodSeconds,
+	}
 
 	validator := s.validatorLocked(req.Validator)
 	if validator.DelegatedStake >= released {
@@ -241,8 +260,23 @@ func (s *Store) applyUndelegateStakeLocked(payload undelegateStakeTxPayload) err
 		s.data.StakeDelegations[key] = existing
 	}
 	account := s.accountLocked(req.Delegator)
-	account.Balance += req.Amount
+	account.UnbondingBalance += req.Amount
 	s.data.Accounts[req.Delegator] = account
+
+	// Create unbonding entry during replay.
+	now := time.Now().Unix()
+	unbondingID := req.Delegator + ":" + req.Validator + ":" + strconv.FormatInt(now, 10)
+	if s.data.UnbondingEntries == nil {
+		s.data.UnbondingEntries = map[string]wire.UnbondingEntry{}
+	}
+	s.data.UnbondingEntries[unbondingID] = wire.UnbondingEntry{
+		ID:            unbondingID,
+		Delegator:     req.Delegator,
+		Validator:     req.Validator,
+		Amount:        req.Amount,
+		CreatedAtUnix: now,
+		MaturesAtUnix: now + wire.UnbondingPeriodSeconds,
+	}
 	validator := s.validatorLocked(req.Validator)
 	if validator.DelegatedStake >= req.Amount {
 		validator.DelegatedStake -= req.Amount
@@ -296,4 +330,91 @@ func (s *Store) syncMinerDelegatorCountLocked(address string, count int) {
 	}
 	miner.DelegatorCount = count
 	s.data.Miners[address] = miner
+}
+
+// ListUnbonding returns all unbonding entries for a given delegator address.
+func (s *Store) ListUnbonding(delegator string) []wire.UnbondingEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	norm := wire.NormalizeAddress(delegator)
+	var result []wire.UnbondingEntry
+	for _, e := range s.data.UnbondingEntries {
+		if wire.NormalizeAddress(e.Delegator) == norm {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// processMaturedUnbondingEntriesLocked moves matured unbonding entries from
+// UnbondingBalance to Balance. Called during epoch rotation.
+func (s *Store) processMaturedUnbondingEntriesLocked() {
+	now := time.Now().Unix()
+	for id, entry := range s.data.UnbondingEntries {
+		if now < entry.MaturesAtUnix {
+			continue
+		}
+		account := s.accountLocked(entry.Delegator)
+		if account.UnbondingBalance >= entry.Amount {
+			account.UnbondingBalance -= entry.Amount
+		} else {
+			account.UnbondingBalance = 0
+		}
+		account.Balance += entry.Amount
+		s.data.Accounts[entry.Delegator] = account
+		delete(s.data.UnbondingEntries, id)
+	}
+}
+
+// RotateOperator changes the operator key for an existing validator.
+// The owner signs the rotation and the new operator provides proof-of-possession.
+func (s *Store) RotateOperator(req wire.RotateOperatorRequest) (wire.RotateOperatorResponse, error) {
+	req.OwnerAddress = wire.NormalizeAddress(req.OwnerAddress)
+	req.NewOperatorAddress = wire.NormalizeAddress(req.NewOperatorAddress)
+
+	if req.OwnerAddress == "" || req.NewOperatorAddress == "" || req.NewOperatorPublicKey == "" {
+		return wire.RotateOperatorResponse{}, errors.New("owner_address, new_operator_address, and new_operator_public_key are required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.verifyAccountRequestLocked("", req.OwnerAddress, req.Nonce, func() error {
+		return wire.VerifyRotateOperator(req)
+	}); err != nil {
+		return wire.RotateOperatorResponse{}, err
+	}
+
+	validator, ok := s.data.Validators[req.OwnerAddress]
+	if !ok {
+		return wire.RotateOperatorResponse{}, errors.New("validator not found for owner")
+	}
+
+	// Ensure the new operator address is not already in use.
+	if existingOwner, taken := s.data.OperatorMap[req.NewOperatorAddress]; taken && existingOwner != req.OwnerAddress {
+		return wire.RotateOperatorResponse{}, errors.New("new operator address is already registered to another owner")
+	}
+
+	// Remove old operator mapping.
+	delete(s.data.OperatorMap, validator.OperatorAddress)
+
+	// Update validator with new operator.
+	validator.OperatorAddress = req.NewOperatorAddress
+	validator.OperatorPublicKey = req.NewOperatorPublicKey
+	s.data.Validators[req.OwnerAddress] = validator
+
+	// Add new operator mapping.
+	s.data.OperatorMap[req.NewOperatorAddress] = req.OwnerAddress
+
+	s.consumeAccountNonceLocked(req.OwnerAddress)
+
+	if err := s.saveLocked(); err != nil {
+		return wire.RotateOperatorResponse{}, err
+	}
+	return wire.RotateOperatorResponse{
+		OwnerAddress:      req.OwnerAddress,
+		OperatorAddress:   req.NewOperatorAddress,
+		OperatorPublicKey: req.NewOperatorPublicKey,
+	}, nil
 }

@@ -55,7 +55,7 @@ func (s *Store) signLocalConsensusVote(block wire.Block, voteType string) (wire.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.blockProducer == nil {
+	if s.operatorIdentity == nil {
 		return wire.ConsensusVote{}, errLocalConsensusVoteUnavailable
 	}
 	if block.Height == 0 || block.Height > uint64(len(s.data.Blocks)) {
@@ -65,10 +65,10 @@ func (s *Store) signLocalConsensusVote(block wire.Block, voteType string) (wire.
 	if localBlock.Hash != block.Hash {
 		return wire.ConsensusVote{}, errLocalConsensusVoteUnavailable
 	}
-	if !s.data.ConsensusValidators[s.blockProducer.Address] {
+	if !s.data.ConsensusValidators[s.operatorIdentity.OwnerAddress] {
 		return wire.ConsensusVote{}, errLocalConsensusVoteUnavailable
 	}
-	power := s.validatorPowerLocked(s.blockProducer.Address)
+	power := s.validatorPowerLocked(s.operatorIdentity.OwnerAddress)
 	if power == 0 {
 		return wire.ConsensusVote{}, errLocalConsensusVoteUnavailable
 	}
@@ -77,11 +77,11 @@ func (s *Store) signLocalConsensusVote(block wire.Block, voteType string) (wire.
 		Round:              block.Round,
 		Type:               voteType,
 		BlockHash:          block.Hash,
-		ValidatorAddress:   s.blockProducer.Address,
-		ValidatorPublicKey: s.blockProducer.PublicKeyBase64(),
+		ValidatorAddress:   s.operatorIdentity.OperatorAddress,
+		ValidatorPublicKey: s.operatorIdentity.OperatorPublicKeyHex(),
 		Power:              power,
 	}
-	if err := wire.SignConsensusVote(&vote, s.blockProducer.PrivateKey); err != nil {
+	if err := wire.SignConsensusVote(&vote, s.operatorIdentity.OperatorPrivateKey); err != nil {
 		return wire.ConsensusVote{}, err
 	}
 	return vote, nil

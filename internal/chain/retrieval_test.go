@@ -1,9 +1,6 @@
 package chain
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"testing"
 	"time"
 
@@ -22,19 +19,19 @@ func TestSubmitRetrievalReceiptRecordsAccessTelemetryWithoutPayingStorageMiner(t
 		t.Fatal(err)
 	}
 	user := wire.AccountAddress(&clientKey.PublicKey)
-	minerPublicKey, minerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	minerKey, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	minerAddress := "retrieval_miner"
-	minerPublicKeyBase64 := base64.StdEncoding.EncodeToString(minerPublicKey)
+	minerAddress := wire.AccountAddress(&minerKey.PublicKey)
+	minerPublicKey := wire.EncodeHex(ethcrypto.CompressPubkey(&minerKey.PublicKey))
 	shardHash := "shard_retrieval"
 
 	store.data.Accounts[user] = wire.Account{Address: user, LockedStorage: 5}
 	store.data.Accounts[minerAddress] = wire.Account{Address: minerAddress, LockedStake: 10}
 	store.data.Miners[minerAddress] = wire.MinerStats{
 		MinerAddress: minerAddress,
-		PublicKey:    minerPublicKeyBase64,
+		PublicKey:    minerPublicKey,
 		Stake:        10,
 		Status:       "active",
 	}
@@ -57,7 +54,7 @@ func TestSubmitRetrievalReceiptRecordsAccessTelemetryWithoutPayingStorageMiner(t
 					IntentID:       "intent_retrieval",
 					ShardHash:      shardHash,
 					MinerAddress:   "storage_miner",
-					MinerPublicKey: minerPublicKeyBase64,
+					MinerPublicKey: minerPublicKey,
 					ShardSize:      1024,
 				},
 			},
@@ -70,14 +67,14 @@ func TestSubmitRetrievalReceiptRecordsAccessTelemetryWithoutPayingStorageMiner(t
 		IntentID:       "intent_retrieval",
 		ShardHash:      shardHash,
 		MinerAddress:   minerAddress,
-		MinerPublicKey: minerPublicKeyBase64,
+		MinerPublicKey: minerPublicKey,
 		BytesServed:    2*1024*1024 + 1,
 		ServedAtUnix:   time.Now().Unix(),
 	}
 	if err := wire.SignRetrievalClientReceipt(&receipt, clientKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.SignRetrievalReceiptMiner(&receipt, minerPrivateKey); err != nil {
+	if err := wire.SignRetrievalReceiptMiner(&receipt, minerKey); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,16 +120,16 @@ func TestSubmitRetrievalReceiptRejectsBlockedIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	user := wire.AccountAddress(&clientKey.PublicKey)
-	minerPublicKey, minerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	minerKey, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	minerAddress := "retrieval_blocked_miner"
-	minerPublicKeyBase64 := base64.StdEncoding.EncodeToString(minerPublicKey)
+	minerAddress := wire.AccountAddress(&minerKey.PublicKey)
+	minerPublicKey := wire.EncodeHex(ethcrypto.CompressPubkey(&minerKey.PublicKey))
 	store.data.Accounts[minerAddress] = wire.Account{Address: minerAddress, LockedStake: 10}
 	store.data.Miners[minerAddress] = wire.MinerStats{
 		MinerAddress: minerAddress,
-		PublicKey:    minerPublicKeyBase64,
+		PublicKey:    minerPublicKey,
 		Stake:        10,
 		Status:       "active",
 	}
@@ -157,14 +154,14 @@ func TestSubmitRetrievalReceiptRejectsBlockedIntent(t *testing.T) {
 		IntentID:       "intent_blocked_retrieval",
 		ShardHash:      "blocked_shard",
 		MinerAddress:   minerAddress,
-		MinerPublicKey: minerPublicKeyBase64,
+		MinerPublicKey: minerPublicKey,
 		BytesServed:    1,
 		ServedAtUnix:   time.Now().Unix(),
 	}
 	if err := wire.SignRetrievalClientReceipt(&receipt, clientKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.SignRetrievalReceiptMiner(&receipt, minerPrivateKey); err != nil {
+	if err := wire.SignRetrievalReceiptMiner(&receipt, minerKey); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.SubmitRetrievalReceipt(wire.SubmitRetrievalReceiptRequest{Receipt: receipt}); err == nil {

@@ -2,8 +2,6 @@ package wire
 
 import (
 	"crypto/ecdsa"
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -12,16 +10,16 @@ import (
 )
 
 type retrievalReceiptClientPayload struct {
-	ReceiptID      string `json:"receipt_id"`
-	RequestID      string `json:"request_id"`
-	IntentID       string `json:"intent_id"`
-	ShardHash      string `json:"shard_hash"`
-	User           string `json:"user"`
+	BytesServed    uint64 `json:"bytes_served"`
 	ClientAddress  string `json:"client_address"`
+	IntentID       string `json:"intent_id"`
 	MinerAddress   string `json:"miner_address"`
 	MinerPublicKey string `json:"miner_public_key"`
-	BytesServed    uint64 `json:"bytes_served"`
+	ReceiptID      string `json:"receipt_id"`
+	RequestID      string `json:"request_id"`
 	ServedAtUnix   int64  `json:"served_at_unix"`
+	ShardHash      string `json:"shard_hash"`
+	User           string `json:"user"`
 }
 
 type retrievalReceiptMinerPayload struct {
@@ -84,12 +82,31 @@ func SignRetrievalClientReceipt(r *RetrievalReceipt, privateKey *ecdsa.PrivateKe
 	return nil
 }
 
-func SignRetrievalReceiptMiner(r *RetrievalReceipt, privateKey ed25519.PrivateKey) error {
-	payload, err := RetrievalMinerPayload(*r)
+func SignRetrievalReceiptMiner(r *RetrievalReceipt, privateKey *ecdsa.PrivateKey) error {
+	clientPayload := retrievalReceiptClientPayload{
+		ReceiptID:      r.ReceiptID,
+		RequestID:      r.RequestID,
+		IntentID:       r.IntentID,
+		ShardHash:      r.ShardHash,
+		User:           NormalizeAddress(r.User),
+		ClientAddress:  NormalizeAddress(r.ClientAddress),
+		MinerAddress:   r.MinerAddress,
+		MinerPublicKey: r.MinerPublicKey,
+		BytesServed:    r.BytesServed,
+		ServedAtUnix:   r.ServedAtUnix,
+	}
+	payload := retrievalReceiptMinerPayload{
+		retrievalReceiptClientPayload: clientPayload,
+		ClientSignature:               r.ClientSignature,
+	}
+	sig, pub, err := signInfraPayload(payload, privateKey)
 	if err != nil {
 		return err
 	}
-	r.MinerSignature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	r.MinerSignature = sig
+	if r.MinerPublicKey == "" {
+		r.MinerPublicKey = pub
+	}
 	return nil
 }
 
@@ -165,23 +182,21 @@ func VerifyRetrievalClientReceipt(r RetrievalReceipt) error {
 }
 
 func verifyRetrievalMinerSignature(r RetrievalReceipt) error {
-	publicKey, err := base64.StdEncoding.DecodeString(r.MinerPublicKey)
-	if err != nil {
-		return err
+	clientPayload := retrievalReceiptClientPayload{
+		ReceiptID:      r.ReceiptID,
+		RequestID:      r.RequestID,
+		IntentID:       r.IntentID,
+		ShardHash:      r.ShardHash,
+		User:           NormalizeAddress(r.User),
+		ClientAddress:  NormalizeAddress(r.ClientAddress),
+		MinerAddress:   r.MinerAddress,
+		MinerPublicKey: r.MinerPublicKey,
+		BytesServed:    r.BytesServed,
+		ServedAtUnix:   r.ServedAtUnix,
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid retrieval miner public key size")
+	payload := retrievalReceiptMinerPayload{
+		retrievalReceiptClientPayload: clientPayload,
+		ClientSignature:               r.ClientSignature,
 	}
-	signature, err := base64.StdEncoding.DecodeString(r.MinerSignature)
-	if err != nil {
-		return err
-	}
-	payload, err := RetrievalMinerPayload(r)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
-		return errors.New("invalid retrieval miner signature")
-	}
-	return nil
+	return verifyInfraSignature(r.MinerAddress, r.MinerSignature, payload)
 }

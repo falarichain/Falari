@@ -191,7 +191,7 @@ func (n *Node) deletePendingTasks(chainURL string) error {
 			IntentID:       task.IntentID,
 			ShardHash:      task.ShardHash,
 			MinerAddress:   n.address,
-			MinerPublicKey: n.PublicKeyBase64(),
+			MinerPublicKey: n.PublicKeyHex(),
 			DeletedAtUnix:  time.Now().Unix(),
 		}
 		if err := wire.SignDeleteReceipt(&receipt, n.privateKey); err != nil {

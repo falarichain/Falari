@@ -21,10 +21,11 @@ type GenesisAccount struct {
 }
 
 type GenesisValidator struct {
-	Address   string `json:"address"`
-	PublicKey string `json:"public_key"`
-	Endpoint  string `json:"endpoint"`
-	Stake     uint64 `json:"stake"`
+	OwnerAddress      string `json:"owner_address"`
+	OperatorAddress   string `json:"operator_address"`
+	OperatorPublicKey string `json:"operator_public_key"`
+	Endpoint          string `json:"endpoint"`
+	Stake             uint64 `json:"stake"`
 }
 
 type GenesisRewardPools struct {

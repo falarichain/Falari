@@ -7,10 +7,21 @@ import (
 
 	chaincrypto "chain/internal/crypto"
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
+func testNodeKey(t *testing.T) string {
+	t.Helper()
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire.EncodeHex(ethcrypto.FromECDSA(key))
+}
+
 func TestNodeProvesMultipleChallengeLeaves(t *testing.T) {
-	node, err := OpenNode(t.TempDir())
+	node, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +56,7 @@ func TestNodeProvesMultipleChallengeLeaves(t *testing.T) {
 		LeafIndices:      []int{0, 1, 3},
 		SampleCount:      3,
 		MinerAddress:     node.Address(),
-		MinerPublicKey:   node.PublicKeyBase64(),
+		MinerPublicKey:   node.PublicKeyHex(),
 		Nonce:            "nonce_storage_test",
 		ExpiresAtUnix:    time.Now().Add(time.Minute).Unix(),
 	}
@@ -67,7 +78,7 @@ func TestNodeProvesMultipleChallengeLeaves(t *testing.T) {
 }
 
 func TestNodeRejectsExpiredChallengeProof(t *testing.T) {
-	node, err := OpenNode(t.TempDir())
+	node, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +106,7 @@ func TestNodeRejectsExpiredChallengeProof(t *testing.T) {
 		LeafSize:         chaincrypto.DefaultLeafSize,
 		LeafIndex:        0,
 		MinerAddress:     node.Address(),
-		MinerPublicKey:   node.PublicKeyBase64(),
+		MinerPublicKey:   node.PublicKeyHex(),
 		Nonce:            "nonce_expired",
 		ExpiresAtUnix:    time.Now().Add(-time.Second).Unix(),
 	})
@@ -118,7 +129,7 @@ func TestValidateProofRequestRequiresChainChallengeFields(t *testing.T) {
 
 func TestNodeStatusCountsStoredShards(t *testing.T) {
 	resetProviderTransportMemoryForTests()
-	node, err := OpenNode(t.TempDir())
+	node, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +169,7 @@ func TestNodeStatusCountsStoredShards(t *testing.T) {
 }
 
 func TestNodeRejectsUploadWithoutChainWhenAuthorizationRequired(t *testing.T) {
-	node, err := OpenNode(t.TempDir())
+	node, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +193,7 @@ func TestNodeRejectsUploadWithoutChainWhenAuthorizationRequired(t *testing.T) {
 }
 
 func TestNodeReadsStoredShardByCID(t *testing.T) {
-	node, err := OpenNode(t.TempDir())
+	node, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +224,7 @@ func TestNodeReadsStoredShardByCID(t *testing.T) {
 
 func TestNodeStatusIncludesRecentProviderMemories(t *testing.T) {
 	resetProviderTransportMemoryForTests()
-	node, err := OpenNode(t.TempDir())
+	node, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}

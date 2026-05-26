@@ -50,7 +50,9 @@ func (s *Store) applyValidatorEvidenceLocked(evidence wire.ValidatorEvidence) (b
 	if err := s.validateValidatorEvidenceLocked(evidence); err != nil {
 		return false, err
 	}
-	account := s.accountLocked(evidence.ValidatorAddress)
+	// Evidence.ValidatorAddress is the operator address; resolve to owner for slashing.
+	ownerAddr := s.resolveOperatorToOwner(evidence.ValidatorAddress)
+	account := s.accountLocked(ownerAddr)
 	slash := evidence.Slashed
 	if slash > account.LockedStake {
 		return false, errors.New("validator evidence slash exceeds locked stake")
@@ -59,15 +61,15 @@ func (s *Store) applyValidatorEvidenceLocked(evidence wire.ValidatorEvidence) (b
 	s.data.Accounts[account.Address] = account
 	s.addSlashedToRepairPoolLocked(slash)
 
-	validator := s.validatorLocked(evidence.ValidatorAddress)
+	validator := s.validatorLocked(ownerAddr)
 	validator.Stake = account.LockedStake
 	validator.Slashed += slash
 	validator.EvidenceCount++
 	if validator.Stake == 0 {
 		validator.Status = wire.ValidatorStatusSlashed
-		delete(s.data.ConsensusValidators, validator.Address)
+		delete(s.data.ConsensusValidators, ownerAddr)
 	}
-	s.data.Validators[validator.Address] = validator
+	s.data.Validators[ownerAddr] = validator
 	s.data.ValidatorEvidence[evidence.EvidenceID] = evidence
 	return true, nil
 }
@@ -114,11 +116,13 @@ func (s *Store) validateValidatorEvidenceLocked(evidence wire.ValidatorEvidence)
 	if evidence.EvidenceID != expectedID {
 		return errors.New("validator evidence id mismatch")
 	}
-	validator, ok := s.data.Validators[evidence.ValidatorAddress]
+	// Resolve operator address to owner.
+	ownerAddr := s.resolveOperatorToOwner(evidence.ValidatorAddress)
+	validator, ok := s.data.Validators[ownerAddr]
 	if !ok {
 		return errors.New("validator evidence target is not registered")
 	}
-	if validator.PublicKey != evidence.ValidatorPublicKey {
+	if validator.OperatorPublicKey != evidence.ValidatorPublicKey {
 		return errors.New("validator evidence public key mismatch")
 	}
 	if validator.Status != wire.ValidatorStatusActive {
@@ -127,7 +131,7 @@ func (s *Store) validateValidatorEvidenceLocked(evidence wire.ValidatorEvidence)
 	if validatorPower(validator) != evidence.Power {
 		return errors.New("validator evidence power mismatch")
 	}
-	if evidence.Slashed != validatorDoubleVoteSlashLocked(s.accountLocked(evidence.ValidatorAddress)) {
+	if evidence.Slashed != validatorDoubleVoteSlashLocked(s.accountLocked(ownerAddr)) {
 		return errors.New("validator evidence slash mismatch")
 	}
 	return nil
@@ -179,11 +183,13 @@ func (s *Store) buildDoubleVoteEvidence(req wire.SubmitValidatorEvidenceRequest)
 	if existing, exists := s.data.ValidatorEvidence[evidenceID]; exists {
 		return existing, nil
 	}
-	validator, ok := s.data.Validators[voteA.ValidatorAddress]
+	// Resolve operator address to owner.
+	ownerAddr := s.resolveOperatorToOwner(voteA.ValidatorAddress)
+	validator, ok := s.data.Validators[ownerAddr]
 	if !ok || validator.Status != wire.ValidatorStatusActive {
 		return wire.ValidatorEvidence{}, errors.New("double vote evidence target is not an active validator")
 	}
-	if validator.PublicKey != voteA.ValidatorPublicKey {
+	if validator.OperatorPublicKey != voteA.ValidatorPublicKey {
 		return wire.ValidatorEvidence{}, errors.New("double vote evidence public key mismatch")
 	}
 	if validatorPower(validator) != voteA.Power {
@@ -200,7 +206,7 @@ func (s *Store) buildDoubleVoteEvidence(req wire.SubmitValidatorEvidenceRequest)
 		SecondBlockHash:    voteB.BlockHash,
 		FirstSignature:     voteA.Signature,
 		SecondSignature:    voteB.Signature,
-		Slashed:            validatorDoubleVoteSlashLocked(s.accountLocked(voteA.ValidatorAddress)),
+		Slashed:            validatorDoubleVoteSlashLocked(s.accountLocked(ownerAddr)),
 		CreatedAtUnix:      time.Now().Unix(),
 	}
 	return evidence, nil

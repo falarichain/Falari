@@ -97,18 +97,18 @@ func (s *Store) AcceptTransaction(tx wire.Transaction) (bool, error) {
 func (s *Store) ProduceBlock() (wire.ProduceBlockResponse, error) {
 	s.mu.Lock()
 
-	if s.blockProducer == nil {
+	if s.operatorIdentity == nil {
 		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, errors.New("no block producer configured")
+		return wire.ProduceBlockResponse{}, errors.New("no operator identity configured")
 	}
-	validator, ok := s.data.Validators[s.blockProducer.Address]
+	validator, ok := s.data.Validators[s.operatorIdentity.OwnerAddress]
 	if !ok || validator.Status != wire.ValidatorStatusActive {
 		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, errors.New("block producer is not an active validator")
+		return wire.ProduceBlockResponse{}, errors.New("operator's owner is not an active validator")
 	}
-	if validator.PublicKey != s.blockProducer.PublicKeyBase64() {
+	if validator.OperatorPublicKey != s.operatorIdentity.OperatorPublicKeyHex() {
 		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, errors.New("block producer public key mismatch")
+		return wire.ProduceBlockResponse{}, errors.New("operator public key mismatch")
 	}
 	if err := s.validateLocalProducerTurnLocked(); err != nil {
 		s.mu.Unlock()
@@ -171,15 +171,18 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 		return false, err
 	}
 
-	validator, ok := s.data.Validators[block.ProducerAddress]
-	if ok && validator.PublicKey != block.ProducerPublicKey {
-		return false, errors.New("block producer public key mismatch")
+	// Resolve producer address (operator) to owner via OperatorMap.
+	ownerAddr := s.resolveOperatorToOwner(block.ProducerAddress)
+	validator, ok := s.data.Validators[ownerAddr]
+	if ok && validator.OperatorPublicKey != block.ProducerPublicKey {
+		return false, errors.New("block producer operator public key mismatch")
 	}
 	if !ok {
 		validator = wire.ValidatorInfo{
-			Address:   block.ProducerAddress,
-			PublicKey: block.ProducerPublicKey,
-			Status:    wire.ValidatorStatusActive,
+			OwnerAddress:      ownerAddr,
+			OperatorAddress:   block.ProducerAddress,
+			OperatorPublicKey: block.ProducerPublicKey,
+			Status:            wire.ValidatorStatusActive,
 		}
 	}
 	if err := s.applyBlockTransactionsLocked(block); err != nil {
@@ -192,12 +195,10 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	if block.ReceiptsRoot != "" && block.ReceiptsRoot != s.receiptsRootForBlockLocked(block) {
 		return false, errors.New("block receipts root mismatch")
 	}
-	validator = s.validatorLocked(block.ProducerAddress)
-	validator.Address = block.ProducerAddress
-	validator.PublicKey = block.ProducerPublicKey
+	validator = s.validatorLocked(ownerAddr)
 	validator.Status = wire.ValidatorStatusActive
 	validator.ProducedBlocks++
-	s.data.Validators[block.ProducerAddress] = validator
+	s.data.Validators[ownerAddr] = validator
 	s.data.Blocks = append(s.data.Blocks, block)
 	if block.Finality.Finalized {
 		s.finalizeConsensusForBlockLocked(block)
@@ -205,11 +206,11 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 		s.data.ConsensusHeight = block.Height
 		s.data.ConsensusRound = block.Round
 		s.data.ConsensusPhase = consensus.PhasePrevote
-		s.data.ConsensusProposer = block.ProducerAddress
+		s.data.ConsensusProposer = ownerAddr
 	}
 	s.adjustFeeMarketAfterBlockLocked(block)
-	s.recordProposerTurnLocked(block.ProducerAddress, true)
-	s.releaseValidatorPerBlockLocked(block.TimeUnix, block.ProducerAddress)
+	s.recordProposerTurnLocked(ownerAddr, true)
+	s.releaseValidatorPerBlockLocked(block.TimeUnix, ownerAddr)
 	s.removePendingTxsLocked(block.Transactions)
 	if err := s.saveLocked(); err != nil {
 		return false, err
@@ -218,18 +219,20 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 }
 
 func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
-	if s.blockProducer == nil {
+	if s.operatorIdentity == nil {
 		return wire.Block{}, false, nil
 	}
-	validator, ok := s.data.Validators[s.blockProducer.Address]
+	validator, ok := s.data.Validators[s.operatorIdentity.OwnerAddress]
 	if !ok || validator.Status != wire.ValidatorStatusActive {
 		return wire.Block{}, false, nil
 	}
-	if validator.PublicKey != s.blockProducer.PublicKeyBase64() {
+	if validator.OperatorPublicKey != s.operatorIdentity.OperatorPublicKeyHex() {
 		return wire.Block{}, false, nil
 	}
+	// Process matured unbonding entries each block.
+	s.processMaturedUnbondingEntriesLocked()
 	txs := s.selectPendingTxsForBlockLocked()
-	appliedTxs, _ := s.applyPendingTransactionsForBlockLocked(txs, s.blockProducer.Address)
+	appliedTxs, _ := s.applyPendingTransactionsForBlockLocked(txs, s.operatorIdentity.OwnerAddress)
 	txLeaves := make([]string, 0, len(appliedTxs))
 	for _, tx := range appliedTxs {
 		txLeaves = append(txLeaves, txLeaf(tx))
@@ -246,14 +249,14 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 		TxRoot:            chaincrypto.MerkleRoot(txLeaves),
 		StateRoot:         s.stateRootLocked(),
 		Transactions:      appliedTxs,
-		ProducerAddress:   s.blockProducer.Address,
-		ProducerPublicKey: s.blockProducer.PublicKeyBase64(),
+		ProducerAddress:   s.operatorIdentity.OperatorAddress,
+		ProducerPublicKey: s.operatorIdentity.OperatorPublicKeyHex(),
 	}
 	s.prepareReceiptsForBlockLocked(&block)
 	block.ReceiptsRoot = s.receiptsRootForBlockLocked(block)
 	block.Hash = blockHash(block)
 	s.prepareReceiptsForBlockLocked(&block)
-	if err := wire.SignBlock(&block, s.blockProducer.PrivateKey); err != nil {
+	if err := wire.SignBlock(&block, s.operatorIdentity.OperatorPrivateKey); err != nil {
 		return wire.Block{}, false, err
 	}
 	vote, err := s.signLocalBlockVoteLocked(block)
@@ -272,18 +275,18 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 		s.data.ConsensusHeight = block.Height
 		s.data.ConsensusRound = block.Round
 		s.data.ConsensusPhase = consensus.PhasePrevote
-		s.data.ConsensusProposer = block.ProducerAddress
+		s.data.ConsensusProposer = s.operatorIdentity.OwnerAddress
 	}
 	s.adjustFeeMarketAfterBlockLocked(block)
-	s.recordProposerTurnLocked(s.blockProducer.Address, true)
-	s.releaseValidatorPerBlockLocked(block.TimeUnix, s.blockProducer.Address)
+	s.recordProposerTurnLocked(s.operatorIdentity.OwnerAddress, true)
+	s.releaseValidatorPerBlockLocked(block.TimeUnix, s.operatorIdentity.OwnerAddress)
 	s.removePendingTxsLocked(appliedTxs)
 	for _, tx := range appliedTxs {
 		s.data.ConfirmedTxs[tx.TxID] = true
 	}
 	s.markConsensusValidatorsFromTxsLocked(appliedTxs)
 	validator.ProducedBlocks++
-	s.data.Validators[validator.Address] = validator
+	s.data.Validators[s.operatorIdentity.OwnerAddress] = validator
 	return block, true, nil
 }
 
@@ -603,34 +606,35 @@ func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction
 }
 
 func (s *Store) validateLocalProducerTurnLocked() error {
-	if s.blockProducer == nil {
-		return errors.New("no block producer configured")
+	if s.operatorIdentity == nil {
+		return errors.New("no operator identity configured")
 	}
 	nextHeight := uint64(len(s.data.Blocks) + 1)
 	if s.data.UpgradePlan.HaltHeight > 0 && nextHeight >= s.data.UpgradePlan.HaltHeight {
 		return errors.New("chain is halted for upgrade")
 	}
-	if s.data.ConsensusValidators[s.blockProducer.Address] {
-		return s.validateConsensusProducerTurnLocked(nextHeight, s.blockProducer.Address)
+	if s.data.ConsensusValidators[s.operatorIdentity.OwnerAddress] {
+		return s.validateConsensusProducerTurnLocked(nextHeight, s.operatorIdentity.OwnerAddress)
 	}
-	if hasValidatorRegistrationTx(s.data.PendingTxs, s.blockProducer.Address, s.blockProducer.PublicKeyBase64()) {
+	if hasValidatorRegistrationTx(s.data.PendingTxs, s.operatorIdentity.OwnerAddress, s.operatorIdentity.OperatorPublicKeyHex()) {
 		return nil
 	}
-	return errors.New("block producer is not yet in the consensus validator set")
+	return errors.New("operator's owner is not yet in the consensus validator set")
 }
 
 func (s *Store) validateBlockProducerTurnLocked(block wire.Block) error {
-	if s.data.ConsensusValidators[block.ProducerAddress] {
+	ownerAddr := s.resolveOperatorToOwner(block.ProducerAddress)
+	if s.data.ConsensusValidators[ownerAddr] {
 		expected, err := s.selectProposerLocked(block.Height, block.Round)
 		if err != nil {
 			return err
 		}
-		if block.ProducerAddress != expected {
+		if ownerAddr != expected {
 			return errors.New("not proposer turn for this height and round")
 		}
 		return nil
 	}
-	if hasValidatorRegistrationTx(block.Transactions, block.ProducerAddress, block.ProducerPublicKey) {
+	if hasValidatorRegistrationTx(block.Transactions, ownerAddr, block.ProducerPublicKey) {
 		return nil
 	}
 	return errors.New("block producer is not in the consensus validator set")
@@ -653,20 +657,20 @@ func (s *Store) validateConsensusProducerTurnLocked(height uint64, producer stri
 }
 
 func (s *Store) signLocalBlockVoteLocked(block wire.Block) (wire.BlockVote, error) {
-	if s.blockProducer == nil {
-		return wire.BlockVote{}, errors.New("no block producer configured")
+	if s.operatorIdentity == nil {
+		return wire.BlockVote{}, errors.New("no operator identity configured")
 	}
 	vote := wire.BlockVote{
 		Height:             block.Height,
 		BlockHash:          block.Hash,
-		ValidatorAddress:   s.blockProducer.Address,
-		ValidatorPublicKey: s.blockProducer.PublicKeyBase64(),
-		Power:              s.validatorPowerLocked(s.blockProducer.Address),
+		ValidatorAddress:   s.operatorIdentity.OperatorAddress,
+		ValidatorPublicKey: s.operatorIdentity.OperatorPublicKeyHex(),
+		Power:              s.validatorPowerLocked(s.operatorIdentity.OwnerAddress),
 	}
-	if vote.Power == 0 && hasValidatorRegistrationTx(block.Transactions, s.blockProducer.Address, s.blockProducer.PublicKeyBase64()) {
+	if vote.Power == 0 && hasValidatorRegistrationTx(block.Transactions, s.operatorIdentity.OwnerAddress, s.operatorIdentity.OperatorPublicKeyHex()) {
 		vote.Power = 1
 	}
-	if err := wire.SignBlockVote(&vote, s.blockProducer.PrivateKey); err != nil {
+	if err := wire.SignBlockVote(&vote, s.operatorIdentity.OperatorPrivateKey); err != nil {
 		return wire.BlockVote{}, err
 	}
 	return vote, nil
@@ -798,7 +802,7 @@ func (s *Store) totalVotingPowerLocked(block wire.Block) uint64 {
 
 func (s *Store) validatorPowerForBlockLocked(block wire.Block, address string, publicKey string) uint64 {
 	validator, ok := s.data.Validators[address]
-	if ok && validator.Status == wire.ValidatorStatusActive && validator.PublicKey == publicKey && s.data.ConsensusValidators[address] {
+	if ok && validator.Status == wire.ValidatorStatusActive && validator.OperatorPublicKey == publicKey && s.data.ConsensusValidators[address] {
 		return validatorPower(validator)
 	}
 	return validatorRegistrationPowerFromTx(block.Transactions, address, publicKey)
@@ -856,7 +860,7 @@ func validatorRegistrationPowerFromTx(txs []wire.Transaction, address string, pu
 		if err := json.Unmarshal(tx.Payload, &req); err != nil {
 			continue
 		}
-		if req.Address != address || req.PublicKey != publicKey {
+		if req.OwnerAddress != address || req.OperatorPublicKey != publicKey {
 			continue
 		}
 		if req.Stake < MinValidatorStake {
@@ -879,7 +883,7 @@ func (s *Store) markConsensusValidatorsFromTxsLocked(txs []wire.Transaction) {
 			continue
 		}
 		if req.Stake >= MinValidatorStake && wire.VerifyValidatorRegistration(req) == nil {
-			s.data.ConsensusValidators[req.Address] = true
+			s.data.ConsensusValidators[req.OwnerAddress] = true
 		}
 	}
 }

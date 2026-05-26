@@ -23,11 +23,11 @@ func TestSubmitValidatorEvidenceSlashesLockedStake(t *testing.T) {
 	if resp.Evidence.Slashed != expectedSlash {
 		t.Fatalf("expected slash %d, got %d", expectedSlash, resp.Evidence.Slashed)
 	}
-	account := store.accountLocked(identity.Address)
+	account := store.accountLocked(identity.OwnerAddress)
 	if account.LockedStake != stake-expectedSlash {
 		t.Fatalf("expected locked stake %d, got %d", stake-expectedSlash, account.LockedStake)
 	}
-	validator := store.data.Validators[identity.Address]
+	validator := store.data.Validators[identity.OwnerAddress]
 	if validator.Stake != stake-expectedSlash || validator.Slashed != expectedSlash || validator.EvidenceCount != 1 {
 		t.Fatalf("unexpected validator after evidence: %+v", validator)
 	}
@@ -59,7 +59,7 @@ func TestSubmitValidatorEvidenceDuplicateDoesNotSlashTwice(t *testing.T) {
 	if second.Evidence.Slashed != first.Evidence.Slashed {
 		t.Fatalf("duplicate should return stored evidence, got %+v want %+v", second.Evidence, first.Evidence)
 	}
-	account := store.accountLocked(identity.Address)
+	account := store.accountLocked(identity.OwnerAddress)
 	if account.LockedStake != stake-expectedSlash {
 		t.Fatalf("expected duplicate to leave locked stake %d, got %d", stake-expectedSlash, account.LockedStake)
 	}
@@ -101,7 +101,7 @@ func TestValidatorEvidenceTransactionReplaySlashesPeer(t *testing.T) {
 	if err := peer.applyTransactionLocked(evidenceTx); err != nil {
 		t.Fatal(err)
 	}
-	account := peer.accountLocked(identity.Address)
+	account := peer.accountLocked(identity.OwnerAddress)
 	if account.LockedStake != stake-expectedSlash {
 		t.Fatalf("expected replay locked stake %d, got %d", stake-expectedSlash, account.LockedStake)
 	}
@@ -110,22 +110,19 @@ func TestValidatorEvidenceTransactionReplaySlashesPeer(t *testing.T) {
 	}
 }
 
-func registeredTestValidator(t *testing.T, stake uint64) (*Store, *ValidatorIdentity) {
+func registeredTestValidator(t *testing.T, stake uint64) (*Store, *OperatorIdentity) {
 	t.Helper()
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	return registeredTestValidatorWithIdentity(t, identity, stake)
 }
 
-func registeredTestValidatorWithIdentity(t *testing.T, identity *ValidatorIdentity, stake uint64) (*Store, *ValidatorIdentity) {
+func registeredTestValidatorWithIdentity(t *testing.T, identity *OperatorIdentity, stake uint64) (*Store, *OperatorIdentity) {
 	t.Helper()
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreditBalance(identity.Address, stake); err != nil {
+	if err := store.CreditBalance(identity.OwnerAddress, stake); err != nil {
 		t.Fatal(err)
 	}
 	registration, err := identity.RegistrationRequest("http://localhost:8080", stake, 0)
@@ -138,7 +135,7 @@ func registeredTestValidatorWithIdentity(t *testing.T, identity *ValidatorIdenti
 	return store, identity
 }
 
-func testDoubleVoteEvidenceRequest(t *testing.T, identity *ValidatorIdentity, height uint64, power uint64) wire.SubmitValidatorEvidenceRequest {
+func testDoubleVoteEvidenceRequest(t *testing.T, identity *OperatorIdentity, height uint64, power uint64) wire.SubmitValidatorEvidenceRequest {
 	t.Helper()
 	return wire.SubmitValidatorEvidenceRequest{
 		VoteA: signTestVoteHash(t, identity, height, "block-a", power),
@@ -146,16 +143,16 @@ func testDoubleVoteEvidenceRequest(t *testing.T, identity *ValidatorIdentity, he
 	}
 }
 
-func signTestVoteHash(t *testing.T, identity *ValidatorIdentity, height uint64, blockHash string, power uint64) wire.BlockVote {
+func signTestVoteHash(t *testing.T, identity *OperatorIdentity, height uint64, blockHash string, power uint64) wire.BlockVote {
 	t.Helper()
 	vote := wire.BlockVote{
 		Height:             height,
 		BlockHash:          blockHash,
-		ValidatorAddress:   identity.Address,
-		ValidatorPublicKey: identity.PublicKeyBase64(),
+		ValidatorAddress:   identity.OperatorAddress,
+		ValidatorPublicKey: identity.OperatorPublicKeyHex(),
 		Power:              power,
 	}
-	if err := wire.SignBlockVote(&vote, identity.PrivateKey); err != nil {
+	if err := wire.SignBlockVote(&vote, identity.OperatorPrivateKey); err != nil {
 		t.Fatal(err)
 	}
 	return vote

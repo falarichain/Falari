@@ -231,11 +231,13 @@ func (s *Store) refreshValidators(ctx context.Context) {
 	}
 	for _, v := range resp.Validators {
 		_, err := s.pool.Exec(ctx, `
-			INSERT INTO validators (validator_address, public_key, endpoint, stake,
+			INSERT INTO validators (owner_address, operator_address, operator_public_key, endpoint, stake,
 				delegated_stake, self_stake, status, consensus, produced_blocks, slashed,
 				evidence_count, delegator_count, rewards, delegation_rewards, registered_at_unix, commission_rate_bps)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-			ON CONFLICT (validator_address) DO UPDATE SET
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+			ON CONFLICT (owner_address) DO UPDATE SET
+				operator_address = EXCLUDED.operator_address,
+				operator_public_key = EXCLUDED.operator_public_key,
 				stake = EXCLUDED.stake,
 				delegated_stake = EXCLUDED.delegated_stake,
 				self_stake = EXCLUDED.self_stake,
@@ -246,12 +248,12 @@ func (s *Store) refreshValidators(ctx context.Context) {
 				evidence_count = EXCLUDED.evidence_count,
 				rewards = EXCLUDED.rewards,
 				commission_rate_bps = EXCLUDED.commission_rate_bps
-		`, v.Address, v.PublicKey, v.Endpoint, v.Stake, v.DelegatedStake,
+		`, v.OwnerAddress, v.OperatorAddress, v.OperatorPublicKey, v.Endpoint, v.Stake, v.DelegatedStake,
 			v.SelfStake, v.Status, v.Consensus, v.ProducedBlocks, v.Slashed,
 			v.EvidenceCount, v.DelegatorCount, v.Rewards, v.DelegationRewards,
 			v.RegisteredAtUnix, v.CommissionRateBPS)
 		if err != nil {
-			log.Printf("explorer: insert validator %s error: %v", v.Address, err)
+			log.Printf("explorer: insert validator %s error: %v", v.OwnerAddress, err)
 		}
 	}
 }

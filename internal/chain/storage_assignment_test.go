@@ -1,14 +1,14 @@
 package chain
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
+	"crypto/ecdsa"
 	"strconv"
 	"testing"
 	"time"
 
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestCreateIntentAssignsAndReservesMinerCapacity(t *testing.T) {
@@ -65,7 +65,7 @@ func TestBatchCommitRejectsReceiptFromWrongAssignedMiner(t *testing.T) {
 	}
 	assignment := resp.Assignments[0]
 	wrongMiner := minerA
-	if assignment.MinerAddress == "miner_a" {
+	if assignment.MinerAddress == minerA.Address {
 		wrongMiner = minerB
 	}
 	receipt := testAssignmentReceipt(t, resp.IntentID, assignment, wrongMiner, alice.Addr)
@@ -87,9 +87,11 @@ func TestBatchCommitReleasesReservationAndMarksUsed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	minerA := registerTestMiner(t, store, "miner_a", "http://miner-a", 10)
+	minerB := registerTestMiner(t, store, "miner_b", "http://miner-b", 10)
 	miners := map[string]testMinerIdentity{
-		"miner_a": registerTestMiner(t, store, "miner_a", "http://miner-a", 10),
-		"miner_b": registerTestMiner(t, store, "miner_b", "http://miner-b", 10),
+		minerA.Address: minerA,
+		minerB.Address: minerB,
 	}
 	alice := newTestUser(t)
 	fundAccount(store, alice.Addr, gfTokens(10))
@@ -125,20 +127,21 @@ func TestBatchCommitReleasesReservationAndMarksUsed(t *testing.T) {
 type testMinerIdentity struct {
 	Address    string
 	PublicKey  string
-	PrivateKey ed25519.PrivateKey
+	PrivateKey *ecdsa.PrivateKey
 	Endpoint   string
 }
 
-func registerTestMiner(t *testing.T, store *Store, address string, endpoint string, capacity uint64) testMinerIdentity {
+func registerTestMiner(t *testing.T, store *Store, _ string, endpoint string, capacity uint64) testMinerIdentity {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
+	address := wire.AccountAddress(&key.PublicKey)
 	identity := testMinerIdentity{
 		Address:    address,
-		PublicKey:  base64.StdEncoding.EncodeToString(pub),
-		PrivateKey: priv,
+		PublicKey:  wire.EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey)),
+		PrivateKey: key,
 		Endpoint:   endpoint,
 	}
 	req := wire.RegisterMinerRequest{
@@ -148,7 +151,7 @@ func registerTestMiner(t *testing.T, store *Store, address string, endpoint stri
 		CapacityBytes: capacity,
 		Stake:         gfTokens(1),
 	}
-	if err := wire.SignMinerRegistration(&req, priv); err != nil {
+	if err := wire.SignMinerRegistration(&req, key); err != nil {
 		t.Fatal(err)
 	}
 	store.data.Accounts[address] = wire.Account{Address: address, Balance: gfTokens(1)}

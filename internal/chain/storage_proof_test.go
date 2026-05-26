@@ -1,14 +1,15 @@
 package chain
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"testing"
 	"time"
 
 	chaincrypto "chain/internal/crypto"
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestSubmitProofRequiresAllChallengeSamples(t *testing.T) {
@@ -16,12 +17,12 @@ func TestSubmitProofRequiresAllChallengeSamples(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	minerAddress := "miner_multi_sample"
-	minerPublicKey := base64.StdEncoding.EncodeToString(publicKey)
+	minerAddress := wire.AccountAddress(&key.PublicKey)
+	minerPublicKey := wire.EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey))
 	store.data.Miners[minerAddress] = wire.MinerStats{
 		MinerAddress: minerAddress,
 		PublicKey:    minerPublicKey,
@@ -72,7 +73,7 @@ func TestSubmitProofRequiresAllChallengeSamples(t *testing.T) {
 	}
 	store.data.Challenges[challenge.ChallengeID] = challenge
 
-	proof := multiSampleProof(t, data, challenge, minerPublicKey, minerAddress, privateKey)
+	proof := multiSampleProof(t, data, challenge, minerPublicKey, minerAddress, key)
 	resp, err := store.SubmitProof(wire.SubmitProofRequest{Proof: proof})
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestSubmitProofRequiresAllChallengeSamples(t *testing.T) {
 	tampered.LeafHashes = tampered.LeafHashes[:2]
 	tampered.MerklePaths = tampered.MerklePaths[:2]
 	tampered.ProofHash = expectedProofHash(challenge, tampered)
-	if err := wire.SignProof(&tampered, privateKey); err != nil {
+	if err := wire.SignProof(&tampered, key); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.SubmitProof(wire.SubmitProofRequest{Proof: tampered}); err == nil {
@@ -112,12 +113,12 @@ func TestSubmitProofRewardIsCappedByLockedStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	minerAddress := "miner_capped_reward"
-	minerPublicKey := base64.StdEncoding.EncodeToString(publicKey)
+	minerAddress := wire.AccountAddress(&key.PublicKey)
+	minerPublicKey := wire.EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey))
 	store.data.Miners[minerAddress] = wire.MinerStats{
 		MinerAddress: minerAddress,
 		PublicKey:    minerPublicKey,
@@ -166,7 +167,7 @@ func TestSubmitProofRewardIsCappedByLockedStorage(t *testing.T) {
 	}
 	store.data.Challenges[challenge.ChallengeID] = challenge
 
-	proof := multiSampleProof(t, data, challenge, minerPublicKey, minerAddress, privateKey)
+	proof := multiSampleProof(t, data, challenge, minerPublicKey, minerAddress, key)
 	resp, err := store.SubmitProof(wire.SubmitProofRequest{Proof: proof})
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +201,7 @@ func TestStorageProofSampleCountScalesWithShardSize(t *testing.T) {
 	}
 }
 
-func multiSampleProof(t *testing.T, data []byte, challenge wire.StorageChallenge, minerPublicKey string, minerAddress string, privateKey ed25519.PrivateKey) wire.StorageProof {
+func multiSampleProof(t *testing.T, data []byte, challenge wire.StorageChallenge, minerPublicKey string, minerAddress string, privateKey *ecdsa.PrivateKey) wire.StorageProof {
 	t.Helper()
 	leafHashes := make([]string, 0, len(challenge.LeafIndices))
 	leafPayloads := make([]string, 0, len(challenge.LeafIndices))

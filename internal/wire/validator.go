@@ -1,87 +1,169 @@
 package wire
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 )
 
 type validatorRegistrationPayload struct {
-	Address           string `json:"address"`
+	OwnerAddress      string `json:"owner_address"`
+	OperatorAddress   string `json:"operator_address"`
+	OperatorPublicKey string `json:"operator_public_key"`
 	CommissionRateBPS uint64 `json:"commission_rate_bps,omitempty"`
-	PublicKey         string `json:"public_key"`
 	Endpoint          string `json:"endpoint,omitempty"`
 	Stake             uint64 `json:"stake"`
 }
 
 func ValidatorRegistrationPayload(req RegisterValidatorRequest) ([]byte, error) {
 	payload := validatorRegistrationPayload{
-		Address:           req.Address,
+		OwnerAddress:      req.OwnerAddress,
+		OperatorAddress:   req.OperatorAddress,
+		OperatorPublicKey: req.OperatorPublicKey,
 		CommissionRateBPS: req.CommissionRateBPS,
-		PublicKey:         req.PublicKey,
 		Endpoint:          req.Endpoint,
 		Stake:             req.Stake,
 	}
 	return json.Marshal(payload)
 }
 
-func SignValidatorRegistration(req *RegisterValidatorRequest, privateKey ed25519.PrivateKey) error {
-	payload, err := ValidatorRegistrationPayload(*req)
+// SignValidatorRegistration signs the registration with the Owner key.
+// The operator proof-of-possession must be set separately via SignOperatorProofOfPossession.
+func SignValidatorRegistration(req *RegisterValidatorRequest, ownerKey *ecdsa.PrivateKey) error {
+	payload := validatorRegistrationPayload{
+		OwnerAddress:      req.OwnerAddress,
+		OperatorAddress:   req.OperatorAddress,
+		OperatorPublicKey: req.OperatorPublicKey,
+		CommissionRateBPS: req.CommissionRateBPS,
+		Endpoint:          req.Endpoint,
+		Stake:             req.Stake,
+	}
+	sig, _, err := signInfraPayload(payload, ownerKey)
 	if err != nil {
 		return err
 	}
-	req.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	req.Signature = sig
+	return nil
+}
+
+// SignOperatorProofOfPossession signs the registration payload with the Operator key
+// to prove possession of the operator private key.
+func SignOperatorProofOfPossession(req *RegisterValidatorRequest, operatorKey *ecdsa.PrivateKey) error {
+	payload := validatorRegistrationPayload{
+		OwnerAddress:      req.OwnerAddress,
+		OperatorAddress:   req.OperatorAddress,
+		OperatorPublicKey: req.OperatorPublicKey,
+		CommissionRateBPS: req.CommissionRateBPS,
+		Endpoint:          req.Endpoint,
+		Stake:             req.Stake,
+	}
+	sig, pub, err := signInfraPayload(payload, operatorKey)
+	if err != nil {
+		return err
+	}
+	req.OperatorSignature = sig
+	if req.OperatorPublicKey == "" {
+		req.OperatorPublicKey = pub
+	}
 	return nil
 }
 
 func VerifyValidatorRegistration(req RegisterValidatorRequest) error {
-	publicKey, err := base64.StdEncoding.DecodeString(req.PublicKey)
+	payload := validatorRegistrationPayload{
+		OwnerAddress:      req.OwnerAddress,
+		OperatorAddress:   req.OperatorAddress,
+		OperatorPublicKey: req.OperatorPublicKey,
+		CommissionRateBPS: req.CommissionRateBPS,
+		Endpoint:          req.Endpoint,
+		Stake:             req.Stake,
+	}
+	if err := verifyInfraSignature(req.OwnerAddress, req.Signature, payload); err != nil {
+		return err
+	}
+	return verifyInfraSignature(req.OperatorAddress, req.OperatorSignature, payload)
+}
+
+type rotateOperatorPayload struct {
+	Action               string `json:"action"`
+	OwnerAddress         string `json:"owner_address"`
+	NewOperatorAddress   string `json:"new_operator_address"`
+	NewOperatorPublicKey string `json:"new_operator_public_key"`
+	Nonce                uint64 `json:"nonce"`
+}
+
+func SignRotateOperator(req *RotateOperatorRequest, ownerKey *ecdsa.PrivateKey) error {
+	payload := rotateOperatorPayload{
+		Action:               "rotate_operator",
+		OwnerAddress:         req.OwnerAddress,
+		NewOperatorAddress:   req.NewOperatorAddress,
+		NewOperatorPublicKey: req.NewOperatorPublicKey,
+		Nonce:                req.Nonce,
+	}
+	sig, _, err := signInfraPayload(payload, ownerKey)
 	if err != nil {
 		return err
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid validator public key size")
+	req.Signature = sig
+	return nil
+}
+
+func SignRotateOperatorProofOfPossession(req *RotateOperatorRequest, newOperatorKey *ecdsa.PrivateKey) error {
+	payload := rotateOperatorPayload{
+		Action:               "rotate_operator",
+		OwnerAddress:         req.OwnerAddress,
+		NewOperatorAddress:   req.NewOperatorAddress,
+		NewOperatorPublicKey: req.NewOperatorPublicKey,
+		Nonce:                req.Nonce,
 	}
-	signature, err := base64.StdEncoding.DecodeString(req.Signature)
+	sig, pub, err := signInfraPayload(payload, newOperatorKey)
 	if err != nil {
 		return err
 	}
-	payload, err := ValidatorRegistrationPayload(req)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
-		return errors.New("invalid validator registration signature")
+	req.OperatorSignature = sig
+	if req.NewOperatorPublicKey == "" {
+		req.NewOperatorPublicKey = pub
 	}
 	return nil
+}
+
+func VerifyRotateOperator(req RotateOperatorRequest) error {
+	payload := rotateOperatorPayload{
+		Action:               "rotate_operator",
+		OwnerAddress:         req.OwnerAddress,
+		NewOperatorAddress:   req.NewOperatorAddress,
+		NewOperatorPublicKey: req.NewOperatorPublicKey,
+		Nonce:                req.Nonce,
+	}
+	if err := verifyInfraSignature(req.OwnerAddress, req.Signature, payload); err != nil {
+		return err
+	}
+	return verifyInfraSignature(req.NewOperatorAddress, req.OperatorSignature, payload)
 }
 
 type blockSigningPayload struct {
 	Height          uint64   `json:"height"`
 	TimeUnix        int64    `json:"time_unix"`
 	PrevHash        string   `json:"prev_hash"`
-	TxRoot          string   `json:"tx_root"`
 	ProducerAddress string   `json:"producer_address"`
 	TxLeaves        []string `json:"tx_leaves"`
+	TxRoot          string   `json:"tx_root"`
 }
 
 type blockVotePayload struct {
-	Height           uint64 `json:"height"`
 	BlockHash        string `json:"block_hash"`
-	ValidatorAddress string `json:"validator_address"`
+	Height           uint64 `json:"height"`
 	Power            uint64 `json:"power"`
+	ValidatorAddress string `json:"validator_address"`
 }
 
 type consensusVotePayload struct {
+	BlockHash        string `json:"block_hash"`
 	Height           uint64 `json:"height"`
+	Power            uint64 `json:"power"`
 	Round            uint64 `json:"round"`
 	Type             string `json:"type"`
-	BlockHash        string `json:"block_hash"`
 	ValidatorAddress string `json:"validator_address"`
-	Power            uint64 `json:"power"`
 }
 
 func BlockPayload(block Block) ([]byte, error) {
@@ -93,13 +175,15 @@ func BlockPayload(block Block) ([]byte, error) {
 		Height:          block.Height,
 		TimeUnix:        block.TimeUnix,
 		PrevHash:        block.PrevHash,
-		TxRoot:          block.TxRoot,
 		ProducerAddress: block.ProducerAddress,
 		TxLeaves:        txLeaves,
+		TxRoot:          block.TxRoot,
 	}
 	return json.Marshal(payload)
 }
 
+// TransactionLeaf computes the SHA256 hash of a transaction for Merkle tree leaves.
+// This is NOT a signing operation — it is a data hash and intentionally remains SHA256.
 func TransactionLeaf(tx Transaction) string {
 	raw, _ := json.Marshal(struct {
 		TxID           string `json:"tx_id"`
@@ -134,35 +218,44 @@ func TransactionLeaf(tx Transaction) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func SignBlock(block *Block, privateKey ed25519.PrivateKey) error {
-	payload, err := BlockPayload(*block)
+func SignBlock(block *Block, privateKey *ecdsa.PrivateKey) error {
+	txLeaves := make([]string, 0, len(block.Transactions))
+	for _, tx := range block.Transactions {
+		txLeaves = append(txLeaves, TransactionLeaf(tx))
+	}
+	payload := blockSigningPayload{
+		Height:          block.Height,
+		TimeUnix:        block.TimeUnix,
+		PrevHash:        block.PrevHash,
+		ProducerAddress: block.ProducerAddress,
+		TxLeaves:        txLeaves,
+		TxRoot:          block.TxRoot,
+	}
+	sig, pub, err := signInfraPayload(payload, privateKey)
 	if err != nil {
 		return err
 	}
-	block.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	block.Signature = sig
+	if block.ProducerPublicKey == "" {
+		block.ProducerPublicKey = pub
+	}
 	return nil
 }
 
 func VerifyBlockSignature(block Block) error {
-	publicKey, err := base64.StdEncoding.DecodeString(block.ProducerPublicKey)
-	if err != nil {
-		return err
+	txLeaves := make([]string, 0, len(block.Transactions))
+	for _, tx := range block.Transactions {
+		txLeaves = append(txLeaves, TransactionLeaf(tx))
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid validator public key size")
+	payload := blockSigningPayload{
+		Height:          block.Height,
+		TimeUnix:        block.TimeUnix,
+		PrevHash:        block.PrevHash,
+		ProducerAddress: block.ProducerAddress,
+		TxLeaves:        txLeaves,
+		TxRoot:          block.TxRoot,
 	}
-	signature, err := base64.StdEncoding.DecodeString(block.Signature)
-	if err != nil {
-		return err
-	}
-	payload, err := BlockPayload(block)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
-		return errors.New("invalid block signature")
-	}
-	return nil
+	return verifyInfraSignature(block.ProducerAddress, block.Signature, payload)
 }
 
 func BlockVotePayload(vote BlockVote) ([]byte, error) {
@@ -175,35 +268,32 @@ func BlockVotePayload(vote BlockVote) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-func SignBlockVote(vote *BlockVote, privateKey ed25519.PrivateKey) error {
-	payload, err := BlockVotePayload(*vote)
+func SignBlockVote(vote *BlockVote, privateKey *ecdsa.PrivateKey) error {
+	payload := blockVotePayload{
+		Height:           vote.Height,
+		BlockHash:        vote.BlockHash,
+		ValidatorAddress: vote.ValidatorAddress,
+		Power:            vote.Power,
+	}
+	sig, pub, err := signInfraPayload(payload, privateKey)
 	if err != nil {
 		return err
 	}
-	vote.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	vote.Signature = sig
+	if vote.ValidatorPublicKey == "" {
+		vote.ValidatorPublicKey = pub
+	}
 	return nil
 }
 
 func VerifyBlockVote(vote BlockVote) error {
-	publicKey, err := base64.StdEncoding.DecodeString(vote.ValidatorPublicKey)
-	if err != nil {
-		return err
+	payload := blockVotePayload{
+		Height:           vote.Height,
+		BlockHash:        vote.BlockHash,
+		ValidatorAddress: vote.ValidatorAddress,
+		Power:            vote.Power,
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid validator public key size")
-	}
-	signature, err := base64.StdEncoding.DecodeString(vote.Signature)
-	if err != nil {
-		return err
-	}
-	payload, err := BlockVotePayload(vote)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
-		return errors.New("invalid block vote signature")
-	}
-	return nil
+	return verifyInfraSignature(vote.ValidatorAddress, vote.Signature, payload)
 }
 
 func ConsensusVotePayload(vote ConsensusVote) ([]byte, error) {
@@ -218,33 +308,34 @@ func ConsensusVotePayload(vote ConsensusVote) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-func SignConsensusVote(vote *ConsensusVote, privateKey ed25519.PrivateKey) error {
-	payload, err := ConsensusVotePayload(*vote)
+func SignConsensusVote(vote *ConsensusVote, privateKey *ecdsa.PrivateKey) error {
+	payload := consensusVotePayload{
+		Height:           vote.Height,
+		Round:            vote.Round,
+		Type:             vote.Type,
+		BlockHash:        vote.BlockHash,
+		ValidatorAddress: vote.ValidatorAddress,
+		Power:            vote.Power,
+	}
+	sig, pub, err := signInfraPayload(payload, privateKey)
 	if err != nil {
 		return err
 	}
-	vote.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	vote.Signature = sig
+	if vote.ValidatorPublicKey == "" {
+		vote.ValidatorPublicKey = pub
+	}
 	return nil
 }
 
 func VerifyConsensusVote(vote ConsensusVote) error {
-	publicKey, err := base64.StdEncoding.DecodeString(vote.ValidatorPublicKey)
-	if err != nil {
-		return err
+	payload := consensusVotePayload{
+		Height:           vote.Height,
+		Round:            vote.Round,
+		Type:             vote.Type,
+		BlockHash:        vote.BlockHash,
+		ValidatorAddress: vote.ValidatorAddress,
+		Power:            vote.Power,
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid validator public key size")
-	}
-	signature, err := base64.StdEncoding.DecodeString(vote.Signature)
-	if err != nil {
-		return err
-	}
-	payload, err := ConsensusVotePayload(vote)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
-		return errors.New("invalid consensus vote signature")
-	}
-	return nil
+	return verifyInfraSignature(vote.ValidatorAddress, vote.Signature, payload)
 }

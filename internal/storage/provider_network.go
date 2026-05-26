@@ -292,7 +292,7 @@ func (p *ProviderNetwork) connectPeers(rawPeers string) {
 func (p *ProviderNetwork) buildDHTRecord(shardHash string) (wire.DHTProviderRecord, error) {
 	record := wire.DHTProviderRecord{
 		MinerAddress:   p.node.Address(),
-		PublicKey:      p.node.PublicKeyBase64(),
+		PublicKey:      p.node.PublicKeyHex(),
 		Endpoint:       p.endpoint,
 		PeerID:         p.PeerID(),
 		PeerAddrs:      p.Addrs(),

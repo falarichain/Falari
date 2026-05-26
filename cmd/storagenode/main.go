@@ -76,7 +76,11 @@ func main() {
 		}
 	}
 
-	node, err := storage.OpenNode(*data)
+	minerKey := os.Getenv("MINER_PRIVATE_KEY")
+	if minerKey == "" {
+		log.Fatal("MINER_PRIVATE_KEY environment variable is not set; generate a key with: genkey")
+	}
+	node, err := storage.OpenNode(*data, minerKey)
 	if err != nil {
 		log.Fatalf("open storage node: %v", err)
 	}

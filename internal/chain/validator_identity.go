@@ -1,112 +1,83 @@
 package chain
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
+	"crypto/ecdsa"
 	"errors"
 	"os"
-	"path/filepath"
+	"strings"
 
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
-type ValidatorIdentity struct {
-	Address    string
-	PublicKey  ed25519.PublicKey
-	PrivateKey ed25519.PrivateKey
+type OperatorIdentity struct {
+	OwnerAddress       string
+	OperatorAddress    string
+	OperatorPublicKey  *ecdsa.PublicKey
+	OperatorPrivateKey *ecdsa.PrivateKey
+	ownerPrivateKey    *ecdsa.PrivateKey // optional, used only for registration
 }
 
-type validatorIdentityFile struct {
-	Address    string `json:"address"`
-	PublicKey  string `json:"public_key"`
-	PrivateKey string `json:"private_key"`
-}
-
-func LoadOrCreateValidatorIdentity(path string) (*ValidatorIdentity, error) {
-	if path == "" {
-		return createValidatorIdentity("")
+// LoadOperatorIdentityFromEnv loads an operator identity from environment variables:
+//   - OWNER_ADDRESS: the owner (cold wallet) Ethereum-compatible address
+//   - OPERATOR_PRIVATE_KEY: hex-encoded secp256k1 key for the operator (hot node)
+//   - OWNER_PRIVATE_KEY: (optional) hex-encoded secp256k1 key for the owner, used only during registration
+func LoadOperatorIdentityFromEnv() (*OperatorIdentity, error) {
+	ownerAddr := os.Getenv("OWNER_ADDRESS")
+	if ownerAddr == "" {
+		return nil, errors.New("OWNER_ADDRESS environment variable is required")
 	}
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return createValidatorIdentity(path)
+	operatorHex := os.Getenv("OPERATOR_PRIVATE_KEY")
+	if operatorHex == "" {
+		return nil, errors.New("OPERATOR_PRIVATE_KEY environment variable is required; generate a key with: genkey")
 	}
+	operatorKey, err := ethcrypto.HexToECDSA(strings.TrimPrefix(strings.TrimPrefix(operatorHex, "0x"), "0X"))
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid OPERATOR_PRIVATE_KEY: " + err.Error())
 	}
-	var meta validatorIdentityFile
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil, err
+	operatorAddr := wire.AccountAddress(&operatorKey.PublicKey)
+
+	identity := &OperatorIdentity{
+		OwnerAddress:       wire.NormalizeAddress(ownerAddr),
+		OperatorAddress:    operatorAddr,
+		OperatorPublicKey:  &operatorKey.PublicKey,
+		OperatorPrivateKey: operatorKey,
 	}
-	pub, err := base64.StdEncoding.DecodeString(meta.PublicKey)
-	if err != nil {
-		return nil, err
+
+	// Optional owner private key for registration signing.
+	if ownerHex := os.Getenv("OWNER_PRIVATE_KEY"); ownerHex != "" {
+		ownerKey, err := ethcrypto.HexToECDSA(strings.TrimPrefix(strings.TrimPrefix(ownerHex, "0x"), "0X"))
+		if err != nil {
+			return nil, errors.New("invalid OWNER_PRIVATE_KEY: " + err.Error())
+		}
+		identity.ownerPrivateKey = ownerKey
 	}
-	priv, err := base64.StdEncoding.DecodeString(meta.PrivateKey)
-	if err != nil {
-		return nil, err
-	}
-	return &ValidatorIdentity{
-		Address:    meta.Address,
-		PublicKey:  ed25519.PublicKey(pub),
-		PrivateKey: ed25519.PrivateKey(priv),
-	}, nil
+
+	return identity, nil
 }
 
-func (v *ValidatorIdentity) PublicKeyBase64() string {
-	return base64.StdEncoding.EncodeToString(v.PublicKey)
+func (o *OperatorIdentity) OperatorPublicKeyHex() string {
+	return wire.EncodeHex(ethcrypto.CompressPubkey(o.OperatorPublicKey))
 }
 
-func (v *ValidatorIdentity) RegistrationRequest(endpoint string, stake uint64, commissionRateBPS uint64) (wire.RegisterValidatorRequest, error) {
+func (o *OperatorIdentity) RegistrationRequest(endpoint string, stake uint64, commissionRateBPS uint64) (wire.RegisterValidatorRequest, error) {
 	req := wire.RegisterValidatorRequest{
-		Address:           v.Address,
-		PublicKey:         v.PublicKeyBase64(),
+		OwnerAddress:      o.OwnerAddress,
+		OperatorAddress:   o.OperatorAddress,
+		OperatorPublicKey: o.OperatorPublicKeyHex(),
 		Endpoint:          endpoint,
 		Stake:             stake,
 		CommissionRateBPS: commissionRateBPS,
 	}
-	if err := wire.SignValidatorRegistration(&req, v.PrivateKey); err != nil {
+	if o.ownerPrivateKey == nil {
+		return req, errors.New("OWNER_PRIVATE_KEY is required for initial registration; set it in the environment")
+	}
+	if err := wire.SignValidatorRegistration(&req, o.ownerPrivateKey); err != nil {
+		return wire.RegisterValidatorRequest{}, err
+	}
+	if err := wire.SignOperatorProofOfPossession(&req, o.OperatorPrivateKey); err != nil {
 		return wire.RegisterValidatorRequest{}, err
 	}
 	return req, nil
-}
-
-func createValidatorIdentity(path string) (*ValidatorIdentity, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	identity := &ValidatorIdentity{
-		Address:    validatorAddress(pub),
-		PublicKey:  pub,
-		PrivateKey: priv,
-	}
-	if path == "" {
-		return identity, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	meta := validatorIdentityFile{
-		Address:    identity.Address,
-		PublicKey:  identity.PublicKeyBase64(),
-		PrivateKey: base64.StdEncoding.EncodeToString(identity.PrivateKey),
-	}
-	raw, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		return nil, err
-	}
-	return identity, nil
-}
-
-func validatorAddress(pub ed25519.PublicKey) string {
-	sum := sha256.Sum256(pub)
-	addr := "0x" + hex.EncodeToString(sum[:20])
-	return wire.NormalizeAddress(addr)
 }

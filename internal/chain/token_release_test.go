@@ -39,12 +39,12 @@ func TestDistributeValidatorRewardsSharesWithDelegators(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.data.Validators["validator_a"] = wire.ValidatorInfo{
-		Address:        "validator_a",
-		PublicKey:      "pub",
-		Stake:          gfTokens(10),
-		SelfStake:      gfTokens(10),
-		DelegatedStake: gfTokens(10),
-		Status:         wire.ValidatorStatusActive,
+		OwnerAddress:      "validator_a",
+		OperatorPublicKey: "pub",
+		Stake:             gfTokens(10),
+		SelfStake:         gfTokens(10),
+		DelegatedStake:    gfTokens(10),
+		Status:            wire.ValidatorStatusActive,
 	}
 	store.data.ConsensusValidators["validator_a"] = true
 	store.data.StakeDelegations = map[string]wire.StakeDelegation{

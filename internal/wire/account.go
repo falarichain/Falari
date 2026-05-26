@@ -112,3 +112,9 @@ func decodeHex(raw string) ([]byte, error) {
 	raw = strings.TrimPrefix(strings.TrimPrefix(raw, "0x"), "0X")
 	return hex.DecodeString(raw)
 }
+
+// EncodeHex returns the hex encoding of raw with a 0x prefix.
+func EncodeHex(raw []byte) string { return encodeHex(raw) }
+
+// DecodeHex decodes a 0x-prefixed hex string.
+func DecodeHex(raw string) ([]byte, error) { return decodeHex(raw) }

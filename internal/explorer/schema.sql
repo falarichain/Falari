@@ -175,8 +175,9 @@ CREATE INDEX IF NOT EXISTS idx_miners_capacity ON miners(capacity_bytes DESC);
 -- VALIDATORS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS validators (
-    validator_address       TEXT PRIMARY KEY,
-    public_key              TEXT NOT NULL DEFAULT '',
+    owner_address           TEXT PRIMARY KEY,
+    operator_address        TEXT NOT NULL DEFAULT '',
+    operator_public_key     TEXT NOT NULL DEFAULT '',
     endpoint                TEXT NOT NULL DEFAULT '',
     stake                   BIGINT NOT NULL DEFAULT 0,
     delegated_stake         BIGINT NOT NULL DEFAULT 0,
@@ -196,6 +197,23 @@ CREATE TABLE IF NOT EXISTS validators (
 CREATE INDEX IF NOT EXISTS idx_validators_status ON validators(status);
 CREATE INDEX IF NOT EXISTS idx_validators_consensus ON validators(consensus);
 CREATE INDEX IF NOT EXISTS idx_validators_stake ON validators(stake DESC);
+CREATE INDEX IF NOT EXISTS idx_validators_operator ON validators(operator_address);
+
+-- ============================================================
+-- UNBONDING ENTRIES
+-- ============================================================
+CREATE TABLE IF NOT EXISTS unbonding_entries (
+    id                  TEXT PRIMARY KEY,
+    delegator           TEXT NOT NULL,
+    validator           TEXT NOT NULL,
+    amount              BIGINT NOT NULL DEFAULT 0,
+    created_at_unix     BIGINT NOT NULL DEFAULT 0,
+    matures_at_unix     BIGINT NOT NULL DEFAULT 0,
+    indexed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_unbonding_delegator ON unbonding_entries(delegator);
+CREATE INDEX IF NOT EXISTS idx_unbonding_validator ON unbonding_entries(validator);
+CREATE INDEX IF NOT EXISTS idx_unbonding_matures ON unbonding_entries(matures_at_unix);
 
 -- ============================================================
 -- STORAGE PROOFS

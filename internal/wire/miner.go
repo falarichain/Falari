@@ -1,58 +1,55 @@
 package wire
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
+	"crypto/ecdsa"
 	"encoding/json"
-	"errors"
 )
 
 type minerRegistrationPayload struct {
+	CapacityBytes uint64 `json:"capacity_bytes"`
+	Endpoint      string `json:"endpoint"`
 	MinerAddress  string `json:"miner_address"`
 	PublicKey     string `json:"public_key"`
-	Endpoint      string `json:"endpoint"`
-	CapacityBytes uint64 `json:"capacity_bytes"`
 	Stake         uint64 `json:"stake"`
 }
 
 func MinerRegistrationPayload(req RegisterMinerRequest) ([]byte, error) {
 	payload := minerRegistrationPayload{
+		CapacityBytes: req.CapacityBytes,
+		Endpoint:      req.Endpoint,
 		MinerAddress:  req.MinerAddress,
 		PublicKey:     req.PublicKey,
-		Endpoint:      req.Endpoint,
-		CapacityBytes: req.CapacityBytes,
 		Stake:         req.Stake,
 	}
 	return json.Marshal(payload)
 }
 
-func SignMinerRegistration(req *RegisterMinerRequest, privateKey ed25519.PrivateKey) error {
-	payload, err := MinerRegistrationPayload(*req)
+func SignMinerRegistration(req *RegisterMinerRequest, privateKey *ecdsa.PrivateKey) error {
+	payload := minerRegistrationPayload{
+		CapacityBytes: req.CapacityBytes,
+		Endpoint:      req.Endpoint,
+		MinerAddress:  req.MinerAddress,
+		PublicKey:     req.PublicKey,
+		Stake:         req.Stake,
+	}
+	sig, pub, err := signInfraPayload(payload, privateKey)
 	if err != nil {
 		return err
 	}
-	req.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	req.Signature = sig
+	if req.PublicKey == "" {
+		req.PublicKey = pub
+	}
 	return nil
 }
 
 func VerifyMinerRegistration(req RegisterMinerRequest) error {
-	publicKey, err := base64.StdEncoding.DecodeString(req.PublicKey)
-	if err != nil {
-		return err
+	payload := minerRegistrationPayload{
+		CapacityBytes: req.CapacityBytes,
+		Endpoint:      req.Endpoint,
+		MinerAddress:  req.MinerAddress,
+		PublicKey:     req.PublicKey,
+		Stake:         req.Stake,
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid miner public key size")
-	}
-	signature, err := base64.StdEncoding.DecodeString(req.Signature)
-	if err != nil {
-		return err
-	}
-	payload, err := MinerRegistrationPayload(req)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
-		return errors.New("invalid miner registration signature")
-	}
-	return nil
+	return verifyInfraSignature(req.MinerAddress, req.Signature, payload)
 }

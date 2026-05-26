@@ -27,7 +27,6 @@ func main() {
 	settleInterval := flag.Duration("settle-interval", 1*time.Minute, "automatic storage intent settlement interval, disabled when 0")
 	renewInterval := flag.Duration("renew-interval", 1*time.Minute, "automatic renewable deal renewal interval, disabled when 0")
 	blockInterval := flag.Duration("block-interval", 5*time.Second, "automatic block production interval, disabled when 0")
-	validatorKey := flag.String("validator-key", "./data/validator.json", "validator identity file path")
 	validatorEndpoint := flag.String("validator-endpoint", "", "public validator endpoint")
 	validatorStake := flag.Uint64("validator-stake", chain.MinValidatorStake, "validator stake locked from its account")
 	validatorCommissionBPS := flag.Uint64("validator-commission-bps", 0, "validator commission rate in basis points (0 = use global default)")
@@ -82,9 +81,9 @@ func main() {
 		log.Fatalf("open chain state: %v", err)
 	}
 	defer store.Close()
-	identity, err := chain.LoadOrCreateValidatorIdentity(*validatorKey)
+	identity, err := chain.LoadOperatorIdentityFromEnv()
 	if err != nil {
-		log.Fatalf("load validator identity: %v", err)
+		log.Fatalf("load operator identity: %v", err)
 	}
 	endpoint := *validatorEndpoint
 	if endpoint == "" {
@@ -97,7 +96,7 @@ func main() {
 	if _, err := store.RegisterValidator(registration); err != nil {
 		log.Fatalf("register validator: %v", err)
 	}
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 	network, err := chain.NewPeerNetworkWithConfig(store, chain.PeerNetworkConfig{
 		HTTPPeers:    *peers,
 		LibP2PListen: *p2pListen,
@@ -111,7 +110,7 @@ func main() {
 	store.SetBlockBroadcaster(network)
 	store.SetTransactionBroadcaster(network)
 	store.SetConsensusVoteBroadcaster(network)
-	log.Printf("validator %s enabled endpoint=%s stake=%d commission_bps=%d", identity.Address, endpoint, *validatorStake, *validatorCommissionBPS)
+	log.Printf("validator %s enabled endpoint=%s stake=%d commission_bps=%d", identity.OwnerAddress, endpoint, *validatorStake, *validatorCommissionBPS)
 	if len(network.Peers()) > 0 {
 		log.Printf("peer network enabled peers=%v", network.Peers())
 	}

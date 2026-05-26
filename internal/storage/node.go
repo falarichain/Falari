@@ -2,11 +2,8 @@ package storage
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
+	"crypto/ecdsa"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,13 +19,15 @@ import (
 	"chain/internal/client"
 	chaincrypto "chain/internal/crypto"
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 type Node struct {
 	dataDir                   string
 	address                   string
-	publicKey                 ed25519.PublicKey
-	privateKey                ed25519.PrivateKey
+	publicKey                 *ecdsa.PublicKey
+	privateKey                *ecdsa.PrivateKey
 	backend                   StorageBackend
 	blockstore                Blockstore
 	transport                 transportCounters
@@ -51,20 +50,29 @@ type transportCounters struct {
 type Meta struct {
 	Address          string `json:"address"`
 	PublicKey        string `json:"public_key"`
-	PrivateKey       string `json:"private_key"`
 	SectorCommitment string `json:"sector_commitment"`
 }
 
-func OpenNode(dataDir string) (*Node, error) {
+// OpenNode opens or initializes a storage node using the given hex-encoded ECDSA
+// private key. The key is passed via environment variable (MINER_PRIVATE_KEY) by
+// the CLI; no private key material is stored on disk.
+func OpenNode(dataDir string, privKeyHex string) (*Node, error) {
 	backend, err := NewFileBackend(dataDir)
 	if err != nil {
 		return nil, err
 	}
 
+	cleanHex := strings.TrimPrefix(strings.TrimPrefix(privKeyHex, "0x"), "0X")
+	priv, err := ethcrypto.HexToECDSA(cleanHex)
+	if err != nil {
+		return nil, errors.New("invalid MINER_PRIVATE_KEY: " + err.Error())
+	}
+	addr := wire.AccountAddress(&priv.PublicKey)
+
 	metaPath := filepath.Join(dataDir, "node.json")
 	raw, err := os.ReadFile(metaPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return createNode(dataDir, metaPath, backend)
+		return newNode(dataDir, metaPath, addr, priv, backend), nil
 	}
 	if err != nil {
 		return nil, err
@@ -74,33 +82,48 @@ func OpenNode(dataDir string) (*Node, error) {
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		return nil, err
 	}
-	pub, err := base64.StdEncoding.DecodeString(meta.PublicKey)
-	if err != nil {
-		return nil, err
-	}
-	priv, err := base64.StdEncoding.DecodeString(meta.PrivateKey)
-	if err != nil {
-		return nil, err
+	if !strings.EqualFold(meta.Address, addr) {
+		return nil, fmt.Errorf("node.json address %s does not match key-derived address %s", meta.Address, addr)
 	}
 	return &Node{
 		dataDir:    dataDir,
-		address:    meta.Address,
-		publicKey:  ed25519.PublicKey(pub),
-		privateKey: ed25519.PrivateKey(priv),
+		address:    addr,
+		publicKey:  &priv.PublicKey,
+		privateKey: priv,
 		backend:    backend,
 		blockstore: NewBackendBlockstore(backend),
 	}, nil
+}
+
+func newNode(dataDir, metaPath, address string, priv *ecdsa.PrivateKey, backend StorageBackend) *Node {
+	pubHex := wire.EncodeHex(ethcrypto.CompressPubkey(&priv.PublicKey))
+	meta := Meta{
+		Address:   address,
+		PublicKey: pubHex,
+	}
+	raw, err := json.MarshalIndent(meta, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(metaPath, raw, 0o600)
+	}
+	return &Node{
+		dataDir:    dataDir,
+		address:    address,
+		publicKey:  &priv.PublicKey,
+		privateKey: priv,
+		backend:    backend,
+		blockstore: NewBackendBlockstore(backend),
+	}
 }
 
 func (n *Node) Address() string {
 	return n.address
 }
 
-func (n *Node) PublicKeyBase64() string {
-	return base64.StdEncoding.EncodeToString(n.publicKey)
+func (n *Node) PublicKeyHex() string {
+	return wire.EncodeHex(ethcrypto.CompressPubkey(n.publicKey))
 }
 
-func (n *Node) PrivateKey() ed25519.PrivateKey {
+func (n *Node) PrivateKey() *ecdsa.PrivateKey {
 	return n.privateKey
 }
 
@@ -121,7 +144,7 @@ func (n *Node) Status() wire.StorageNodeStatusResponse {
 	resp := wire.StorageNodeStatusResponse{
 		Status:                 "ok",
 		Address:                n.address,
-		PublicKey:              n.PublicKeyBase64(),
+		PublicKey:              n.PublicKeyHex(),
 		DataDir:                n.dataDir,
 		AccessServiceRequired:  true,
 		UploadServiceEnabled:   true,
@@ -206,7 +229,7 @@ func (n *Node) ProviderRecord(endpoint string, capacityBytes uint64, peerID stri
 	now := time.Now().Unix()
 	record := wire.StorageProviderRecord{
 		MinerAddress:           n.address,
-		PublicKey:              n.PublicKeyBase64(),
+		PublicKey:              n.PublicKeyHex(),
 		Endpoint:               endpoint,
 		PeerID:                 peerID,
 		PeerAddrs:              append([]string(nil), peerAddrs...),
@@ -246,7 +269,7 @@ func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, 
 	}
 	req := wire.RegisterMinerRequest{
 		MinerAddress:  n.address,
-		PublicKey:     n.PublicKeyBase64(),
+		PublicKey:     n.PublicKeyHex(),
 		Endpoint:      endpoint,
 		CapacityBytes: capacityBytes,
 		Stake:         stake,
@@ -291,7 +314,7 @@ func (n *Node) Store(req wire.UploadRequest) (wire.MinerReceipt, error) {
 	receipt := wire.MinerReceipt{
 		Version:          1,
 		MinerAddress:     n.address,
-		MinerPublicKey:   n.PublicKeyBase64(),
+		MinerPublicKey:   n.PublicKeyHex(),
 		User:             req.User,
 		IntentID:         req.IntentID,
 		FileRoot:         req.FileRoot,
@@ -402,7 +425,7 @@ func (n *Node) SignRetrievalReceipt(receipt wire.RetrievalReceipt) (wire.Retriev
 	if receipt.MinerAddress != "" && receipt.MinerAddress != n.address {
 		return wire.RetrievalReceipt{}, errors.New("retrieval receipt is for a different miner")
 	}
-	if receipt.MinerPublicKey != "" && receipt.MinerPublicKey != n.PublicKeyBase64() {
+	if receipt.MinerPublicKey != "" && receipt.MinerPublicKey != n.PublicKeyHex() {
 		return wire.RetrievalReceipt{}, errors.New("retrieval receipt public key mismatch")
 	}
 	data, err := n.ReadShard(receipt.ShardHash)
@@ -416,7 +439,7 @@ func (n *Node) SignRetrievalReceipt(receipt wire.RetrievalReceipt) (wire.Retriev
 		return wire.RetrievalReceipt{}, errors.New("retrieval bytes exceed local shard size")
 	}
 	receipt.MinerAddress = n.address
-	receipt.MinerPublicKey = n.PublicKeyBase64()
+	receipt.MinerPublicKey = n.PublicKeyHex()
 	if err := wire.VerifyRetrievalClientReceipt(receipt); err != nil {
 		return wire.RetrievalReceipt{}, err
 	}
@@ -471,7 +494,7 @@ func (n *Node) Prove(challenge wire.StorageChallenge) (wire.StorageProof, error)
 		ProofType:          challenge.ProofType,
 		ChallengeHash:      challenge.ChallengeHash,
 		MinerAddress:       n.address,
-		MinerPublicKey:     n.PublicKeyBase64(),
+		MinerPublicKey:     n.PublicKeyHex(),
 		ShardHash:          challenge.ShardHash,
 		ShardSize:          int64(len(data)),
 		SectorCommitment:   challenge.SectorCommitment,
@@ -509,39 +532,6 @@ func leafPayload(data []byte, leafSize int, index int) []byte {
 
 func proofHash(challenge wire.StorageChallenge, leafHashes []string, leafPayloads []string) string {
 	return chaincrypto.HashBytes([]byte(challenge.ChallengeID + ":" + challenge.Nonce + ":" + challenge.ChallengeHash + ":" + strings.Join(leafHashes, ",") + ":" + strings.Join(leafPayloads, ",") + ":" + challenge.SectorCommitment))
-}
-
-func createNode(dataDir, metaPath string, backend StorageBackend) (*Node, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	address := minerAddress(pub)
-	meta := Meta{
-		Address:    address,
-		PublicKey:  base64.StdEncoding.EncodeToString(pub),
-		PrivateKey: base64.StdEncoding.EncodeToString(priv),
-	}
-	raw, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(metaPath, raw, 0o600); err != nil {
-		return nil, err
-	}
-	return &Node{
-		dataDir:    dataDir,
-		address:    address,
-		publicKey:  pub,
-		privateKey: priv,
-		backend:    backend,
-		blockstore: NewBackendBlockstore(backend),
-	}, nil
-}
-
-func minerAddress(pub ed25519.PublicKey) string {
-	sum := sha256.Sum256(pub)
-	return "miner_" + hex.EncodeToString(sum[:20])
 }
 
 func postJSON(baseURL string, path string, value any) error {

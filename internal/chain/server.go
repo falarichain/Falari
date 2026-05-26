@@ -86,6 +86,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /validators/deregister", s.deregisterValidator)
 	mux.HandleFunc("POST /validators/delegate", s.delegateStake)
 	mux.HandleFunc("POST /validators/undelegate", s.undelegateStake)
+	mux.HandleFunc("POST /validators/rotate-operator", s.rotateOperator)
+	mux.HandleFunc("GET /validators/unbonding", s.listUnbonding)
 	mux.HandleFunc("POST /validators/evidence", s.submitValidatorEvidence)
 	mux.HandleFunc("POST /transfer", s.transfer)
 	mux.HandleFunc("GET /accounts/", s.getAccount)
@@ -640,6 +642,32 @@ func (s *Server) undelegateStake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) rotateOperator(w http.ResponseWriter, r *http.Request) {
+	var req wire.RotateOperatorRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.RotateOperator(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) listUnbonding(w http.ResponseWriter, r *http.Request) {
+	delegator := r.URL.Query().Get("delegator")
+	if delegator == "" {
+		writeError(w, http.StatusBadRequest, errors.New("delegator query parameter is required"))
+		return
+	}
+	entries := s.store.ListUnbonding(delegator)
+	if entries == nil {
+		entries = []wire.UnbondingEntry{}
+	}
+	writeJSON(w, http.StatusOK, wire.ListUnbondingResponse{Entries: entries})
 }
 
 func (s *Server) submitValidatorEvidence(w http.ResponseWriter, r *http.Request) {

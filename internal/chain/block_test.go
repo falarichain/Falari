@@ -20,10 +20,7 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://localhost:8080", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +29,7 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 
 	aliceKey, err := ethcrypto.GenerateKey()
 	if err != nil {
@@ -74,7 +71,7 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 	if !produced.Block.Finality.Finalized || produced.Block.Finality.VotingPower != produced.Block.Finality.TotalPower {
 		t.Fatalf("expected single-validator block finalized, finality=%+v", produced.Block.Finality)
 	}
-	if produced.Block.ProducerAddress != identity.Address {
+	if produced.Block.ProducerAddress != identity.OwnerAddress {
 		t.Fatal("block producer mismatch")
 	}
 	if err := wire.VerifyBlockSignature(produced.Block); err != nil {
@@ -109,10 +106,7 @@ func TestRegisterValidatorRequiresMinimumStake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	fundValidatorForTest(t, store, identity, MinValidatorStake)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake-1, 0)
 	if err != nil {
@@ -128,10 +122,7 @@ func TestBlockProductionCapsTransactionCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +131,7 @@ func TestBlockProductionCapsTransactionCount(t *testing.T) {
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 	if produced, err := store.ProduceBlock(); err != nil || !produced.Produced {
 		t.Fatalf("expected validator registration block, produced=%t err=%v", produced.Produced, err)
 	}
@@ -204,10 +195,7 @@ func TestAcceptPeerBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +204,7 @@ func TestAcceptPeerBlock(t *testing.T) {
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	producer.SetBlockProducer(identity)
+	producer.SetOperatorIdentity(identity)
 	if err := producer.CreditBalance("alice", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +239,7 @@ func TestAcceptPeerBlock(t *testing.T) {
 	if peer.accountLocked("alice").Balance != 100 {
 		t.Fatal("accepted block should replay genesis_credit transaction")
 	}
-	if peer.data.Validators[identity.Address].ProducedBlocks != 1 {
+	if peer.data.Validators[identity.OwnerAddress].ProducedBlocks != 1 {
 		t.Fatal("peer should track producer block count")
 	}
 
@@ -318,10 +306,7 @@ func TestMempoolProducesContiguousNonceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -330,7 +315,7 @@ func TestMempoolProducesContiguousNonceOrder(t *testing.T) {
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 
 	privateKey, err := ethcrypto.GenerateKey()
 	if err != nil {
@@ -387,10 +372,7 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -399,7 +381,7 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 
 	privateKey, err := ethcrypto.GenerateKey()
 	if err != nil {
@@ -428,7 +410,7 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	}
 	fromAccount := store.accountLocked(from)
 	toAccount := store.accountLocked(to)
-	producerAccount := store.accountLocked(identity.Address)
+	producerAccount := store.accountLocked(identity.OwnerAddress)
 	if fromAccount.Balance != gfTokens(70) || toAccount.Balance != gfTokens(25) || producerAccount.Balance != gfTokens(5) {
 		t.Fatalf("unexpected fee balances: from=%+v to=%+v producer=%+v", fromAccount, toAccount, producerAccount)
 	}
@@ -464,10 +446,7 @@ func TestFeeMarketAdjustsAfterBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.data.FeeMarket.TargetBlockTxs = 1
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -476,7 +455,7 @@ func TestFeeMarketAdjustsAfterBlocks(t *testing.T) {
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 
 	privateKey, err := ethcrypto.GenerateKey()
 	if err != nil {
@@ -507,28 +486,25 @@ func TestSimplifiedBFTFinalizesAfterTwoThirdsVotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identities := make([]*ValidatorIdentity, 0, 3)
+	identities := make([]*OperatorIdentity, 0, 3)
 	for i := 0; i < 3; i++ {
-		identity, err := LoadOrCreateValidatorIdentity("")
-		if err != nil {
-			t.Fatal(err)
-		}
+		identity := testOperatorIdentity(t)
 		identities = append(identities, identity)
-		store.data.Validators[identity.Address] = wire.ValidatorInfo{
-			Address:   identity.Address,
-			PublicKey: identity.PublicKeyBase64(),
-			Stake:     1,
-			Status:    wire.ValidatorStatusActive,
+		store.data.Validators[identity.OwnerAddress] = wire.ValidatorInfo{
+			OwnerAddress:      identity.OwnerAddress,
+			OperatorPublicKey: identity.OperatorPublicKeyHex(),
+			Stake:             1,
+			Status:            wire.ValidatorStatusActive,
 		}
-		store.data.ConsensusValidators[identity.Address] = true
+		store.data.ConsensusValidators[identity.OwnerAddress] = true
 	}
 	proposerAddr, err := store.selectProposerLocked(1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var producer *ValidatorIdentity
+	var producer *OperatorIdentity
 	for _, identity := range identities {
-		if identity.Address == proposerAddr {
+		if identity.OwnerAddress == proposerAddr {
 			producer = identity
 			break
 		}
@@ -536,7 +512,7 @@ func TestSimplifiedBFTFinalizesAfterTwoThirdsVotes(t *testing.T) {
 	if producer == nil {
 		t.Fatal("proposer identity not found")
 	}
-	store.SetBlockProducer(producer)
+	store.SetOperatorIdentity(producer)
 	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +531,7 @@ func TestSimplifiedBFTFinalizesAfterTwoThirdsVotes(t *testing.T) {
 	}
 
 	for _, identity := range identities {
-		if identity.Address == producer.Address {
+		if identity.OwnerAddress == producer.OwnerAddress {
 			continue
 		}
 		resp, err := store.AcceptBlockVote(signTestBlockVote(t, produced.Block, identity, 1))
@@ -580,28 +556,25 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identities := make([]*ValidatorIdentity, 0, 3)
+	identities := make([]*OperatorIdentity, 0, 3)
 	for i := 0; i < 3; i++ {
-		identity, err := LoadOrCreateValidatorIdentity("")
-		if err != nil {
-			t.Fatal(err)
-		}
+		identity := testOperatorIdentity(t)
 		identities = append(identities, identity)
-		store.data.Validators[identity.Address] = wire.ValidatorInfo{
-			Address:   identity.Address,
-			PublicKey: identity.PublicKeyBase64(),
-			Stake:     1,
-			Status:    wire.ValidatorStatusActive,
+		store.data.Validators[identity.OwnerAddress] = wire.ValidatorInfo{
+			OwnerAddress:      identity.OwnerAddress,
+			OperatorPublicKey: identity.OperatorPublicKeyHex(),
+			Stake:             1,
+			Status:            wire.ValidatorStatusActive,
 		}
-		store.data.ConsensusValidators[identity.Address] = true
+		store.data.ConsensusValidators[identity.OwnerAddress] = true
 	}
 	proposerAddr, err := store.selectProposerLocked(1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var producer *ValidatorIdentity
+	var producer *OperatorIdentity
 	for _, identity := range identities {
-		if identity.Address == proposerAddr {
+		if identity.OwnerAddress == proposerAddr {
 			producer = identity
 			break
 		}
@@ -609,7 +582,7 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 	if producer == nil {
 		t.Fatal("proposer identity not found")
 	}
-	store.SetBlockProducer(producer)
+	store.SetOperatorIdentity(producer)
 	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +633,7 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 
 func TestSubmitConsensusVoteBroadcastsAcceptedVoteOnce(t *testing.T) {
 	store, identity := registeredTestValidator(t, MinValidatorStake)
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -669,20 +642,17 @@ func TestSubmitConsensusVoteBroadcastsAcceptedVoteOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.data.ConsensusVotes = map[string]wire.ConsensusVote{}
-	peerIdentity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
+	peerIdentity := testOperatorIdentity(t)
+	store.data.Validators[peerIdentity.OwnerAddress] = wire.ValidatorInfo{
+		OwnerAddress:      peerIdentity.OwnerAddress,
+		OperatorPublicKey: peerIdentity.OperatorPublicKeyHex(),
+		Stake:             10,
+		Status:            wire.ValidatorStatusActive,
 	}
-	store.data.Validators[peerIdentity.Address] = wire.ValidatorInfo{
-		Address:   peerIdentity.Address,
-		PublicKey: peerIdentity.PublicKeyBase64(),
-		Stake:     10,
-		Status:    wire.ValidatorStatusActive,
-	}
-	store.data.ConsensusValidators[peerIdentity.Address] = true
+	store.data.ConsensusValidators[peerIdentity.OwnerAddress] = true
 	broadcaster := &captureConsensusVoteBroadcaster{votes: make(chan wire.ConsensusVote, 2)}
 	store.SetConsensusVoteBroadcaster(broadcaster)
-	vote := signTestConsensusVote(t, produced.Block, identity, wire.ConsensusVotePrevote, validatorPower(store.data.Validators[identity.Address]))
+	vote := signTestConsensusVote(t, produced.Block, identity, wire.ConsensusVotePrevote, validatorPower(store.data.Validators[identity.OwnerAddress]))
 	resp, err := store.SubmitConsensusVote(wire.SubmitConsensusVoteRequest{Vote: vote})
 	if err != nil {
 		t.Fatal(err)
@@ -717,10 +687,7 @@ func TestAcceptBlockRejectsInvalidFinalityCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -729,7 +696,7 @@ func TestAcceptBlockRejectsInvalidFinalityCertificate(t *testing.T) {
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	producer.SetBlockProducer(identity)
+	producer.SetOperatorIdentity(identity)
 	if err := producer.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -754,10 +721,7 @@ func TestAcceptBlockRejectsNonCanonicalFinalityVotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -766,7 +730,7 @@ func TestAcceptBlockRejectsNonCanonicalFinalityVotes(t *testing.T) {
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	producer.SetBlockProducer(identity)
+	producer.SetOperatorIdentity(identity)
 	if err := producer.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -792,10 +756,7 @@ func TestLevelDBStorePersistsState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -804,7 +765,7 @@ func TestLevelDBStorePersistsState(t *testing.T) {
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	store.SetBlockProducer(identity)
+	store.SetOperatorIdentity(identity)
 	if err := store.CreditBalance("alice", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -867,10 +828,7 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -879,7 +837,7 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	producer.SetBlockProducer(identity)
+	producer.SetOperatorIdentity(identity)
 	seedFinalizedDealForEpochTest(producer)
 
 	peer, err := OpenStore("")
@@ -957,33 +915,27 @@ func TestRoundRobinRejectsOutOfTurnProducer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
+	first := testOperatorIdentity(t)
+	second := testOperatorIdentity(t)
+	store.data.Validators[first.OwnerAddress] = wire.ValidatorInfo{
+		OwnerAddress:      first.OwnerAddress,
+		OperatorPublicKey: first.OperatorPublicKeyHex(),
+		Status:            "active",
 	}
-	second, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
+	store.data.Validators[second.OwnerAddress] = wire.ValidatorInfo{
+		OwnerAddress:      second.OwnerAddress,
+		OperatorPublicKey: second.OperatorPublicKeyHex(),
+		Status:            "active",
 	}
-	store.data.Validators[first.Address] = wire.ValidatorInfo{
-		Address:   first.Address,
-		PublicKey: first.PublicKeyBase64(),
-		Status:    "active",
-	}
-	store.data.Validators[second.Address] = wire.ValidatorInfo{
-		Address:   second.Address,
-		PublicKey: second.PublicKeyBase64(),
-		Status:    "active",
-	}
-	store.data.ConsensusValidators[first.Address] = true
-	store.data.ConsensusValidators[second.Address] = true
+	store.data.ConsensusValidators[first.OwnerAddress] = true
+	store.data.ConsensusValidators[second.OwnerAddress] = true
 
 	expected := store.consensusValidatorAddressesLocked()[0]
 	outOfTurn := first
-	if expected == first.Address {
+	if expected == first.OwnerAddress {
 		outOfTurn = second
 	}
-	store.SetBlockProducer(outOfTurn)
+	store.SetOperatorIdentity(outOfTurn)
 	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -991,10 +943,10 @@ func TestRoundRobinRejectsOutOfTurnProducer(t *testing.T) {
 		t.Fatal("expected out-of-turn producer to be rejected")
 	}
 
-	if expected == first.Address {
-		store.SetBlockProducer(first)
+	if expected == first.OwnerAddress {
+		store.SetOperatorIdentity(first)
 	} else {
-		store.SetBlockProducer(second)
+		store.SetOperatorIdentity(second)
 	}
 	produced, err := store.ProduceBlock()
 	if err != nil {
@@ -1091,33 +1043,33 @@ func signedTransferTx(t *testing.T, id string, req wire.TransferRequest, private
 	}
 }
 
-func signTestBlockVote(t *testing.T, block wire.Block, identity *ValidatorIdentity, power uint64) wire.BlockVote {
+func signTestBlockVote(t *testing.T, block wire.Block, identity *OperatorIdentity, power uint64) wire.BlockVote {
 	t.Helper()
 	vote := wire.BlockVote{
 		Height:             block.Height,
 		BlockHash:          block.Hash,
-		ValidatorAddress:   identity.Address,
-		ValidatorPublicKey: identity.PublicKeyBase64(),
+		ValidatorAddress:   identity.OwnerAddress,
+		ValidatorPublicKey: identity.OperatorPublicKeyHex(),
 		Power:              power,
 	}
-	if err := wire.SignBlockVote(&vote, identity.PrivateKey); err != nil {
+	if err := wire.SignBlockVote(&vote, identity.OperatorPrivateKey); err != nil {
 		t.Fatal(err)
 	}
 	return vote
 }
 
-func signTestConsensusVote(t *testing.T, block wire.Block, identity *ValidatorIdentity, voteType string, power uint64) wire.ConsensusVote {
+func signTestConsensusVote(t *testing.T, block wire.Block, identity *OperatorIdentity, voteType string, power uint64) wire.ConsensusVote {
 	t.Helper()
 	vote := wire.ConsensusVote{
 		Height:             block.Height,
 		Round:              block.Round,
 		Type:               voteType,
 		BlockHash:          block.Hash,
-		ValidatorAddress:   identity.Address,
-		ValidatorPublicKey: identity.PublicKeyBase64(),
+		ValidatorAddress:   identity.OwnerAddress,
+		ValidatorPublicKey: identity.OperatorPublicKeyHex(),
 		Power:              power,
 	}
-	if err := wire.SignConsensusVote(&vote, identity.PrivateKey); err != nil {
+	if err := wire.SignConsensusVote(&vote, identity.OperatorPrivateKey); err != nil {
 		t.Fatal(err)
 	}
 	return vote

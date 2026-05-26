@@ -1088,6 +1088,9 @@ const (
 	TokenValidatorPoolInitial  uint64 = 1_000_000_000 * TokenUnit
 	TokenRepairPoolInitial     uint64 = 1_000_000_000 * TokenUnit
 	TokenFoundationPoolInitial uint64 = 1_000_000_000 * TokenUnit
+
+	MinDelegationAmount      uint64 = 1000 * TokenUnit
+	UnbondingPeriodSeconds   int64  = 7 * 86400
 )
 
 type RewardPools struct {
@@ -1167,6 +1170,7 @@ type Account struct {
 	Nonce                uint64 `json:"nonce"`
 	LockedStake          uint64 `json:"locked_stake"`
 	LockedStorage        uint64 `json:"locked_storage"`
+	UnbondingBalance     uint64 `json:"unbonding_balance,omitempty"`
 	PendingMiningRewards uint64 `json:"pending_mining_rewards,omitempty"`
 }
 
@@ -1349,23 +1353,24 @@ type MempoolResponse struct {
 }
 
 type ValidatorInfo struct {
-	Address              string `json:"address"`
-	PublicKey            string `json:"public_key"`
-	Endpoint             string `json:"endpoint,omitempty"`
-	Stake                uint64 `json:"stake"`
-	DelegatedStake       uint64 `json:"delegated_stake,omitempty"`
-	SelfStake            uint64 `json:"self_stake,omitempty"`
-	Status               string `json:"status"`
-	Consensus            bool   `json:"consensus"`
-	RegisteredAtUnix     int64  `json:"registered_at_unix"`
-	ProducedBlocks       uint64 `json:"produced_blocks"`
-	Slashed              uint64 `json:"slashed"`
-	EvidenceCount        uint64 `json:"evidence_count"`
-	DelegatorCount       int    `json:"delegator_count,omitempty"`
-	Rewards              uint64 `json:"rewards,omitempty"`
-	DelegationRewards    uint64 `json:"delegation_rewards,omitempty"`
-	AvailabilityScoreBPS uint64 `json:"availability_score_bps,omitempty"`
-	CommissionRateBPS    uint64 `json:"commission_rate_bps,omitempty"`
+	OwnerAddress           string `json:"owner_address"`
+	OperatorAddress        string `json:"operator_address"`
+	OperatorPublicKey      string `json:"operator_public_key"`
+	Endpoint               string `json:"endpoint,omitempty"`
+	Stake                  uint64 `json:"stake"`
+	DelegatedStake         uint64 `json:"delegated_stake,omitempty"`
+	SelfStake              uint64 `json:"self_stake,omitempty"`
+	Status                 string `json:"status"`
+	Consensus              bool   `json:"consensus"`
+	RegisteredAtUnix       int64  `json:"registered_at_unix"`
+	ProducedBlocks         uint64 `json:"produced_blocks"`
+	Slashed                uint64 `json:"slashed"`
+	EvidenceCount          uint64 `json:"evidence_count"`
+	DelegatorCount         int    `json:"delegator_count,omitempty"`
+	Rewards                uint64 `json:"rewards,omitempty"`
+	DelegationRewards      uint64 `json:"delegation_rewards,omitempty"`
+	AvailabilityScoreBPS   uint64 `json:"availability_score_bps,omitempty"`
+	CommissionRateBPS      uint64 `json:"commission_rate_bps,omitempty"`
 }
 
 // ValidatorTurnWindow tracks a sliding window of proposer turn results
@@ -1419,12 +1424,14 @@ type UndelegateStakeResponse struct {
 }
 
 type RegisterValidatorRequest struct {
-	Address           string `json:"address"`
-	PublicKey         string `json:"public_key"`
+	OwnerAddress      string `json:"owner_address"`
+	OperatorAddress   string `json:"operator_address"`
+	OperatorPublicKey string `json:"operator_public_key"`
 	Endpoint          string `json:"endpoint,omitempty"`
 	Stake             uint64 `json:"stake"`
 	CommissionRateBPS uint64 `json:"commission_rate_bps,omitempty"`
 	Signature         string `json:"signature"`
+	OperatorSignature string `json:"operator_signature"`
 }
 
 type RegisterValidatorResponse struct {
@@ -1433,6 +1440,34 @@ type RegisterValidatorResponse struct {
 
 type ListValidatorsResponse struct {
 	Validators []ValidatorInfo `json:"validators"`
+}
+
+type UnbondingEntry struct {
+	ID            string `json:"id"`
+	Delegator     string `json:"delegator"`
+	Validator     string `json:"validator"`
+	Amount        uint64 `json:"amount"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+	MaturesAtUnix int64  `json:"matures_at_unix"`
+}
+
+type RotateOperatorRequest struct {
+	OwnerAddress         string `json:"owner_address"`
+	NewOperatorAddress   string `json:"new_operator_address"`
+	NewOperatorPublicKey string `json:"new_operator_public_key"`
+	Nonce                uint64 `json:"nonce,omitempty"`
+	Signature            string `json:"signature"`
+	OperatorSignature    string `json:"operator_signature"`
+}
+
+type RotateOperatorResponse struct {
+	OwnerAddress      string `json:"owner_address"`
+	OperatorAddress   string `json:"operator_address"`
+	OperatorPublicKey string `json:"operator_public_key"`
+}
+
+type ListUnbondingResponse struct {
+	Entries []UnbondingEntry `json:"entries"`
 }
 
 const (

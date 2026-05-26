@@ -1,22 +1,22 @@
 package wire
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"testing"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestSignAndVerifyDHTProvider(t *testing.T) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
+	addr := AccountAddress(&key.PublicKey)
 
 	record := DHTProviderRecord{
-		MinerAddress:   "miner_test123",
-		PublicKey:      base64.StdEncoding.EncodeToString(pub),
+		MinerAddress:   addr,
+		PublicKey:      EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey)),
 		Endpoint:       "http://localhost:9090",
 		PeerID:         "QmTest123",
 		PeerAddrs:      []string{"/ip4/127.0.0.1/tcp/4001"},
@@ -25,7 +25,7 @@ func TestSignAndVerifyDHTProvider(t *testing.T) {
 		ExpiresAtUnix:  time.Now().Add(5 * time.Minute).Unix(),
 	}
 
-	if err := SignDHTProvider(&record, priv); err != nil {
+	if err := SignDHTProvider(&record, key); err != nil {
 		t.Fatalf("SignDHTProvider failed: %v", err)
 	}
 	if record.Signature == "" {
@@ -37,18 +37,18 @@ func TestSignAndVerifyDHTProvider(t *testing.T) {
 }
 
 func TestVerifyDHTProviderTampered(t *testing.T) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	record := DHTProviderRecord{
-		MinerAddress:  "miner_tamper",
-		PublicKey:     base64.StdEncoding.EncodeToString(pub),
+		MinerAddress:  AccountAddress(&key.PublicKey),
+		PublicKey:     EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey)),
 		ShardHash:     "original_hash",
 		ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
 	}
-	if err := SignDHTProvider(&record, priv); err != nil {
+	if err := SignDHTProvider(&record, key); err != nil {
 		t.Fatal(err)
 	}
 
@@ -61,9 +61,9 @@ func TestVerifyDHTProviderTampered(t *testing.T) {
 
 func TestVerifyDHTProviderMissingKey(t *testing.T) {
 	record := DHTProviderRecord{
-		MinerAddress: "miner_nokey",
+		MinerAddress: "0x0000000000000000000000000000000000000000",
 		ShardHash:    "hash123",
-		Signature:    base64.StdEncoding.EncodeToString([]byte("fake")),
+		Signature:    EncodeHex([]byte("fake")),
 	}
 	if err := VerifyDHTProvider(record); err == nil {
 		t.Fatal("expected error for missing public key")
@@ -71,22 +71,22 @@ func TestVerifyDHTProviderMissingKey(t *testing.T) {
 }
 
 func TestVerifyDHTProviderWrongKey(t *testing.T) {
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	key1, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub2, _, err := ed25519.GenerateKey(rand.Reader)
+	key2, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	record := DHTProviderRecord{
-		MinerAddress:  "miner_wrongkey",
-		PublicKey:     base64.StdEncoding.EncodeToString(pub2),
+		MinerAddress:  AccountAddress(&key2.PublicKey),
+		PublicKey:     EncodeHex(ethcrypto.CompressPubkey(&key2.PublicKey)),
 		ShardHash:     "hash456",
 		ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
 	}
-	if err := SignDHTProvider(&record, priv); err != nil {
+	if err := SignDHTProvider(&record, key1); err != nil {
 		t.Fatal(err)
 	}
 	if err := VerifyDHTProvider(record); err == nil {

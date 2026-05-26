@@ -11,7 +11,7 @@ import (
 )
 
 func TestFetchBlockViaLibP2P(t *testing.T) {
-	node, err := OpenNode(t.TempDir())
+	node, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}

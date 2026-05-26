@@ -67,7 +67,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) identity(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"address":    s.node.Address(),
-		"public_key": s.node.PublicKeyBase64(),
+		"public_key": s.node.PublicKeyHex(),
 	})
 }
 

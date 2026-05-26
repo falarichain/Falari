@@ -14,7 +14,7 @@ import (
 
 func TestDownloadSourceShardUsesDiscoveredLibP2PProvider(t *testing.T) {
 	resetProviderTransportMemoryForTests()
-	sourceNode, err := OpenNode(t.TempDir())
+	sourceNode, err := OpenNode(t.TempDir(), testNodeKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}

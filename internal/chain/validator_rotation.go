@@ -45,15 +45,15 @@ func (s *Store) rotateValidatorsLocked(epochRound uint64) validatorRotationTxPay
 
 	// Sort by effective power (stake × availability), then ProducedBlocks, then address.
 	sort.SliceStable(candidates, func(i, j int) bool {
-		leftPower := s.effectivePowerLocked(candidates[i].Address)
-		rightPower := s.effectivePowerLocked(candidates[j].Address)
+		leftPower := s.effectivePowerLocked(candidates[i].OwnerAddress)
+		rightPower := s.effectivePowerLocked(candidates[j].OwnerAddress)
 		if leftPower != rightPower {
 			return leftPower > rightPower
 		}
 		if candidates[i].ProducedBlocks != candidates[j].ProducedBlocks {
 			return candidates[i].ProducedBlocks > candidates[j].ProducedBlocks
 		}
-		return candidates[i].Address < candidates[j].Address
+		return candidates[i].OwnerAddress < candidates[j].OwnerAddress
 	})
 
 	// Select top candidates, filtering by availability threshold.
@@ -63,13 +63,13 @@ func (s *Store) rotateValidatorsLocked(epochRound uint64) validatorRotationTxPay
 		if uint64(len(newSet)) >= maxValidators {
 			break
 		}
-		score := s.availabilityScoreLocked(candidate.Address)
+		score := s.availabilityScoreLocked(candidate.OwnerAddress)
 		if score < availThreshold && uint64(len(newSet)) >= minValidators {
 			continue
 		}
-		newSet[candidate.Address] = true
-		if !previousSet[candidate.Address] {
-			added = append(added, candidate.Address)
+		newSet[candidate.OwnerAddress] = true
+		if !previousSet[candidate.OwnerAddress] {
+			added = append(added, candidate.OwnerAddress)
 		}
 	}
 
@@ -79,10 +79,10 @@ func (s *Store) rotateValidatorsLocked(epochRound uint64) validatorRotationTxPay
 			if uint64(len(newSet)) >= minValidators {
 				break
 			}
-			if !newSet[candidate.Address] {
-				newSet[candidate.Address] = true
-				if !previousSet[candidate.Address] {
-					added = append(added, candidate.Address)
+			if !newSet[candidate.OwnerAddress] {
+				newSet[candidate.OwnerAddress] = true
+				if !previousSet[candidate.OwnerAddress] {
+					added = append(added, candidate.OwnerAddress)
 				}
 			}
 		}

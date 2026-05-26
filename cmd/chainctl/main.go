@@ -737,7 +737,11 @@ func mine(args []string) {
 	p2pTopic := fs.String("p2p-topic", "storage-chain/providers/devnet", "libp2p provider discovery topic")
 	fs.Parse(args)
 
-	node, err := storage.OpenNode(*data)
+	minerKey := os.Getenv("MINER_PRIVATE_KEY")
+	if minerKey == "" {
+		log.Fatal("MINER_PRIVATE_KEY environment variable is not set; generate a key with: genkey")
+	}
+	node, err := storage.OpenNode(*data, minerKey)
 	if err != nil {
 		log.Fatalf("open mining node: %v", err)
 	}
@@ -2529,7 +2533,7 @@ func voteBlock(args []string) {
 	fs := flag.NewFlagSet("vote-block", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
 	height := fs.String("height", "latest", "block height or latest")
-	validatorKey := fs.String("validator-key", "./data/validator.json", "validator identity file path")
+	_ = fs.String("validator-key", "", "deprecated: use VALIDATOR_PRIVATE_KEY env var")
 	fs.Parse(args)
 
 	path := "/blocks/latest"
@@ -2540,19 +2544,19 @@ func voteBlock(args []string) {
 	if err := client.NewHTTP(*chainURL).Get(path, &blockResp); err != nil {
 		log.Fatal(err)
 	}
-	identity, err := chainpkg.LoadOrCreateValidatorIdentity(*validatorKey)
+	identity, err := chainpkg.LoadOperatorIdentityFromEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
-	power := validatorPowerForVote(*chainURL, identity.Address)
+	power := validatorPowerForVote(*chainURL, identity.OperatorAddress)
 	vote := wire.BlockVote{
 		Height:             blockResp.Block.Height,
 		BlockHash:          blockResp.Block.Hash,
-		ValidatorAddress:   identity.Address,
-		ValidatorPublicKey: identity.PublicKeyBase64(),
+		ValidatorAddress:   identity.OperatorAddress,
+		ValidatorPublicKey: identity.OperatorPublicKeyHex(),
 		Power:              power,
 	}
-	if err := wire.SignBlockVote(&vote, identity.PrivateKey); err != nil {
+	if err := wire.SignBlockVote(&vote, identity.OperatorPrivateKey); err != nil {
 		log.Fatal(err)
 	}
 	var voteResp wire.BlockVoteResponse
@@ -2580,7 +2584,7 @@ func validatorPowerForVote(chainURL string, address string) uint64 {
 		log.Fatal(err)
 	}
 	for _, validator := range resp.Validators {
-		if validator.Address != address {
+		if validator.OperatorAddress != address {
 			continue
 		}
 		if validator.Stake > 0 {
@@ -2603,7 +2607,7 @@ func listValidators(args []string) {
 	fmt.Printf("validators=%d\n", len(resp.Validators))
 	for _, validator := range resp.Validators {
 		fmt.Printf("validator %s status=%s consensus=%t stake=%s delegated=%s produced=%d delegators=%d endpoint=%s\n",
-			validator.Address, validator.Status, validator.Consensus, formatGF(validator.SelfStake), formatGF(validator.DelegatedStake), validator.ProducedBlocks, validator.DelegatorCount, validator.Endpoint)
+			validator.OwnerAddress, validator.Status, validator.Consensus, formatGF(validator.SelfStake), formatGF(validator.DelegatedStake), validator.ProducedBlocks, validator.DelegatorCount, validator.Endpoint)
 	}
 }
 

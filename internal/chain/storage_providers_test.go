@@ -1,13 +1,12 @@
 package chain
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"testing"
 	"time"
 
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestAcceptStorageProviderAnnouncementAndQueryByShard(t *testing.T) {
@@ -15,12 +14,12 @@ func TestAcceptStorageProviderAnnouncementAndQueryByShard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	minerAddress := "miner_provider"
-	minerPublicKey := base64.StdEncoding.EncodeToString(publicKey)
+	minerAddress := wire.AccountAddress(&key.PublicKey)
+	minerPublicKey := wire.EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey))
 	store.data.Miners[minerAddress] = wire.MinerStats{
 		MinerAddress:  minerAddress,
 		PublicKey:     minerPublicKey,
@@ -47,7 +46,7 @@ func TestAcceptStorageProviderAnnouncementAndQueryByShard(t *testing.T) {
 		LastSeenUnix:  time.Now().Unix(),
 		ExpiresAtUnix: time.Now().Add(time.Minute).Unix(),
 	}
-	if signErr := wire.SignStorageProvider(&record, privateKey); signErr != nil {
+	if signErr := wire.SignStorageProvider(&record, key); signErr != nil {
 		t.Fatal(signErr)
 	}
 	if acceptErr := store.AcceptStorageProviderAnnouncement(wire.StorageProviderAnnouncement{Provider: record}); acceptErr != nil {

@@ -119,18 +119,23 @@ type State struct {
 	DataModerationThresholdDen int `json:"data_moderation_threshold_den"`
 	OperatorChangeThresholdNum int `json:"operator_change_threshold_num"`
 	OperatorChangeThresholdDen int `json:"operator_change_threshold_den"`
+
+	// Operator-to-owner mapping: operatorAddress -> ownerAddress.
+	OperatorMap map[string]string `json:"operator_map,omitempty"`
+	// Unbonding entries for staking withdrawal delays.
+	UnbondingEntries map[string]wire.UnbondingEntry `json:"unbonding_entries,omitempty"`
 }
 
 type Store struct {
-	mu              sync.Mutex
-	path            string
-	db              *leveldb.DB
-	data            State
-	blockProducer   *ValidatorIdentity
-	broadcaster     BlockBroadcaster
-	txBroadcaster   TransactionBroadcaster
-	voteBroadcaster ConsensusVoteBroadcaster
-	blockInterval   time.Duration
+	mu               sync.Mutex
+	path             string
+	db               *leveldb.DB
+	data             State
+	operatorIdentity *OperatorIdentity
+	broadcaster      BlockBroadcaster
+	txBroadcaster    TransactionBroadcaster
+	voteBroadcaster  ConsensusVoteBroadcaster
+	blockInterval    time.Duration
 }
 
 // SetBlockInterval configures the block production interval for per-block reward calculations.
@@ -240,18 +245,24 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 		}
 	}
 	for _, v := range doc.Validators {
-		addr := wire.NormalizeAddress(v.Address)
-		state.Validators[addr] = wire.ValidatorInfo{
-			Address:          addr,
-			PublicKey:        v.PublicKey,
-			Endpoint:         v.Endpoint,
-			Stake:            v.Stake,
-			SelfStake:        v.Stake,
-			Status:           "active",
-			Consensus:        true,
-			RegisteredAtUnix: doc.GenesisTime,
+		ownerAddr := wire.NormalizeAddress(v.OwnerAddress)
+		operatorAddr := wire.NormalizeAddress(v.OperatorAddress)
+		state.Validators[ownerAddr] = wire.ValidatorInfo{
+			OwnerAddress:      ownerAddr,
+			OperatorAddress:   operatorAddr,
+			OperatorPublicKey: v.OperatorPublicKey,
+			Endpoint:          v.Endpoint,
+			Stake:             v.Stake,
+			SelfStake:         v.Stake,
+			Status:            "active",
+			Consensus:         true,
+			RegisteredAtUnix:  doc.GenesisTime,
 		}
-		state.ConsensusValidators[addr] = true
+		state.ConsensusValidators[ownerAddr] = true
+		if state.OperatorMap == nil {
+			state.OperatorMap = map[string]string{}
+		}
+		state.OperatorMap[operatorAddr] = ownerAddr
 	}
 	if doc.RewardPools != nil {
 		state.RewardPools = &reward.Pools{
@@ -347,6 +358,8 @@ func newState() State {
 		GovernanceProposals:   map[string]wire.GovernanceProposal{},
 		GovernanceVotes:       map[string][]wire.GovernanceVote{},
 		MultisigWallets:       map[string]*wire.MultisigWallet{},
+		OperatorMap:           map[string]string{},
+		UnbondingEntries:      map[string]wire.UnbondingEntry{},
 		// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 		DataModerationThresholdNum: 1,
 		DataModerationThresholdDen: 3,
@@ -1558,26 +1571,39 @@ func (s *Store) DeregisterMiner(minerAddress string) error {
 	return s.saveLocked()
 }
 
-func (s *Store) SetBlockProducer(identity *ValidatorIdentity) {
+func (s *Store) SetOperatorIdentity(identity *OperatorIdentity) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.blockProducer = identity
+	s.operatorIdentity = identity
 }
 
 func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.RegisterValidatorResponse, error) {
 	if err := wire.VerifyValidatorRegistration(req); err != nil {
 		return wire.RegisterValidatorResponse{}, err
 	}
-	if req.Address == "" || req.PublicKey == "" {
-		return wire.RegisterValidatorResponse{}, errors.New("validator address and public key are required")
+	if req.OwnerAddress == "" || req.OperatorAddress == "" || req.OperatorPublicKey == "" {
+		return wire.RegisterValidatorResponse{}, errors.New("owner address, operator address and operator public key are required")
 	}
-	req.Address = wire.NormalizeAddress(req.Address)
+	req.OwnerAddress = wire.NormalizeAddress(req.OwnerAddress)
+	req.OperatorAddress = wire.NormalizeAddress(req.OperatorAddress)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	existing := s.validatorLocked(req.Address)
-	account := s.accountLocked(req.Address)
+	// Check operator uniqueness: operator must not already be mapped.
+	if s.data.OperatorMap == nil {
+		s.data.OperatorMap = map[string]string{}
+	}
+	if existingOwner, mapped := s.data.OperatorMap[req.OperatorAddress]; mapped {
+		return wire.RegisterValidatorResponse{}, errors.New("operator address already registered for owner " + existingOwner)
+	}
+	// Check owner uniqueness: owner must not already have a validator.
+	existing := s.validatorLocked(req.OwnerAddress)
+	if existing.OwnerAddress != "" && existing.Status == wire.ValidatorStatusActive {
+		return wire.RegisterValidatorResponse{}, errors.New("owner already has an active validator")
+	}
+
+	account := s.accountLocked(req.OwnerAddress)
 	if req.Stake < MinValidatorStake {
 		return wire.RegisterValidatorResponse{}, errors.New("validator stake below minimum required")
 	}
@@ -1589,8 +1615,9 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 		account.Balance -= additionalStake
 		account.LockedStake += additionalStake
 	}
-	existing.Address = req.Address
-	existing.PublicKey = req.PublicKey
+	existing.OwnerAddress = req.OwnerAddress
+	existing.OperatorAddress = req.OperatorAddress
+	existing.OperatorPublicKey = req.OperatorPublicKey
 	existing.Endpoint = req.Endpoint
 	existing.Stake = req.Stake
 	existing.SelfStake = req.Stake
@@ -1600,14 +1627,17 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 		existing.RegisteredAtUnix = time.Now().Unix()
 	}
 	s.data.Accounts[account.Address] = account
-	s.data.Validators[req.Address] = existing
-	s.data.ConsensusValidators[req.Address] = true
-	s.recordTxLocked("register_validator", req.Address, map[string]any{
-		"address":    req.Address,
-		"public_key": req.PublicKey,
-		"endpoint":   req.Endpoint,
-		"stake":      req.Stake,
-		"signature":  req.Signature,
+	s.data.Validators[req.OwnerAddress] = existing
+	s.data.ConsensusValidators[req.OwnerAddress] = true
+	s.data.OperatorMap[req.OperatorAddress] = req.OwnerAddress
+	s.recordTxLocked("register_validator", req.OwnerAddress, map[string]any{
+		"owner_address":      req.OwnerAddress,
+		"operator_address":   req.OperatorAddress,
+		"operator_public_key": req.OperatorPublicKey,
+		"endpoint":           req.Endpoint,
+		"stake":              req.Stake,
+		"signature":          req.Signature,
+		"operator_signature": req.OperatorSignature,
 	})
 	if err := s.saveLocked(); err != nil {
 		return wire.RegisterValidatorResponse{}, err
@@ -1615,11 +1645,12 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 	return wire.RegisterValidatorResponse{Validator: existing}, nil
 }
 
-func (s *Store) DeregisterValidator(validatorAddress string) error {
+func (s *Store) DeregisterValidator(ownerAddress string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	validator, ok := s.data.Validators[validatorAddress]
+	ownerAddress = wire.NormalizeAddress(ownerAddress)
+	validator, ok := s.data.Validators[ownerAddress]
 	if !ok {
 		return errors.New("validator not found")
 	}
@@ -1629,11 +1660,15 @@ func (s *Store) DeregisterValidator(validatorAddress string) error {
 	if validator.Status != wire.ValidatorStatusExiting {
 		validator.Status = wire.ValidatorStatusExiting
 	}
-	delete(s.data.ConsensusValidators, validatorAddress)
-	s.data.Validators[validatorAddress] = validator
-	s.recordTxLocked("deregister_validator", validatorAddress, map[string]any{
-		"validator_address": validatorAddress,
-		"status":            validator.Status,
+	delete(s.data.ConsensusValidators, ownerAddress)
+	// Remove operator mapping.
+	if validator.OperatorAddress != "" {
+		delete(s.data.OperatorMap, validator.OperatorAddress)
+	}
+	s.data.Validators[ownerAddress] = validator
+	s.recordTxLocked("deregister_validator", ownerAddress, map[string]any{
+		"owner_address": ownerAddress,
+		"status":        validator.Status,
 	})
 	return s.saveLocked()
 }
@@ -1658,8 +1693,8 @@ func (s *Store) Validators() wire.ListValidatorsResponse {
 	s.finalizeExitingValidatorsLocked()
 	validators := make([]wire.ValidatorInfo, 0, len(s.data.Validators))
 	for _, validator := range s.data.Validators {
-		validator.Consensus = s.data.ConsensusValidators[validator.Address]
-		validator.AvailabilityScoreBPS = s.availabilityScoreLocked(validator.Address)
+		validator.Consensus = s.data.ConsensusValidators[validator.OwnerAddress]
+		validator.AvailabilityScoreBPS = s.availabilityScoreLocked(validator.OwnerAddress)
 		validators = append(validators, validator)
 	}
 	return wire.ListValidatorsResponse{Validators: validators}
@@ -1920,9 +1955,19 @@ func (s *Store) validatorLocked(address string) wire.ValidatorInfo {
 	address = wire.NormalizeAddress(address)
 	validator, ok := s.data.Validators[address]
 	if !ok {
-		return wire.ValidatorInfo{Address: address}
+		return wire.ValidatorInfo{OwnerAddress: address}
 	}
 	return validator
+}
+
+// resolveOperatorToOwner resolves an operator address to its owner address.
+// If the address is not found in OperatorMap, it is returned as-is (assumed to be owner).
+func (s *Store) resolveOperatorToOwner(operatorAddress string) string {
+	operatorAddress = wire.NormalizeAddress(operatorAddress)
+	if owner, ok := s.data.OperatorMap[operatorAddress]; ok {
+		return owner
+	}
+	return operatorAddress
 }
 
 func (s *Store) accountLocked(address string) wire.Account {

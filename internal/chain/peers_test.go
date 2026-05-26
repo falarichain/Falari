@@ -18,10 +18,7 @@ func TestPeerNetworkSyncOnceFetchesMissingBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +27,7 @@ func TestPeerNetworkSyncOnceFetchesMissingBlocks(t *testing.T) {
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	producer.SetBlockProducer(identity)
+	producer.SetOperatorIdentity(identity)
 
 	aliceKey, err := ethcrypto.GenerateKey()
 	if err != nil {
@@ -99,10 +96,7 @@ func TestLibP2PGossipBroadcastsBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-libp2p", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +105,7 @@ func TestLibP2PGossipBroadcastsBlocks(t *testing.T) {
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	producer.SetBlockProducer(identity)
+	producer.SetOperatorIdentity(identity)
 
 	producerNetwork, err := NewPeerNetworkWithConfig(producer, PeerNetworkConfig{
 		LibP2PListen: "/ip4/127.0.0.1/tcp/0",
@@ -251,10 +245,7 @@ func TestAcceptedTransactionIsAppliedWhenProduced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := LoadOrCreateValidatorIdentity("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity := testOperatorIdentity(t)
 	registration, err := identity.RegistrationRequest("http://validator-b", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +254,7 @@ func TestAcceptedTransactionIsAppliedWhenProduced(t *testing.T) {
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
-	producer.SetBlockProducer(identity)
+	producer.SetOperatorIdentity(identity)
 
 	accepted, err := producer.AcceptTransaction(tx)
 	if err != nil {

@@ -14,9 +14,9 @@ import (
 // e.g. gfTokens(100) = 10_000_000_000 (100 GF in gf-sat).
 func gfTokens(n uint64) uint64 { return n * wire.TokenUnit }
 
-func fundValidatorForTest(t *testing.T, store *Store, identity *ValidatorIdentity, stake uint64) {
+func fundValidatorForTest(t *testing.T, store *Store, identity *OperatorIdentity, stake uint64) {
 	t.Helper()
-	store.data.Accounts[identity.Address] = wire.Account{Address: identity.Address, Balance: stake}
+	store.data.Accounts[identity.OwnerAddress] = wire.Account{Address: identity.OwnerAddress, Balance: stake}
 }
 
 // testUser holds an ECDSA key pair and the derived account address for tests.

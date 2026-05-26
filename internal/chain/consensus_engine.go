@@ -95,7 +95,7 @@ func (s *Store) advanceConsensusRoundLocked(now int64) {
 	cs.ConsensusPhase = "propose"
 	cs.ConsensusRoundStartedAtUnix = now
 
-	if s.blockProducer != nil && proposer == s.blockProducer.Address {
+	if s.operatorIdentity != nil && proposer == s.operatorIdentity.OwnerAddress {
 		return
 	}
 }
@@ -187,7 +187,7 @@ func (s *Store) fullStateRootLocked() string {
 		leaves = append(leaves, hashString("miner:"+miner.MinerAddress+":"+miner.Status+":"+u64toa(miner.ProofSuccess)+":"+u64toa(miner.ProofFailure)+":"+u64toa(miner.Stake)+":"+booltoa(miner.AccessServiceRequired)+":"+booltoa(miner.UploadServiceEnabled)+":"+booltoa(miner.DownloadServiceEnabled)))
 	}
 	for _, validator := range s.data.Validators {
-		leaves = append(leaves, hashString("validator:"+validator.Address+":"+validator.Status+":"+u64toa(validatorPower(validator))))
+		leaves = append(leaves, hashString("validator:"+validator.OwnerAddress+":"+validator.OperatorPublicKey+":"+validator.Status+":"+u64toa(validatorPower(validator))))
 	}
 	for dealFamily, dealID := range s.data.Deals {
 		leaves = append(leaves, hashString("deal:"+dealFamily+":"+dealID))

@@ -1,13 +1,12 @@
 package chain
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"testing"
 	"time"
 
 	"chain/internal/wire"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestSetAccessPolicyBlocksManifestAndProviders(t *testing.T) {
@@ -59,14 +58,15 @@ func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testin
 		t.Fatal(err)
 	}
 	alice := newTestUser(t)
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	minerPublicKey := base64.StdEncoding.EncodeToString(publicKey)
+	minerPublicKey := wire.EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey))
+	minerAddress := wire.AccountAddress(&key.PublicKey)
 	intent := testLifecycleIntentWithUser(alice.Addr)
 	intent.Receipts[0][0] = wire.MinerReceipt{
-		MinerAddress:   "miner_lifecycle",
+		MinerAddress:   minerAddress,
 		MinerPublicKey: minerPublicKey,
 		ShardHash:      "shard_lifecycle",
 		ShardSize:      32,
@@ -74,8 +74,8 @@ func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testin
 	store.data.Intents[intent.IntentID] = intent
 	store.data.Deals[intent.DealID] = intent.IntentID
 	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, LockedStorage: gfTokens(10)}
-	store.data.Miners["miner_lifecycle"] = wire.MinerStats{
-		MinerAddress:  "miner_lifecycle",
+	store.data.Miners[minerAddress] = wire.MinerStats{
+		MinerAddress:  minerAddress,
 		PublicKey:     minerPublicKey,
 		Endpoint:      "http://miner",
 		CapacityBytes: 100,
@@ -109,11 +109,11 @@ func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testin
 	deleteReceipt := wire.DeleteReceipt{
 		IntentID:       intent.IntentID,
 		ShardHash:      "shard_lifecycle",
-		MinerAddress:   "miner_lifecycle",
+		MinerAddress:   minerAddress,
 		MinerPublicKey: minerPublicKey,
 		DeletedAtUnix:  time.Now().Unix(),
 	}
-	if err := wire.SignDeleteReceipt(&deleteReceipt, privateKey); err != nil {
+	if err := wire.SignDeleteReceipt(&deleteReceipt, key); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := store.SubmitDeleteReceipt(wire.SubmitDeleteReceiptRequest{Receipt: deleteReceipt})
@@ -123,7 +123,7 @@ func TestTerminateDealBurnsRemainingAndDeleteReceiptReleasesMinerUsage(t *testin
 	if resp.Status != wire.StorageStatusDeleted {
 		t.Fatalf("expected deleted status, got %+v", resp)
 	}
-	if miner := store.minerStatsLocked("miner_lifecycle"); miner.UsedBytes != 0 {
+	if miner := store.minerStatsLocked(minerAddress); miner.UsedBytes != 0 {
 		t.Fatalf("expected miner used bytes to release, got %+v", miner)
 	}
 	if store.data.Intents[intent.IntentID].Status != wire.StatusDeleted {
@@ -344,22 +344,23 @@ func TestDeleteTasksQueryFiltersByStatusAndIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice := newTestUser(t)
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	minerPublicKey := base64.StdEncoding.EncodeToString(publicKey)
+	minerPublicKey := wire.EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey))
+	minerAddress := wire.AccountAddress(&key.PublicKey)
 	intent := testLifecycleIntentWithUser(alice.Addr)
 	intent.Receipts[0][0] = wire.MinerReceipt{
-		MinerAddress:   "miner_lifecycle",
+		MinerAddress:   minerAddress,
 		MinerPublicKey: minerPublicKey,
 		ShardHash:      "shard_lifecycle",
 		ShardSize:      32,
 	}
 	store.data.Intents[intent.IntentID] = intent
 	store.data.Accounts[intent.User] = wire.Account{Address: intent.User, LockedStorage: gfTokens(10)}
-	store.data.Miners["miner_lifecycle"] = wire.MinerStats{
-		MinerAddress: "miner_lifecycle",
+	store.data.Miners[minerAddress] = wire.MinerStats{
+		MinerAddress: minerAddress,
 		PublicKey:    minerPublicKey,
 		Stake:        gfTokens(10),
 		Status:       "active",
@@ -371,7 +372,7 @@ func TestDeleteTasksQueryFiltersByStatusAndIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending := store.DeleteTasks(intent.IntentID, "miner_lifecycle", deleteTaskStatusPending)
+	pending := store.DeleteTasks(intent.IntentID, minerAddress, deleteTaskStatusPending)
 	if len(pending.Tasks) != 1 {
 		t.Fatalf("expected one pending delete task, got %+v", pending)
 	}
@@ -379,17 +380,17 @@ func TestDeleteTasksQueryFiltersByStatusAndIntent(t *testing.T) {
 	deleteReceipt := wire.DeleteReceipt{
 		IntentID:       intent.IntentID,
 		ShardHash:      "shard_lifecycle",
-		MinerAddress:   "miner_lifecycle",
+		MinerAddress:   minerAddress,
 		MinerPublicKey: minerPublicKey,
 		DeletedAtUnix:  time.Now().Unix(),
 	}
-	if err := wire.SignDeleteReceipt(&deleteReceipt, privateKey); err != nil {
+	if err := wire.SignDeleteReceipt(&deleteReceipt, key); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.SubmitDeleteReceipt(wire.SubmitDeleteReceiptRequest{Receipt: deleteReceipt}); err != nil {
 		t.Fatal(err)
 	}
-	completed := store.DeleteTasks(intent.IntentID, "miner_lifecycle", deleteTaskStatusCompleted)
+	completed := store.DeleteTasks(intent.IntentID, minerAddress, deleteTaskStatusCompleted)
 	if len(completed.Tasks) != len(terminated.DeleteTasks) {
 		t.Fatalf("expected completed delete tasks to match generated tasks, got %+v", completed)
 	}

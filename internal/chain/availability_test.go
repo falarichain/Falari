@@ -85,10 +85,10 @@ func TestEffectivePowerWithAvailability(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.data.Validators["val_a"] = wire.ValidatorInfo{
-		Address:   "val_a",
-		PublicKey: "pub_a",
-		SelfStake: 1000,
-		Status:    wire.ValidatorStatusActive,
+		OwnerAddress:      "val_a",
+		OperatorPublicKey: "pub_a",
+		SelfStake:         1000,
+		Status:            wire.ValidatorStatusActive,
 	}
 
 	effPower := store.effectivePowerLocked("val_a")
@@ -130,10 +130,10 @@ func TestBlockProductionRewardSplit(t *testing.T) {
 	store.initRewardPoolsLocked()
 
 	store.data.Validators["producer"] = wire.ValidatorInfo{
-		Address:   "producer",
-		PublicKey: "pub",
-		SelfStake: 100,
-		Status:    wire.ValidatorStatusActive,
+		OwnerAddress:      "producer",
+		OperatorPublicKey: "pub",
+		SelfStake:         100,
+		Status:            wire.ValidatorStatusActive,
 	}
 	store.data.ConsensusValidators["producer"] = true
 

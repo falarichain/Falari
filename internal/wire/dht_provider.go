@@ -1,10 +1,7 @@
 package wire
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
+	"crypto/ecdsa"
 	"strconv"
 )
 
@@ -23,49 +20,33 @@ type DHTProviderRecord struct {
 }
 
 type dhtProviderSigningPayload struct {
+	ExpiresAtUnix string `json:"expires_at_unix"`
 	MinerAddress  string `json:"miner_address"`
 	ShardHash     string `json:"shard_hash"`
-	ExpiresAtUnix string `json:"expires_at_unix"`
 }
 
-func dhtProviderPayload(record DHTProviderRecord) ([]byte, error) {
-	return json.Marshal(dhtProviderSigningPayload{
+func dhtProviderPayload(record DHTProviderRecord) dhtProviderSigningPayload {
+	return dhtProviderSigningPayload{
 		MinerAddress:  record.MinerAddress,
 		ShardHash:     record.ShardHash,
 		ExpiresAtUnix: strconv.FormatInt(record.ExpiresAtUnix, 10),
-	})
+	}
 }
 
-func SignDHTProvider(record *DHTProviderRecord, privateKey ed25519.PrivateKey) error {
-	payload, err := dhtProviderPayload(*record)
+func SignDHTProvider(record *DHTProviderRecord, privateKey *ecdsa.PrivateKey) error {
+	payload := dhtProviderPayload(*record)
+	sig, pub, err := signInfraPayload(payload, privateKey)
 	if err != nil {
 		return err
 	}
-	record.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	record.Signature = sig
+	if record.PublicKey == "" {
+		record.PublicKey = pub
+	}
 	return nil
 }
 
 func VerifyDHTProvider(record DHTProviderRecord) error {
-	if record.PublicKey == "" {
-		return errors.New("missing public key")
-	}
-	publicKey, err := base64.StdEncoding.DecodeString(record.PublicKey)
-	if err != nil {
-		return err
-	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return errors.New("invalid dht provider public key size")
-	}
-	signature, err := base64.StdEncoding.DecodeString(record.Signature)
-	if err != nil {
-		return err
-	}
-	payload, err := dhtProviderPayload(record)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
-		return errors.New("invalid dht provider signature")
-	}
-	return nil
+	payload := dhtProviderPayload(record)
+	return verifyInfraSignature(record.MinerAddress, record.Signature, payload)
 }

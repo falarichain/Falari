@@ -442,8 +442,10 @@ func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorReque
 	if err := wire.VerifyValidatorRegistration(req); err != nil {
 		return err
 	}
-	existing := s.validatorLocked(req.Address)
-	account := s.accountLocked(req.Address)
+	req.OwnerAddress = wire.NormalizeAddress(req.OwnerAddress)
+	req.OperatorAddress = wire.NormalizeAddress(req.OperatorAddress)
+	existing := s.validatorLocked(req.OwnerAddress)
+	account := s.accountLocked(req.OwnerAddress)
 	if req.Stake < MinValidatorStake {
 		return errors.New("replay validator registration below minimum required stake")
 	}
@@ -455,8 +457,9 @@ func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorReque
 		account.Balance -= additionalStake
 		account.LockedStake += additionalStake
 	}
-	existing.Address = req.Address
-	existing.PublicKey = req.PublicKey
+	existing.OwnerAddress = req.OwnerAddress
+	existing.OperatorAddress = req.OperatorAddress
+	existing.OperatorPublicKey = req.OperatorPublicKey
 	existing.Endpoint = req.Endpoint
 	existing.Stake = req.Stake
 	existing.SelfStake = req.Stake
@@ -465,8 +468,12 @@ func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorReque
 		existing.RegisteredAtUnix = time.Now().Unix()
 	}
 	s.data.Accounts[account.Address] = account
-	s.data.Validators[req.Address] = existing
-	s.data.ConsensusValidators[req.Address] = true
+	s.data.Validators[req.OwnerAddress] = existing
+	s.data.ConsensusValidators[req.OwnerAddress] = true
+	if s.data.OperatorMap == nil {
+		s.data.OperatorMap = map[string]string{}
+	}
+	s.data.OperatorMap[req.OperatorAddress] = req.OwnerAddress
 	return nil
 }
 
