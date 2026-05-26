@@ -55,6 +55,12 @@ type governanceProposalSigningPayload struct {
 	TargetBlockProductionRewardBPS    uint64   `json:"target_block_production_reward_bps,omitempty"`
 	TargetMaxConsensusValidators      uint64   `json:"target_max_consensus_validators,omitempty"`
 	TargetMinConsensusValidators      uint64   `json:"target_min_consensus_validators,omitempty"`
+	TargetBlockBytes                  uint64   `json:"target_block_bytes,omitempty"`
+	TargetMaxBlockBytes               uint64   `json:"target_max_block_bytes,omitempty"`
+	TargetMaxBlockTxs                 uint64   `json:"target_max_block_txs,omitempty"`
+	TargetMaxTxBytes                  uint64   `json:"target_max_tx_bytes,omitempty"`
+	TargetMaxStorageTxBytes           uint64   `json:"target_max_storage_tx_bytes,omitempty"`
+	Nonce                             uint64   `json:"nonce"`
 	CreatedAtUnix                     int64    `json:"created_at_unix"`
 }
 
@@ -63,6 +69,7 @@ type governanceVoteSigningPayload struct {
 	ProposalID    string `json:"proposal_id"`
 	Voter         string `json:"voter"`
 	Approve       bool   `json:"approve"`
+	Nonce         uint64 `json:"nonce"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
 }
 
@@ -112,6 +119,12 @@ func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, err
 		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
 		TargetMaxConsensusValidators:      req.TargetMaxConsensusValidators,
 		TargetMinConsensusValidators:      req.TargetMinConsensusValidators,
+		TargetBlockBytes:                  req.TargetBlockBytes,
+		TargetMaxBlockBytes:               req.TargetMaxBlockBytes,
+		TargetMaxBlockTxs:                 req.TargetMaxBlockTxs,
+		TargetMaxTxBytes:                  req.TargetMaxTxBytes,
+		TargetMaxStorageTxBytes:           req.TargetMaxStorageTxBytes,
+		Nonce:                             req.Nonce,
 		CreatedAtUnix:                     req.CreatedAtUnix,
 	}
 	return json.Marshal(payload)
@@ -202,6 +215,7 @@ func GovernanceVotePayload(req CastGovernanceVoteRequest) ([]byte, error) {
 		ProposalID:    req.ProposalID,
 		Voter:         req.Voter,
 		Approve:       req.Approve,
+		Nonce:         req.Nonce,
 		CreatedAtUnix: req.CreatedAtUnix,
 	}
 	return json.Marshal(payload)
@@ -268,6 +282,67 @@ func VerifyGovernanceVote(req CastGovernanceVoteRequest, expectedAddress string)
 	}
 	if !strings.EqualFold(recoveredAddress, expectedAddress) {
 		return errors.New("governance vote signature does not match voter address")
+	}
+	return nil
+}
+
+// governanceExecuteSigningPayload is the canonical payload for execute-request signatures.
+type governanceExecuteSigningPayload struct {
+	ProposalID    string `json:"proposal_id"`
+	Executor      string `json:"executor"`
+	Nonce         uint64 `json:"nonce"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+}
+
+// GovernanceExecuteHash returns the Keccak256 hash of the execute signing payload.
+func GovernanceExecuteHash(req ExecuteGovernanceProposalRequest) ([]byte, error) {
+	p, err := json.Marshal(governanceExecuteSigningPayload{
+		ProposalID:    req.ProposalID,
+		Executor:      NormalizeAddress(req.Executor),
+		Nonce:         req.Nonce,
+		CreatedAtUnix: req.CreatedAtUnix,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ethcrypto.Keccak256(p), nil
+}
+
+// SignGovernanceExecute signs the execute request with the given ECDSA private key.
+func SignGovernanceExecute(req *ExecuteGovernanceProposalRequest, privateKey *ecdsa.PrivateKey) error {
+	hash, err := GovernanceExecuteHash(*req)
+	if err != nil {
+		return err
+	}
+	signature, err := ethcrypto.Sign(hash, privateKey)
+	if err != nil {
+		return err
+	}
+	req.Signature = encodeHex(signature)
+	return nil
+}
+
+// VerifyGovernanceExecute verifies the execute-request signature by recovering the signer
+// and comparing the derived address against the expected address.
+func VerifyGovernanceExecute(req ExecuteGovernanceProposalRequest, expectedAddress string) error {
+	signature, err := decodeHex(req.Signature)
+	if err != nil {
+		return err
+	}
+	if len(signature) != 65 {
+		return errors.New("invalid governance execute signature size")
+	}
+	hash, err := GovernanceExecuteHash(req)
+	if err != nil {
+		return err
+	}
+	pub, err := ethcrypto.SigToPub(hash, signature)
+	if err != nil {
+		return err
+	}
+	addr := AccountAddress(pub)
+	if !strings.EqualFold(addr, expectedAddress) {
+		return errors.New("governance execute signature does not match executor address")
 	}
 	return nil
 }

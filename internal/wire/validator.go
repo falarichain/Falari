@@ -10,18 +10,20 @@ import (
 )
 
 type validatorRegistrationPayload struct {
-	Address   string `json:"address"`
-	PublicKey string `json:"public_key"`
-	Endpoint  string `json:"endpoint,omitempty"`
-	Stake     uint64 `json:"stake"`
+	Address           string `json:"address"`
+	CommissionRateBPS uint64 `json:"commission_rate_bps,omitempty"`
+	PublicKey         string `json:"public_key"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	Stake             uint64 `json:"stake"`
 }
 
 func ValidatorRegistrationPayload(req RegisterValidatorRequest) ([]byte, error) {
 	payload := validatorRegistrationPayload{
-		Address:   req.Address,
-		PublicKey: req.PublicKey,
-		Endpoint:  req.Endpoint,
-		Stake:     req.Stake,
+		Address:           req.Address,
+		CommissionRateBPS: req.CommissionRateBPS,
+		PublicKey:         req.PublicKey,
+		Endpoint:          req.Endpoint,
+		Stake:             req.Stake,
 	}
 	return json.Marshal(payload)
 }

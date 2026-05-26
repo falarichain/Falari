@@ -25,15 +25,16 @@ import (
 )
 
 type Node struct {
-	dataDir    string
-	address    string
-	publicKey  ed25519.PublicKey
-	privateKey ed25519.PrivateKey
-	backend    StorageBackend
-	blockstore Blockstore
-	transport  transportCounters
-	chainURL   string
-	endpoint   string
+	dataDir                   string
+	address                   string
+	publicKey                 ed25519.PublicKey
+	privateKey                ed25519.PrivateKey
+	backend                   StorageBackend
+	blockstore                Blockstore
+	transport                 transportCounters
+	chainURL                  string
+	endpoint                  string
+	requireChainAuthorization bool
 }
 
 type transportCounters struct {
@@ -110,6 +111,10 @@ func (n *Node) Blockstore() Blockstore {
 func (n *Node) ConfigureChain(chainURL string, endpoint string) {
 	n.chainURL = strings.TrimRight(chainURL, "/")
 	n.endpoint = endpoint
+}
+
+func (n *Node) RequireChainAuthorization(required bool) {
+	n.requireChainAuthorization = required
 }
 
 func (n *Node) Status() wire.StorageNodeStatusResponse {
@@ -308,6 +313,9 @@ func (n *Node) Store(req wire.UploadRequest) (wire.MinerReceipt, error) {
 
 func (n *Node) authorizeUpload(req wire.UploadRequest, shardCID string) error {
 	if n.chainURL == "" {
+		if n.requireChainAuthorization {
+			return errors.New("chain authorization is required for uploads")
+		}
 		return nil
 	}
 	if req.IntentID == "" {
@@ -421,6 +429,9 @@ func (n *Node) SignRetrievalReceipt(receipt wire.RetrievalReceipt) (wire.Retriev
 func (n *Node) Prove(challenge wire.StorageChallenge) (wire.StorageProof, error) {
 	if challenge.MinerAddress != n.address {
 		return wire.StorageProof{}, errors.New("challenge is for a different miner")
+	}
+	if challenge.ExpiresAtUnix > 0 && time.Now().Unix() > challenge.ExpiresAtUnix {
+		return wire.StorageProof{}, errors.New("challenge expired")
 	}
 	data, err := n.ReadShard(challenge.ShardHash)
 	if err != nil {

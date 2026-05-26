@@ -24,6 +24,7 @@ func main() {
 		corsOrigins    = flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
 		rateLimitRPS   = flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")
 		rateLimitBurst = flag.Int("rate-limit-burst", 0, "rate limit burst size (default: rps+1)")
+		trustedProxies = flag.String("trusted-proxies", "", "comma-separated trusted proxy CIDRs/IPs for X-Forwarded-For")
 		production     = flag.Bool("production", false, "enable production mode with strict safety checks")
 	)
 	flag.Parse()
@@ -81,7 +82,7 @@ func main() {
 	server := explorer.NewServer(store)
 	handler := middleware.Chain(
 		middleware.CORS(origins),
-		middleware.RateLimit(*rateLimitRPS, *rateLimitBurst),
+		middleware.RateLimitWithTrustedProxies(*rateLimitRPS, *rateLimitBurst, parseCSV(*trustedProxies)),
 	)(server.Routes())
 	httpServer := &http.Server{
 		Addr:              *listenAddr,
@@ -110,4 +111,18 @@ func main() {
 	defer shutdownCancel()
 	httpServer.Shutdown(shutdownCtx)
 	cancel()
+}
+
+func parseCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var values []string
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }

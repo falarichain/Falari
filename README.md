@@ -27,7 +27,6 @@ FalariChain is a **decentralized storage chain purpose‑built for the AI era**.
    - [Chain Node](#chain-node)
    - [Storage Node (Miner)](#storage-node-miner)
    - [Retrieval Node](#retrieval-node)
-   - [Indexer](#indexer)
 5. [CLI Reference (chainctl)](#cli-reference-chainctl)
 6. [HTTP API Reference](#http-api-reference)
    - [Chain Node](#chain-node-api)
@@ -45,14 +44,14 @@ FalariChain is a **decentralized storage chain purpose‑built for the AI era**.
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        FalariChain Network                           │
 │                                                                      │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌───────────────┐    │
-│  │ Chain    │   │ Chain    │   │ Chain    │   │   Indexer     │    │
-│  │ Node 1   │◄──│ Node 2   │◄──│ Node N   │   │  (read-only)  │    │
-│  │(proposer)│   │(validator)│  │(validator)│   └───────┬───────┘    │
-│  └────┬─────┘   └──────────┘   └──────────┘           │            │
-│       │  libp2p + GossipSub                              │            │
-│       │                                                  │            │
-│  ┌────┴─────────────────────────────────────────────────┴──────┐    │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐                    │
+│  │ Chain    │   │ Chain    │   │ Chain    │                    │
+│  │ Node 1   │◄──│ Node 2   │◄──│ Node N   │                    │
+│  │(proposer)│   │(validator)│  │(validator)│                    │
+│  └────┬─────┘   └──────────┘   └──────────┘                    │
+│       │  libp2p + GossipSub                                     │
+│       │                                                         │
+│  ┌────┴────────────────────────────────────────────────────┐    │
 │  │                     Storage Layer                            │    │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │    │
 │  │  │ Storage Node │  │ Storage Node │  │ Storage Node │      │    │
@@ -88,7 +87,6 @@ FalariChain is a **decentralized storage chain purpose‑built for the AI era**.
 - **Chain Nodes** run POS + BFT consensus, produce blocks, execute transactions, and maintain the on‑chain state.
 - **Storage Nodes (Miners)** store file shards, submit storage proofs, and earn storage rewards.
 - **Retrieval Nodes** serve file downloads, earn retrieval mining rewards, and can optionally act as an **upload gateway**（erasure coding, miner dispatch, batch commit）— this gives retrieval node operators a business incentive to offer upload services, since more data on the chain means more retrieval requests and more rewards.
-- **Indexer** syncs blocks from a chain node and provides search APIs for deals, CIDs, and providers.
 - **AI Agents** use Agent Keys（API‑Key‑style credentials）to upload datasets, download checkpoints, and manage collections — with immutable spending limits, fine‑grained permissions, and zero risk to the master wallet.
 
 ---
@@ -187,7 +185,7 @@ Agent Keys let users create **API‑Key‑style credentials** for AI agents, tra
 
 - **Go** ≥ 1.24
 - **OS**: Linux / macOS / WSL2
-- **Ports**: 8080（chain），9090（storage），9091（retrieval），9095（indexer）
+- **Ports**: 8080（chain），9090（storage），9091（retrieval）
 
 ### 1. Clone & Build
 
@@ -366,22 +364,6 @@ retrievalnode \
 ```
 
 **Differences from Storage Node**: Retrieval nodes focus on downloads and receipt collection. They do not run proof or repair loops.
-
-### Indexer
-
-```bash
-indexer \
-  -addr :9095
-  -chain https://chain.example.com:8080
-  -sync-interval 5s
-```
-
-**API endpoints**:
-- `GET /status` — Indexing statistics（blocks indexed, deals indexed, CIDs indexed, last sync time）
-- `GET /search/deals?q=<query>` — Full‑text search across intent IDs, file names, and user addresses
-- `GET /search/cids?q=<query>` — CID → intent + miner mapping
-
----
 
 ## CLI Reference (chainctl)
 
@@ -819,7 +801,6 @@ chain/
 │   ├── chainnode/          # Chain node（validator / proposer）
 │   ├── storagenode/        # Storage miner
 │   ├── retrievalnode/      # Retrieval miner
-│   └── indexer/            # Read‑only indexer
 ├── internal/
 │   ├── chain/              # Core chain logic（state, block, consensus, lifecycle）
 │   ├── client/             # Client library（encryption, erasure coding, HTTP, streaming）
@@ -829,7 +810,6 @@ chain/
 │   ├── reward/             # Token reward pool logic
 │   ├── consensus/          # Consensus types
 │   ├── governance/         # Governance types
-│   └── indexer/            # Indexer engine
 └── go.mod
 ```
 

@@ -60,12 +60,13 @@ func (v *ValidatorIdentity) PublicKeyBase64() string {
 	return base64.StdEncoding.EncodeToString(v.PublicKey)
 }
 
-func (v *ValidatorIdentity) RegistrationRequest(endpoint string, stake uint64) (wire.RegisterValidatorRequest, error) {
+func (v *ValidatorIdentity) RegistrationRequest(endpoint string, stake uint64, commissionRateBPS uint64) (wire.RegisterValidatorRequest, error) {
 	req := wire.RegisterValidatorRequest{
-		Address:   v.Address,
-		PublicKey: v.PublicKeyBase64(),
-		Endpoint:  endpoint,
-		Stake:     stake,
+		Address:           v.Address,
+		PublicKey:         v.PublicKeyBase64(),
+		Endpoint:          endpoint,
+		Stake:             stake,
+		CommissionRateBPS: commissionRateBPS,
 	}
 	if err := wire.SignValidatorRegistration(&req, v.PrivateKey); err != nil {
 		return wire.RegisterValidatorRequest{}, err

@@ -106,6 +106,9 @@ func VerifyRetrievalReceipt(r RetrievalReceipt) error {
 	if r.BytesServed == 0 {
 		return errors.New("retrieval bytes served must be positive")
 	}
+	if r.ServedAtUnix <= 0 {
+		return errors.New("retrieval served_at_unix is required")
+	}
 	if r.User == "" || r.ClientAddress == "" {
 		return errors.New("retrieval user and client address are required")
 	}
@@ -130,6 +133,9 @@ func VerifyRetrievalClientReceipt(r RetrievalReceipt) error {
 	}
 	if r.BytesServed == 0 {
 		return errors.New("retrieval bytes served must be positive")
+	}
+	if r.ServedAtUnix <= 0 {
+		return errors.New("retrieval served_at_unix is required")
 	}
 	if r.User == "" || r.ClientAddress == "" {
 		return errors.New("retrieval user and client address are required")

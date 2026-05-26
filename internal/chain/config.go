@@ -69,6 +69,13 @@ type MiningParams struct {
 	MaxConsensusValidators uint64 `json:"max_consensus_validators,omitempty"`
 	MinConsensusValidators uint64 `json:"min_consensus_validators,omitempty"`
 
+	// ── Block and transaction size limits ──
+	TargetBlockBytes  uint64 `json:"target_block_bytes,omitempty"`
+	MaxBlockBytes     uint64 `json:"max_block_bytes,omitempty"`
+	MaxBlockTxs       uint64 `json:"max_block_txs,omitempty"`
+	MaxTxBytes        uint64 `json:"max_tx_bytes,omitempty"`
+	MaxStorageTxBytes uint64 `json:"max_storage_tx_bytes,omitempty"`
+
 	// ── DHT / Retrieval obligation ──
 	RetrievalWeightBPS uint64 `json:"retrieval_weight_bps"`
 }
@@ -102,6 +109,11 @@ func DefaultMiningParams() MiningParams {
 		BlockProductionRewardBPS:    3000,
 		MaxConsensusValidators:      21,
 		MinConsensusValidators:      2,
+		TargetBlockBytes:            defaultTargetBlockBytes,
+		MaxBlockBytes:               defaultMaxBlockBytes,
+		MaxBlockTxs:                 defaultMaxBlockTxs,
+		MaxTxBytes:                  defaultMaxTxBytes,
+		MaxStorageTxBytes:           defaultMaxStorageTxBytes,
 		RetrievalWeightBPS:          1000,
 	}
 }

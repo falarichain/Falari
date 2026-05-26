@@ -2,8 +2,10 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"chain/internal/wire"
 )
@@ -105,12 +107,32 @@ func (s *Server) prove(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if err := validateProofRequest(req.Challenge); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	proof, err := s.node.Prove(req.Challenge)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, proof)
+}
+
+func validateProofRequest(challenge wire.StorageChallenge) error {
+	if challenge.ChallengeID == "" || challenge.Nonce == "" || challenge.ChallengeHash == "" {
+		return errors.New("chain challenge id, nonce, and hash are required")
+	}
+	if challenge.ProofType == "" {
+		return errors.New("challenge proof type is required")
+	}
+	if challenge.ExpiresAtUnix <= 0 {
+		return errors.New("challenge expiry is required")
+	}
+	if time.Now().Unix() > challenge.ExpiresAtUnix {
+		return errors.New("challenge expired")
+	}
+	return nil
 }
 
 func (s *Server) signRetrievalReceipt(w http.ResponseWriter, r *http.Request) {

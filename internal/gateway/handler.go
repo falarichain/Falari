@@ -26,12 +26,15 @@ import (
 )
 
 type Config struct {
-	ChainURL         string
-	StorageEndpoints []string
-	TmpDir           string
-	DataShards       int
-	ParityShards     int
-	SegmentSize      int64
+	ChainURL               string
+	StorageEndpoints       []string
+	TmpDir                 string
+	DataShards             int
+	ParityShards           int
+	SegmentSize            int64
+	MaxUploadBytes         int64
+	AgentPrivateKeys       map[string]string
+	AllowPrivateKeyAPIKeys bool
 }
 
 type Handler struct {
@@ -60,6 +63,11 @@ type agentKeyCtx struct {
 	PrivateKey string
 }
 
+const (
+	defaultGatewayMaxUploadBytes = 1 << 30
+	multipartMemoryBytes         = 32 << 20
+)
+
 type agentUploadAuth struct {
 	ChainID    string
 	KeyID      string
@@ -69,6 +77,9 @@ type agentUploadAuth struct {
 }
 
 func New(cfg Config) (*Handler, error) {
+	if cfg.MaxUploadBytes == 0 {
+		cfg.MaxUploadBytes = defaultGatewayMaxUploadBytes
+	}
 	if err := os.MkdirAll(cfg.TmpDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -97,6 +108,20 @@ func (h *Handler) decodeAPIKey(r *http.Request) (*agentKeyCtx, error) {
 	if key == "" {
 		return nil, errors.New("missing X-Api-Key header")
 	}
+	if strings.HasPrefix(key, wire.AgentKeyReferencePrefix) {
+		parts, err := wire.DecodeAgentKeyReferenceString(key)
+		if err != nil {
+			return nil, fmt.Errorf("invalid api key reference: %w", err)
+		}
+		return &agentKeyCtx{
+			AgentKeyID: parts.AgentKeyID,
+			Master:     parts.Master,
+			Address:    parts.Address,
+		}, nil
+	}
+	if !h.cfg.AllowPrivateKeyAPIKeys {
+		return nil, errors.New("api key contains private key; use an agent key reference configured on the gateway")
+	}
 	parts, err := wire.DecodeAgentKeyString(key)
 	if err != nil {
 		return nil, fmt.Errorf("invalid api key: %w", err)
@@ -120,9 +145,15 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(256 << 20); err != nil { // 256 MB max
+	if h.cfg.MaxUploadBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxUploadBytes)
+	}
+	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("parse multipart: %w", err))
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 
 	file, header, err := r.FormFile("file")
@@ -143,6 +174,7 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	defer os.RemoveAll(sessionDir)
 
 	tmpPath := filepath.Join(sessionDir, fileName)
 	f, err := os.Create(tmpPath)
@@ -157,9 +189,8 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.runUpload(ak, tmpPath, fileName, written, sessionDir)
+	result, err := h.runUpload(ak, tmpPath, fileName, written)
 	if err != nil {
-		_ = os.RemoveAll(sessionDir)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -167,7 +198,7 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize int64, sessionDir string) (map[string]any, error) {
+func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize int64) (map[string]any, error) {
 	planFileSize, planSegments, planSegmentRoots, planFileRoot, err :=
 		client.ComputeErasurePlan(filePath, h.cfg.SegmentSize, h.cfg.DataShards, h.cfg.ParityShards)
 	if err != nil {
@@ -247,8 +278,6 @@ func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize
 		return nil, fmt.Errorf("finalize: %w", err)
 	}
 
-	_ = os.RemoveAll(sessionDir)
-
 	return map[string]any{
 		"intent_id":     finalizeResp.IntentID,
 		"deal_id":       finalizeResp.DealID,
@@ -270,14 +299,19 @@ func (h *Handler) uploadSegments(auth *agentUploadAuth, intentID, fileRoot strin
 			continue
 		}
 
+		file, err := os.Open(filePath)
+		if err != nil {
+			return fmt.Errorf("open upload file for segment %d: %w", segIdx, err)
+		}
 		shardFiles, cleanup, err := client.EncodeSegmentToTempFiles(
-			mustOpenFile(filePath),
+			file,
 			int64(segIdx)*h.cfg.SegmentSize,
 			segBytes,
 			h.cfg.DataShards,
 			h.cfg.ParityShards,
 			h.cfg.TmpDir,
 		)
+		_ = file.Close()
 		if err != nil {
 			if cleanup != nil {
 				cleanup()
@@ -400,7 +434,14 @@ func (h *Handler) chainID(chainClient *client.HTTP) (string, error) {
 }
 
 func (h *Handler) agentUploadAuth(chainClient *client.HTTP, ak *agentKeyCtx, chainID string) (agentUploadAuth, error) {
-	privateKey, err := ethcrypto.HexToECDSA(strings.TrimPrefix(ak.PrivateKey, "0x"))
+	privateKeyHex := ak.PrivateKey
+	if privateKeyHex == "" {
+		privateKeyHex = h.cfg.AgentPrivateKeys[ak.AgentKeyID]
+	}
+	if privateKeyHex == "" {
+		return agentUploadAuth{}, errors.New("agent private key is not configured on gateway")
+	}
+	privateKey, err := ethcrypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
 	if err != nil {
 		return agentUploadAuth{}, fmt.Errorf("parse agent private key: %w", err)
 	}
@@ -609,14 +650,6 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, intent)
-}
-
-func mustOpenFile(path string) *os.File {
-	f, err := os.Open(path)
-	if err != nil {
-		panic(err)
-	}
-	return f
 }
 
 func segmentBytes(fileSize int64, segIdx int64, segSize int64) int64 {

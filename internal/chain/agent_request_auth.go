@@ -37,21 +37,49 @@ func (s *Store) verifyAgentRequestLocked(chainID string, keyID string, agentNonc
 	if err := verify(key.AgentPub); err != nil {
 		return err
 	}
+	usedToday := key.UsedToday
+	if time.Now().Unix() > key.DayResetAt {
+		usedToday = 0
+	}
+	if agentLimitExceeded(usedToday, spend, key.DailyLimit) {
+		return errors.New("agent key daily limit exceeded")
+	}
+	if agentLimitExceeded(key.UsedTotal, spend, key.TotalLimit) {
+		return errors.New("agent key total limit exceeded")
+	}
+	return nil
+}
+
+func (s *Store) consumeAgentRequestLocked(keyID string, spend uint64) error {
+	key, ok := s.data.AgentKeys[keyID]
+	if !ok {
+		return errors.New("agent key not found")
+	}
 	nowUnix := time.Now().Unix()
 	if nowUnix > key.DayResetAt {
 		key.UsedToday = 0
 		key.DayResetAt = startOfNextDay()
 	}
-	if key.DailyLimit > 0 && key.UsedToday+spend > key.DailyLimit {
+	if agentLimitExceeded(key.UsedToday, spend, key.DailyLimit) {
 		return errors.New("agent key daily limit exceeded")
 	}
-	if key.TotalLimit > 0 && key.UsedTotal+spend > key.TotalLimit {
+	if agentLimitExceeded(key.UsedTotal, spend, key.TotalLimit) {
 		return errors.New("agent key total limit exceeded")
 	}
 	key.Nonce++
 	key.UsedToday += spend
 	key.UsedTotal += spend
 	return nil
+}
+
+func agentLimitExceeded(used uint64, spend uint64, limit uint64) bool {
+	if limit == 0 {
+		return false
+	}
+	if used > limit {
+		return true
+	}
+	return spend > limit-used
 }
 
 func agentKeyAllowsOperation(permissions []string, operation string) bool {

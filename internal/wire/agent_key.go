@@ -12,6 +12,7 @@ import (
 )
 
 const AgentKeyPrefix = "fara_"
+const AgentKeyReferencePrefix = "fara_ref_"
 
 // EncodeAgentKeyString packs agent_key_id, master, address, and private_key
 // into a single copy‑pasteable string: fara_<base64url(key_id|master|address|privkey)>
@@ -45,6 +46,33 @@ func DecodeAgentKeyString(encoded string) (AgentKeyParts, error) {
 		Master:     parts[1],
 		Address:    parts[2],
 		PrivateKey: parts[3],
+	}, nil
+}
+
+// EncodeAgentKeyReferenceString packs only public agent key routing metadata.
+// The gateway must load the matching private key from local configuration.
+func EncodeAgentKeyReferenceString(agentKeyID, master, address string) string {
+	raw := agentKeyID + "|" + master + "|" + address
+	return AgentKeyReferencePrefix + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// DecodeAgentKeyReferenceString parses a fara_ref_... string back into its public components.
+func DecodeAgentKeyReferenceString(encoded string) (AgentKeyParts, error) {
+	if !strings.HasPrefix(encoded, AgentKeyReferencePrefix) {
+		return AgentKeyParts{}, errors.New("agent key reference must start with " + AgentKeyReferencePrefix)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(encoded, AgentKeyReferencePrefix))
+	if err != nil {
+		return AgentKeyParts{}, fmt.Errorf("decode agent key reference: %w", err)
+	}
+	parts := strings.Split(string(decoded), "|")
+	if len(parts) != 3 {
+		return AgentKeyParts{}, errors.New("invalid agent key reference format")
+	}
+	return AgentKeyParts{
+		AgentKeyID: parts[0],
+		Master:     parts[1],
+		Address:    parts[2],
 	}, nil
 }
 

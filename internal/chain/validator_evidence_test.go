@@ -8,8 +8,10 @@ import (
 )
 
 func TestSubmitValidatorEvidenceSlashesLockedStake(t *testing.T) {
-	store, identity := registeredTestValidator(t, 10)
-	req := testDoubleVoteEvidenceRequest(t, identity, 1, 10)
+	stake := MinValidatorStake
+	expectedSlash := stake / 2
+	store, identity := registeredTestValidator(t, stake)
+	req := testDoubleVoteEvidenceRequest(t, identity, 1, stake)
 
 	resp, err := store.SubmitValidatorEvidence(req)
 	if err != nil {
@@ -18,18 +20,18 @@ func TestSubmitValidatorEvidenceSlashesLockedStake(t *testing.T) {
 	if !resp.Accepted {
 		t.Fatal("expected evidence to be accepted")
 	}
-	if resp.Evidence.Slashed != 5 {
-		t.Fatalf("expected slash 5, got %d", resp.Evidence.Slashed)
+	if resp.Evidence.Slashed != expectedSlash {
+		t.Fatalf("expected slash %d, got %d", expectedSlash, resp.Evidence.Slashed)
 	}
 	account := store.accountLocked(identity.Address)
-	if account.LockedStake != 5 {
-		t.Fatalf("expected locked stake 5, got %d", account.LockedStake)
+	if account.LockedStake != stake-expectedSlash {
+		t.Fatalf("expected locked stake %d, got %d", stake-expectedSlash, account.LockedStake)
 	}
 	validator := store.data.Validators[identity.Address]
-	if validator.Stake != 5 || validator.Slashed != 5 || validator.EvidenceCount != 1 {
+	if validator.Stake != stake-expectedSlash || validator.Slashed != expectedSlash || validator.EvidenceCount != 1 {
 		t.Fatalf("unexpected validator after evidence: %+v", validator)
 	}
-	if store.data.RewardPools == nil || store.data.RewardPools.RepairRemaining != reward.RepairPoolInitial+5 {
+	if store.data.RewardPools == nil || store.data.RewardPools.RepairRemaining != reward.RepairPoolInitial+expectedSlash {
 		t.Fatalf("expected slashed funds in repair pool, pools=%+v", store.data.RewardPools)
 	}
 	if _, ok := store.data.ValidatorEvidence[resp.Evidence.EvidenceID]; !ok {
@@ -38,8 +40,10 @@ func TestSubmitValidatorEvidenceSlashesLockedStake(t *testing.T) {
 }
 
 func TestSubmitValidatorEvidenceDuplicateDoesNotSlashTwice(t *testing.T) {
-	store, identity := registeredTestValidator(t, 10)
-	req := testDoubleVoteEvidenceRequest(t, identity, 1, 10)
+	stake := MinValidatorStake
+	expectedSlash := stake / 2
+	store, identity := registeredTestValidator(t, stake)
+	req := testDoubleVoteEvidenceRequest(t, identity, 1, stake)
 
 	first, err := store.SubmitValidatorEvidence(req)
 	if err != nil {
@@ -56,14 +60,14 @@ func TestSubmitValidatorEvidenceDuplicateDoesNotSlashTwice(t *testing.T) {
 		t.Fatalf("duplicate should return stored evidence, got %+v want %+v", second.Evidence, first.Evidence)
 	}
 	account := store.accountLocked(identity.Address)
-	if account.LockedStake != 5 {
-		t.Fatalf("expected duplicate to leave locked stake 5, got %d", account.LockedStake)
+	if account.LockedStake != stake-expectedSlash {
+		t.Fatalf("expected duplicate to leave locked stake %d, got %d", stake-expectedSlash, account.LockedStake)
 	}
 }
 
 func TestSubmitValidatorEvidenceRejectsNonConflictingVotes(t *testing.T) {
-	store, identity := registeredTestValidator(t, 10)
-	vote := signTestVoteHash(t, identity, 1, "block-a", 10)
+	store, identity := registeredTestValidator(t, MinValidatorStake)
+	vote := signTestVoteHash(t, identity, 1, "block-a", MinValidatorStake)
 
 	_, err := store.SubmitValidatorEvidence(wire.SubmitValidatorEvidenceRequest{VoteA: vote, VoteB: vote})
 	if err == nil {
@@ -72,8 +76,10 @@ func TestSubmitValidatorEvidenceRejectsNonConflictingVotes(t *testing.T) {
 }
 
 func TestValidatorEvidenceTransactionReplaySlashesPeer(t *testing.T) {
-	producer, identity := registeredTestValidator(t, 10)
-	req := testDoubleVoteEvidenceRequest(t, identity, 1, 10)
+	stake := MinValidatorStake
+	expectedSlash := stake / 2
+	producer, identity := registeredTestValidator(t, stake)
+	req := testDoubleVoteEvidenceRequest(t, identity, 1, stake)
 	resp, err := producer.SubmitValidatorEvidence(req)
 	if err != nil {
 		t.Fatal(err)
@@ -89,15 +95,15 @@ func TestValidatorEvidenceTransactionReplaySlashesPeer(t *testing.T) {
 		t.Fatal("expected validator evidence transaction in mempool")
 	}
 
-	peer, _ := registeredTestValidatorWithIdentity(t, identity, 10)
+	peer, _ := registeredTestValidatorWithIdentity(t, identity, stake)
 	peer.data.PendingTxs = nil
 	peer.data.AppliedTxs = map[string]bool{}
 	if err := peer.applyTransactionLocked(evidenceTx); err != nil {
 		t.Fatal(err)
 	}
 	account := peer.accountLocked(identity.Address)
-	if account.LockedStake != 5 {
-		t.Fatalf("expected replay locked stake 5, got %d", account.LockedStake)
+	if account.LockedStake != stake-expectedSlash {
+		t.Fatalf("expected replay locked stake %d, got %d", stake-expectedSlash, account.LockedStake)
 	}
 	if stored := peer.data.ValidatorEvidence[resp.Evidence.EvidenceID]; stored.EvidenceID == "" {
 		t.Fatal("expected replay to store evidence")
@@ -122,7 +128,7 @@ func registeredTestValidatorWithIdentity(t *testing.T, identity *ValidatorIdenti
 	if err := store.CreditBalance(identity.Address, stake); err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://localhost:8080", stake)
+	registration, err := identity.RegistrationRequest("http://localhost:8080", stake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

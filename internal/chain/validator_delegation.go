@@ -271,6 +271,24 @@ func delegationKey(delegator string, validator string) string {
 	return wire.NormalizeAddress(delegator) + ":" + wire.NormalizeAddress(validator)
 }
 
+// DelegationsByDelegator returns all active delegations for a given delegator address.
+func (s *Store) DelegationsByDelegator(delegator string) []wire.StakeDelegation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	norm := wire.NormalizeAddress(delegator)
+	if s.data.StakeDelegations == nil {
+		return nil
+	}
+	var result []wire.StakeDelegation
+	for _, d := range s.data.StakeDelegations {
+		if wire.NormalizeAddress(d.Delegator) == norm {
+			result = append(result, d)
+		}
+	}
+	return result
+}
+
 func (s *Store) syncMinerDelegatorCountLocked(address string, count int) {
 	miner, ok := s.data.Miners[address]
 	if !ok {

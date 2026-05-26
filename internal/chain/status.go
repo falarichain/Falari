@@ -160,7 +160,6 @@ func (s *Store) Snapshot() wire.StateSnapshot {
 		Intents:              len(s.data.Intents),
 		Deals:                len(s.data.Deals),
 		ConsensusValidators:  len(s.data.ConsensusValidators),
-		PendingRetrieval:     len(s.data.PendingRetrievalRewards),
 		PendingMiningBuckets: len(s.data.MiningRewardVestings),
 		TotalTokenSupply:     reward.TotalSupply,
 		SnapshotAtUnix:       time.Now().Unix(),

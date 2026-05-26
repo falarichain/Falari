@@ -1008,16 +1008,6 @@ type FinalizeEpochResponse struct {
 	RepairTasksCreated   int          `json:"repair_tasks_created,omitempty"`
 }
 
-type PendingRetrievalReward struct {
-	ReceiptID     string `json:"receipt_id"`
-	MinerAddress  string `json:"miner_address"`
-	IntentID      string `json:"intent_id"`
-	Reward        uint64 `json:"reward"`
-	EpochRound    uint64 `json:"epoch_round"`
-	HeldSinceUnix int64  `json:"held_since_unix"`
-	ReleaseAtUnix int64  `json:"release_at_unix"`
-}
-
 type MiningRewardVestingBucket struct {
 	BucketID           string            `json:"bucket_id"`
 	Address            string            `json:"address"`
@@ -1036,7 +1026,6 @@ type EpochRewardsResponse struct {
 	RetrievalRewardsPaid uint64 `json:"retrieval_rewards_paid,omitempty"`
 	RepairRewardsPaid    uint64 `json:"repair_rewards_paid,omitempty"`
 	StorageSlashed       uint64 `json:"storage_slashed,omitempty"`
-	PendingRetrieval     int    `json:"pending_retrieval_count,omitempty"`
 	PendingMiningRewards uint64 `json:"pending_mining_rewards,omitempty"`
 }
 
@@ -1058,7 +1047,6 @@ type StateSnapshot struct {
 	TotalStorageLocked    uint64 `json:"total_storage_locked"`
 	TotalMiningPending    uint64 `json:"total_mining_pending,omitempty"`
 	TotalTokenSupply      uint64 `json:"total_token_supply"`
-	PendingRetrieval      int    `json:"pending_retrieval_count"`
 	PendingMiningBuckets  int    `json:"pending_mining_buckets,omitempty"`
 	PendingChallenges     int    `json:"pending_challenges"`
 	ActiveEpochs          int    `json:"active_epochs"`
@@ -1377,6 +1365,7 @@ type ValidatorInfo struct {
 	Rewards              uint64 `json:"rewards,omitempty"`
 	DelegationRewards    uint64 `json:"delegation_rewards,omitempty"`
 	AvailabilityScoreBPS uint64 `json:"availability_score_bps,omitempty"`
+	CommissionRateBPS    uint64 `json:"commission_rate_bps,omitempty"`
 }
 
 // ValidatorTurnWindow tracks a sliding window of proposer turn results
@@ -1430,11 +1419,12 @@ type UndelegateStakeResponse struct {
 }
 
 type RegisterValidatorRequest struct {
-	Address   string `json:"address"`
-	PublicKey string `json:"public_key"`
-	Endpoint  string `json:"endpoint,omitempty"`
-	Stake     uint64 `json:"stake"`
-	Signature string `json:"signature"`
+	Address           string `json:"address"`
+	PublicKey         string `json:"public_key"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	Stake             uint64 `json:"stake"`
+	CommissionRateBPS uint64 `json:"commission_rate_bps,omitempty"`
+	Signature         string `json:"signature"`
 }
 
 type RegisterValidatorResponse struct {
@@ -1679,6 +1669,12 @@ type GovernanceProposal struct {
 	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
 	TargetMaxConsensusValidators      uint64 `json:"target_max_consensus_validators,omitempty"`
 	TargetMinConsensusValidators      uint64 `json:"target_min_consensus_validators,omitempty"`
+	TargetBlockBytes                  uint64 `json:"target_block_bytes,omitempty"`
+	TargetMaxBlockBytes               uint64 `json:"target_max_block_bytes,omitempty"`
+	TargetMaxBlockTxs                 uint64 `json:"target_max_block_txs,omitempty"`
+	TargetMaxTxBytes                  uint64 `json:"target_max_tx_bytes,omitempty"`
+	TargetMaxStorageTxBytes           uint64 `json:"target_max_storage_tx_bytes,omitempty"`
+	ProposerNonce                     uint64 `json:"proposer_nonce"`
 	Status                            string `json:"status"`
 	CreatedAtUnix                     int64  `json:"created_at_unix"`
 }
@@ -1738,7 +1734,13 @@ type CreateGovernanceProposalRequest struct {
 	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
 	TargetMaxConsensusValidators      uint64 `json:"target_max_consensus_validators,omitempty"`
 	TargetMinConsensusValidators      uint64 `json:"target_min_consensus_validators,omitempty"`
+	TargetBlockBytes                  uint64 `json:"target_block_bytes,omitempty"`
+	TargetMaxBlockBytes               uint64 `json:"target_max_block_bytes,omitempty"`
+	TargetMaxBlockTxs                 uint64 `json:"target_max_block_txs,omitempty"`
+	TargetMaxTxBytes                  uint64 `json:"target_max_tx_bytes,omitempty"`
+	TargetMaxStorageTxBytes           uint64 `json:"target_max_storage_tx_bytes,omitempty"`
 	Signature                         string `json:"signature"`
+	Nonce                             uint64 `json:"nonce"`
 	CreatedAtUnix                     int64  `json:"created_at_unix"`
 }
 
@@ -1753,6 +1755,7 @@ type CastGovernanceVoteRequest struct {
 	Voter         string `json:"voter"`
 	Approve       bool   `json:"approve"`
 	Signature     string `json:"signature"`
+	Nonce         uint64 `json:"nonce"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
 }
 
@@ -1767,7 +1770,11 @@ type CastGovernanceVoteResponse struct {
 
 // ExecuteGovernanceProposalRequest is the HTTP request to execute an approved proposal.
 type ExecuteGovernanceProposalRequest struct {
-	ProposalID string `json:"proposal_id"`
+	ProposalID    string `json:"proposal_id"`
+	Executor      string `json:"executor"`
+	Signature     string `json:"signature"`
+	Nonce         uint64 `json:"nonce"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
 }
 
 // ExecuteGovernanceProposalResponse is the response after executing a proposal.

@@ -61,7 +61,7 @@ func (s *Store) removePendingTxLocked(txID string) {
 }
 
 func (s *Store) AcceptTransaction(tx wire.Transaction) (bool, error) {
-	if err := validateTransactionShape(tx); err != nil {
+	if err := validateTransactionShapeWithLimits(tx, ^uint64(0), ^uint64(0)); err != nil {
 		return false, err
 	}
 
@@ -73,6 +73,10 @@ func (s *Store) AcceptTransaction(tx wire.Transaction) (bool, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	limits := s.blockLimitsLocked()
+	if err := validateTransactionShapeWithLimits(tx, limits.maxTxBytes, limits.maxStorageTxBytes); err != nil {
+		return false, err
+	}
 
 	if tx.Type == "transfer" {
 		if err := s.verifyTransferTxLocked(tx); err != nil {
@@ -136,6 +140,9 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.validateBlockLimitsLocked(block); err != nil {
+		return false, err
+	}
 
 	if block.Height <= uint64(len(s.data.Blocks)) {
 		existing := s.data.Blocks[block.Height-1]
@@ -254,7 +261,8 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 		return wire.Block{}, false, err
 	}
 	block.Finality = s.blockFinalityLocked(block, []wire.BlockVote{vote})
-	if blockEncodedSize(block) > defaultMaxBlockBytes {
+	limits := s.blockLimitsLocked()
+	if uint64(blockEncodedSize(block)) > limits.maxBlockBytes {
 		return wire.Block{}, false, errors.New("block exceeds maximum size")
 	}
 	s.data.Blocks = append(s.data.Blocks, block)
@@ -451,19 +459,13 @@ func validateBlockShape(block wire.Block) error {
 	if block.ProducerAddress == "" || block.ProducerPublicKey == "" {
 		return errors.New("block producer is required")
 	}
-	if len(block.Transactions) > defaultMaxBlockTxs {
-		return errors.New("block contains too many transactions")
-	}
-	if blockEncodedSize(block) > defaultMaxBlockBytes {
-		return errors.New("block exceeds maximum size")
-	}
 	if block.Hash != blockHash(block) {
 		return errors.New("block hash mismatch")
 	}
 	txLeaves := make([]string, 0, len(block.Transactions))
 	seen := map[string]bool{}
 	for _, tx := range block.Transactions {
-		if err := validateTransactionShape(tx); err != nil {
+		if err := validateTransactionShapeWithLimits(tx, ^uint64(0), ^uint64(0)); err != nil {
 			return err
 		}
 		if seen[tx.TxID] {
@@ -525,7 +527,7 @@ func (s *Store) validateBlockTimeLocked(block wire.Block) error {
 
 func transactionRequiresSignature(txType string) bool {
 	switch txType {
-	case "create_intent", "batch_commit", "finalize", "settle_intent",
+	case "create_intent", "batch_commit", "finalize_deal", "settle_intent",
 		"permanent_fund_topup", "renew_deal", "terminate_deal",
 		"set_access_policy", "delegate_stake", "undelegate_stake":
 		return true
@@ -534,13 +536,17 @@ func transactionRequiresSignature(txType string) bool {
 }
 
 func validateTransactionShape(tx wire.Transaction) error {
+	return validateTransactionShapeWithLimits(tx, defaultMaxTxBytes, defaultMaxStorageTxBytes)
+}
+
+func validateTransactionShapeWithLimits(tx wire.Transaction, maxTxBytes uint64, maxStorageTxBytes uint64) error {
 	if tx.TxID == "" {
 		return errors.New("transaction id is required")
 	}
 	if tx.Type == "" {
 		return errors.New("transaction type is required")
 	}
-	if transactionEncodedSize(tx) > maxTransactionBytes(tx.Type) {
+	if uint64(transactionEncodedSize(tx)) > maxTransactionBytes(tx.Type, maxTxBytes, maxStorageTxBytes) {
 		return errors.New("transaction exceeds maximum size")
 	}
 	if chaincrypto.HashBytes(tx.Payload) != tx.PayloadHash {
@@ -558,17 +564,39 @@ func validateTransactionShape(tx wire.Transaction) error {
 	return nil
 }
 
+func (s *Store) validateBlockLimitsLocked(block wire.Block) error {
+	limits := s.blockLimitsLocked()
+	if uint64(len(block.Transactions)) > limits.maxBlockTxs {
+		return errors.New("block contains too many transactions")
+	}
+	if uint64(blockEncodedSize(block)) > limits.maxBlockBytes {
+		return errors.New("block exceeds maximum size")
+	}
+	for _, tx := range block.Transactions {
+		if err := validateTransactionShapeWithLimits(tx, limits.maxTxBytes, limits.maxStorageTxBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func txLeaf(tx wire.Transaction) string {
 	return wire.TransactionLeaf(tx)
 }
 
 func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction) bool {
 	switch tx.Type {
-	case "transfer", "multisig_exec":
+	case "transfer", "multisig_exec", "create_intent", "batch_commit", "finalize_deal",
+		"settle_intent", "permanent_fund_topup", "renew_deal", "terminate_deal",
+		"set_access_policy", "delegate_stake", "undelegate_stake",
+		"create_collection", "append_record", "create_key_envelope",
+		"create_share", "revoke_share":
 		return wire.NormalizeAddress(tx.From) == normalized.From &&
 			tx.Fee == normalized.Fee &&
 			tx.Nonce == normalized.Nonce &&
-			tx.NonceProtected == normalized.NonceProtected
+			tx.NonceProtected == normalized.NonceProtected &&
+			tx.AgentKeyID == normalized.AgentKeyID &&
+			tx.AgentNonce == normalized.AgentNonce
 	default:
 		return true
 	}
@@ -762,8 +790,8 @@ func (s *Store) totalVotingPowerLocked(block wire.Block) uint64 {
 	for _, address := range s.consensusValidatorAddressesLocked() {
 		total += s.validatorPowerLocked(address)
 	}
-	if total == 0 && hasValidatorRegistrationTx(block.Transactions, block.ProducerAddress, block.ProducerPublicKey) {
-		return 1
+	if total == 0 {
+		return validatorRegistrationPowerFromTx(block.Transactions, block.ProducerAddress, block.ProducerPublicKey)
 	}
 	return total
 }
@@ -773,10 +801,7 @@ func (s *Store) validatorPowerForBlockLocked(block wire.Block, address string, p
 	if ok && validator.Status == wire.ValidatorStatusActive && validator.PublicKey == publicKey && s.data.ConsensusValidators[address] {
 		return validatorPower(validator)
 	}
-	if hasValidatorRegistrationTx(block.Transactions, address, publicKey) {
-		return 1
-	}
-	return 0
+	return validatorRegistrationPowerFromTx(block.Transactions, address, publicKey)
 }
 
 func (s *Store) validatorPowerLocked(address string) uint64 {
@@ -819,6 +844,10 @@ func (s *Store) consensusValidatorAddressesLocked() []string {
 }
 
 func hasValidatorRegistrationTx(txs []wire.Transaction, address string, publicKey string) bool {
+	return validatorRegistrationPowerFromTx(txs, address, publicKey) > 0
+}
+
+func validatorRegistrationPowerFromTx(txs []wire.Transaction, address string, publicKey string) uint64 {
 	for _, tx := range txs {
 		if tx.Type != "register_validator" {
 			continue
@@ -830,11 +859,14 @@ func hasValidatorRegistrationTx(txs []wire.Transaction, address string, publicKe
 		if req.Address != address || req.PublicKey != publicKey {
 			continue
 		}
+		if req.Stake < MinValidatorStake {
+			continue
+		}
 		if wire.VerifyValidatorRegistration(req) == nil {
-			return true
+			return req.Stake
 		}
 	}
-	return false
+	return 0
 }
 
 func (s *Store) markConsensusValidatorsFromTxsLocked(txs []wire.Transaction) {
@@ -846,7 +878,7 @@ func (s *Store) markConsensusValidatorsFromTxsLocked(txs []wire.Transaction) {
 		if err := json.Unmarshal(tx.Payload, &req); err != nil {
 			continue
 		}
-		if wire.VerifyValidatorRegistration(req) == nil {
+		if req.Stake >= MinValidatorStake && wire.VerifyValidatorRegistration(req) == nil {
 			s.data.ConsensusValidators[req.Address] = true
 		}
 	}
@@ -909,25 +941,26 @@ func (s *Store) orderedPendingTxsLocked() []wire.Transaction {
 func (s *Store) selectPendingTxsForBlockLocked() []wire.Transaction {
 	pending := append([]wire.Transaction(nil), s.data.PendingTxs...)
 	sortPendingTxs(pending)
+	limits := s.blockLimitsLocked()
 
 	selected := make([]wire.Transaction, 0, len(pending))
 	selectedIDs := map[string]bool{}
 	nextNonce := map[string]uint64{}
 	selectedBytes := 0
-	addTx := func(tx wire.Transaction, limitBytes int) bool {
-		if len(selected) >= defaultMaxBlockTxs {
+	addTx := func(tx wire.Transaction, limitBytes uint64) bool {
+		if uint64(len(selected)) >= limits.maxBlockTxs {
 			return false
 		}
-		txBytes := transactionEncodedSize(tx)
-		if txBytes > maxTransactionBytes(tx.Type) {
+		txBytes := uint64(transactionEncodedSize(tx))
+		if txBytes > maxTransactionBytes(tx.Type, limits.maxTxBytes, limits.maxStorageTxBytes) {
 			return false
 		}
-		if selectedBytes+txBytes > limitBytes {
+		if uint64(selectedBytes)+txBytes > limitBytes {
 			return false
 		}
 		selected = append(selected, tx)
 		selectedIDs[tx.TxID] = true
-		selectedBytes += txBytes
+		selectedBytes += int(txBytes)
 		return true
 	}
 
@@ -944,12 +977,12 @@ func (s *Store) selectPendingTxsForBlockLocked() []wire.Transaction {
 		if !s.data.AppliedTxs[tx.TxID] {
 			continue
 		}
-		if !addTx(tx, defaultMaxBlockBytes-defaultBlockSizeHeadroom) {
+		if !addTx(tx, limitWithHeadroom(limits.maxBlockBytes)) {
 			return selected
 		}
 	}
 
-	targetBytes := defaultTargetBlockBytes - defaultBlockSizeHeadroom
+	targetBytes := limitWithHeadroom(limits.targetBlockBytes)
 	for {
 		nextIndex := -1
 		for i, tx := range pending {
@@ -1016,7 +1049,117 @@ func enrichTransactionMetadata(tx *wire.Transaction) {
 		tx.Fee = payload.Request.Fee
 		tx.NonceProtected = true
 		tx.Nonce = payload.Request.Nonce
+	case "create_intent":
+		var payload createIntentTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, payload.Request.LockedFee, payload.Request.AgentKeyID, payload.Request.AgentNonce)
+	case "batch_commit":
+		var payload batchCommitTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, 0, payload.Request.AgentKeyID, payload.Request.AgentNonce)
+	case "finalize_deal":
+		var payload finalizeDealTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, 0, payload.Request.AgentKeyID, payload.Request.AgentNonce)
+	case "settle_intent":
+		var payload settleIntentTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+	case "permanent_fund_topup":
+		var payload permanentFundTopUpTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+	case "renew_deal":
+		var payload renewDealTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+	case "terminate_deal":
+		var payload terminateDealTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+	case "set_access_policy":
+		var payload setAccessPolicyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+	case "delegate_stake":
+		var payload delegateStakeTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Delegator, payload.Request.Nonce, 0)
+	case "undelegate_stake":
+		var payload undelegateStakeTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Delegator, payload.Request.Nonce, 0)
+	case "create_collection":
+		var payload createCollectionTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+	case "append_record":
+		var payload appendRecordTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+	case "create_key_envelope", "create_share":
+		var payload createShareTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			var envelopePayload createKeyEnvelopeTxPayload
+			if err := json.Unmarshal(tx.Payload, &envelopePayload); err != nil {
+				return
+			}
+			enrichAccountMetadata(tx, envelopePayload.Request.Owner, envelopePayload.Request.AccountNonce, 0)
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Owner, payload.Request.AccountNonce, 0)
+	case "revoke_share":
+		var payload revokeShareTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Owner, payload.Request.AccountNonce, 0)
 	}
+}
+
+func enrichAccountMetadata(tx *wire.Transaction, from string, nonce uint64, fee uint64) {
+	tx.From = wire.NormalizeAddress(from)
+	tx.Nonce = nonce
+	tx.Fee = fee
+	tx.NonceProtected = true
+}
+
+func enrichAccountOrAgentMetadata(tx *wire.Transaction, from string, nonce uint64, fee uint64, agentKeyID string, agentNonce uint64) {
+	tx.From = wire.NormalizeAddress(from)
+	tx.Fee = fee
+	tx.AgentKeyID = agentKeyID
+	tx.AgentNonce = agentNonce
+	if agentKeyID != "" {
+		tx.Nonce = 0
+		tx.NonceProtected = false
+		return
+	}
+	tx.Nonce = nonce
+	tx.NonceProtected = true
 }
 
 func sameAddress(a string, b string) bool {
@@ -1039,11 +1182,59 @@ func blockEncodedSize(block wire.Block) int {
 	return len(raw)
 }
 
-func maxTransactionBytes(txType string) int {
-	if isStorageMetadataTransaction(txType) {
-		return defaultMaxStorageTxBytes
+type blockLimits struct {
+	targetBlockBytes  uint64
+	maxBlockBytes     uint64
+	maxBlockTxs       uint64
+	maxTxBytes        uint64
+	maxStorageTxBytes uint64
+}
+
+func (s *Store) blockLimitsLocked() blockLimits {
+	params := s.miningParamsLocked()
+	limits := blockLimits{
+		targetBlockBytes:  params.TargetBlockBytes,
+		maxBlockBytes:     params.MaxBlockBytes,
+		maxBlockTxs:       params.MaxBlockTxs,
+		maxTxBytes:        params.MaxTxBytes,
+		maxStorageTxBytes: params.MaxStorageTxBytes,
 	}
-	return defaultMaxTxBytes
+	if limits.targetBlockBytes == 0 {
+		limits.targetBlockBytes = defaultTargetBlockBytes
+	}
+	if limits.maxBlockBytes == 0 {
+		limits.maxBlockBytes = defaultMaxBlockBytes
+	}
+	if limits.maxBlockBytes > defaultMaxBlockBytes {
+		limits.maxBlockBytes = defaultMaxBlockBytes
+	}
+	if limits.maxBlockTxs == 0 {
+		limits.maxBlockTxs = defaultMaxBlockTxs
+	}
+	if limits.maxTxBytes == 0 {
+		limits.maxTxBytes = defaultMaxTxBytes
+	}
+	if limits.maxStorageTxBytes == 0 {
+		limits.maxStorageTxBytes = defaultMaxStorageTxBytes
+	}
+	if limits.targetBlockBytes > limits.maxBlockBytes {
+		limits.targetBlockBytes = limits.maxBlockBytes
+	}
+	return limits
+}
+
+func limitWithHeadroom(limit uint64) uint64 {
+	if limit <= defaultBlockSizeHeadroom {
+		return 0
+	}
+	return limit - defaultBlockSizeHeadroom
+}
+
+func maxTransactionBytes(txType string, maxTxBytes uint64, maxStorageTxBytes uint64) uint64 {
+	if isStorageMetadataTransaction(txType) {
+		return maxStorageTxBytes
+	}
+	return maxTxBytes
 }
 
 func isStorageMetadataTransaction(txType string) bool {

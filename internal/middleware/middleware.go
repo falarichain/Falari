@@ -2,6 +2,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -79,6 +80,12 @@ func (l *ipLimiter) get(ip string) *rate.Limiter {
 // rps is requests per second; burst is the maximum burst size.
 // If rps <= 0, rate limiting is disabled.
 func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
+	return RateLimitWithTrustedProxies(rps, burst, nil)
+}
+
+// RateLimitWithTrustedProxies trusts X-Forwarded-For and X-Real-Ip only when
+// the direct peer address matches a configured trusted proxy CIDR or IP.
+func RateLimitWithTrustedProxies(rps float64, burst int, trustedProxies []string) func(http.Handler) http.Handler {
 	if rps <= 0 {
 		return func(next http.Handler) http.Handler { return next }
 	}
@@ -90,10 +97,11 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 		rps:      rate.Limit(rps),
 		burst:    burst,
 	}
+	proxies := parseTrustedProxies(trustedProxies)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
+			ip := clientIP(r, proxies)
 			limiter := l.get(ip)
 			if !limiter.Allow() {
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
@@ -104,21 +112,72 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 	}
 }
 
-// clientIP extracts the client IP from the request, respecting X-Forwarded-For.
-func clientIP(r *http.Request) string {
+// clientIP extracts the client IP from the request. Forwarded headers are
+// trusted only when the immediate peer is a configured proxy.
+func clientIP(r *http.Request, trustedProxies []*net.IPNet) string {
+	remoteIP := remoteAddrIP(r.RemoteAddr)
+	if isTrustedProxy(remoteIP, trustedProxies) {
+		return forwardedClientIP(r, remoteIP)
+	}
+	return remoteIP
+}
+
+func forwardedClientIP(r *http.Request, fallback string) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.SplitN(xff, ",", 2)
-		return strings.TrimSpace(parts[0])
+		if ip := strings.TrimSpace(parts[0]); ip != "" {
+			return ip
+		}
 	}
 	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
-		return strings.TrimSpace(xri)
+		if ip := strings.TrimSpace(xri); ip != "" {
+			return ip
+		}
 	}
-	// Strip port from RemoteAddr.
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx > 0 {
-		return addr[:idx]
+	return fallback
+}
+
+func remoteAddrIP(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		return host
 	}
 	return addr
+}
+
+func parseTrustedProxies(raw []string) []*net.IPNet {
+	proxies := make([]*net.IPNet, 0, len(raw))
+	for _, entry := range raw {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if ip := net.ParseIP(entry); ip != nil {
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			proxies = append(proxies, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		if _, network, err := net.ParseCIDR(entry); err == nil {
+			proxies = append(proxies, network)
+		}
+	}
+	return proxies
+}
+
+func isTrustedProxy(ip string, proxies []*net.IPNet) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, proxy := range proxies {
+		if proxy.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 // Chain composes multiple middleware functions into a single middleware.

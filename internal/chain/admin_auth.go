@@ -45,6 +45,7 @@ func (s *Server) requireOperator(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, errors.New("operator signature timestamp outside allowed window"))
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, errors.New("failed to read request body"))

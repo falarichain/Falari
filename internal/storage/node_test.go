@@ -66,6 +66,56 @@ func TestNodeProvesMultipleChallengeLeaves(t *testing.T) {
 	}
 }
 
+func TestNodeRejectsExpiredChallengeProof(t *testing.T) {
+	node, err := OpenNode(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("expired-proof-shard")
+	receipt, err := node.Store(wire.UploadRequest{
+		IntentID:    "intent_expired_proof",
+		User:        "alice",
+		FileRoot:    "file_root",
+		SegmentID:   0,
+		SegmentRoot: "segment_root",
+		ShardIndex:  0,
+		ShardID:     "shard_expired_proof",
+		ShardHash:   chaincrypto.HashBytes(data),
+		ShardSize:   int64(len(data)),
+		DataBase64:  base64.StdEncoding.EncodeToString(data),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = node.Prove(wire.StorageChallenge{
+		ChallengeID:      "challenge_expired",
+		ShardHash:        receipt.ShardHash,
+		ShardSize:        receipt.ShardSize,
+		SectorCommitment: receipt.SectorCommitment,
+		LeafSize:         chaincrypto.DefaultLeafSize,
+		LeafIndex:        0,
+		MinerAddress:     node.Address(),
+		MinerPublicKey:   node.PublicKeyBase64(),
+		Nonce:            "nonce_expired",
+		ExpiresAtUnix:    time.Now().Add(-time.Second).Unix(),
+	})
+	if err == nil {
+		t.Fatal("expected expired challenge to be rejected")
+	}
+}
+
+func TestValidateProofRequestRequiresChainChallengeFields(t *testing.T) {
+	err := validateProofRequest(wire.StorageChallenge{
+		ChallengeID:   "challenge_http",
+		Nonce:         "nonce_http",
+		ProofType:     "merkle-por-v1",
+		ExpiresAtUnix: time.Now().Add(time.Minute).Unix(),
+	})
+	if err == nil {
+		t.Fatal("expected missing challenge hash to be rejected")
+	}
+}
+
 func TestNodeStatusCountsStoredShards(t *testing.T) {
 	resetProviderTransportMemoryForTests()
 	node, err := OpenNode(t.TempDir())
@@ -104,6 +154,30 @@ func TestNodeStatusCountsStoredShards(t *testing.T) {
 	}
 	if len(status.RecentProviderMemories) != 0 {
 		t.Fatalf("expected empty provider memories for fresh node, got %+v", status.RecentProviderMemories)
+	}
+}
+
+func TestNodeRejectsUploadWithoutChainWhenAuthorizationRequired(t *testing.T) {
+	node, err := OpenNode(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.RequireChainAuthorization(true)
+	data := []byte("unauthorized-shard")
+	_, err = node.Store(wire.UploadRequest{
+		IntentID:    "intent_auth_required",
+		User:        "alice",
+		FileRoot:    "file_root",
+		SegmentID:   0,
+		SegmentRoot: "segment_root",
+		ShardIndex:  0,
+		ShardID:     "shard_auth_required",
+		ShardHash:   chaincrypto.HashBytes(data),
+		ShardSize:   int64(len(data)),
+		DataBase64:  base64.StdEncoding.EncodeToString(data),
+	})
+	if err == nil {
+		t.Fatal("expected upload to require chain authorization")
 	}
 }
 

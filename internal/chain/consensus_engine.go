@@ -277,7 +277,13 @@ func (s *Store) checkBlockTimeoutLocked(now int64) (bool, uint64) {
 			roundStart = now
 			cs.ConsensusRoundStartedAtUnix = now
 		}
-		const blockTimeoutSec int64 = 10 // 2x block interval
+		blockTimeoutSec := int64(10)
+		if s.blockInterval > 0 {
+			blockTimeoutSec = int64((2 * s.blockInterval).Seconds())
+			if blockTimeoutSec < 1 {
+				blockTimeoutSec = 1
+			}
+		}
 		if now-roundStart >= blockTimeoutSec && cs.ConsensusProposer != "" {
 			// Record missed turn for the timed-out proposer.
 			s.recordProposerTurnLocked(cs.ConsensusProposer, false)

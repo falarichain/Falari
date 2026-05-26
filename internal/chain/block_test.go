@@ -24,10 +24,11 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://localhost:8080", 0)
+	registration, err := identity.RegistrationRequest("http://localhost:8080", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, store, identity, MinValidatorStake)
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +104,25 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 	}
 }
 
+func TestRegisterValidatorRequiresMinimumStake(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := LoadOrCreateValidatorIdentity("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fundValidatorForTest(t, store, identity, MinValidatorStake)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake-1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RegisterValidator(registration); err == nil {
+		t.Fatal("expected validator registration below minimum stake to be rejected")
+	}
+}
+
 func TestBlockProductionCapsTransactionCount(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
@@ -112,10 +132,11 @@ func TestBlockProductionCapsTransactionCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, store, identity, MinValidatorStake)
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -187,10 +208,11 @@ func TestAcceptPeerBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, producer, identity, MinValidatorStake)
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +232,7 @@ func TestAcceptPeerBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, peer, identity, MinValidatorStake)
 	peer.data.PendingTxs = append(peer.data.PendingTxs, produced.Block.Transactions...)
 
 	accepted, err := peer.AcceptBlock(produced.Block)
@@ -299,10 +322,11 @@ func TestMempoolProducesContiguousNonceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, store, identity, MinValidatorStake)
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -367,10 +391,11 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, store, identity, MinValidatorStake)
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -443,10 +468,11 @@ func TestFeeMarketAdjustsAfterBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, store, identity, MinValidatorStake)
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -633,7 +659,7 @@ func TestConsensusPrevotePrecommitFinalizesBlock(t *testing.T) {
 }
 
 func TestSubmitConsensusVoteBroadcastsAcceptedVoteOnce(t *testing.T) {
-	store, identity := registeredTestValidator(t, 10)
+	store, identity := registeredTestValidator(t, MinValidatorStake)
 	store.SetBlockProducer(identity)
 	if err := store.CreditBalance("alice", 1); err != nil {
 		t.Fatal(err)
@@ -695,10 +721,11 @@ func TestAcceptBlockRejectsInvalidFinalityCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, producer, identity, MinValidatorStake)
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -731,10 +758,11 @@ func TestAcceptBlockRejectsNonCanonicalFinalityVotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, producer, identity, MinValidatorStake)
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -768,10 +796,11 @@ func TestLevelDBStorePersistsState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, store, identity, MinValidatorStake)
 	if _, err := store.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -842,10 +871,11 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, producer, identity, MinValidatorStake)
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -857,10 +887,11 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedFinalizedDealForEpochTest(peer)
-	peerRegistration, err := identity.RegistrationRequest("http://validator-a", 0)
+	peerRegistration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, peer, identity, MinValidatorStake)
 	if _, err := peer.RegisterValidator(peerRegistration); err != nil {
 		t.Fatal(err)
 	}

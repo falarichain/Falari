@@ -115,9 +115,6 @@ func (s *Store) submitRetrievalReceiptLocked(req wire.SubmitRetrievalReceiptRequ
 	receipt := req.Receipt
 	receipt.User = wire.NormalizeAddress(receipt.User)
 	receipt.ClientAddress = wire.NormalizeAddress(receipt.ClientAddress)
-	if receipt.ServedAtUnix == 0 {
-		receipt.ServedAtUnix = time.Now().Unix()
-	}
 	if receipt.ServedAtUnix > time.Now().Add(10*time.Minute).Unix() {
 		return wire.SubmitRetrievalReceiptResponse{}, false, errors.New("retrieval receipt is from the future")
 	}
@@ -259,70 +256,6 @@ func (s *Store) payRetrievalRewardLocked(intent *Intent, minerAddress string, re
 	return totalPaid
 }
 
-func (s *Store) holdRetrievalRewardLocked(receiptID string, minerAddress string, intentID string, reward uint64) uint64 {
-	if reward == 0 {
-		return 0
-	}
-	if s.data.PendingRetrievalRewards == nil {
-		s.data.PendingRetrievalRewards = map[string]wire.PendingRetrievalReward{}
-	}
-	now := time.Now().Unix()
-	s.data.PendingRetrievalRewards[receiptID] = wire.PendingRetrievalReward{
-		ReceiptID:     receiptID,
-		MinerAddress:  minerAddress,
-		IntentID:      intentID,
-		Reward:        reward,
-		EpochRound:    s.data.EpochRound,
-		HeldSinceUnix: now,
-		ReleaseAtUnix: now + defaultRetrievalRewardHoldDuration,
-	}
-	return reward
-}
-
-func (s *Store) releasePendingRetrievalRewardsLocked() (released int, totalRewards uint64) {
-	if len(s.data.PendingRetrievalRewards) == 0 {
-		return 0, 0
-	}
-	now := time.Now().Unix()
-	releasable := make([]string, 0)
-	for receiptID, pending := range s.data.PendingRetrievalRewards {
-		if pending.ReleaseAtUnix <= now {
-			releasable = append(releasable, receiptID)
-		}
-	}
-	for _, receiptID := range releasable {
-		pending := s.data.PendingRetrievalRewards[receiptID]
-		if pending.Reward == 0 {
-			delete(s.data.PendingRetrievalRewards, receiptID)
-			continue
-		}
-		intent, ok := s.data.Intents[pending.IntentID]
-		if !ok {
-			delete(s.data.PendingRetrievalRewards, receiptID)
-			continue
-		}
-		paid := s.payRetrievalRewardLocked(intent, pending.MinerAddress, pending.Reward)
-		_ = paid
-		delete(s.data.PendingRetrievalRewards, receiptID)
-		released++
-		totalRewards += pending.Reward
-	}
-	return released, totalRewards
-}
-
-func (s *Store) ReleasePendingRetrievalRewards() (int, uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	released, totalRewards := s.releasePendingRetrievalRewardsLocked()
-	if released > 0 {
-		if err := s.saveLocked(); err != nil {
-			return 0, 0, err
-		}
-	}
-	return released, totalRewards, nil
-}
-
 func (s *Store) EpochRewards(epochID string) (wire.EpochRewardsResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -338,7 +271,6 @@ func (s *Store) EpochRewards(epochID string) (wire.EpochRewardsResponse, error) 
 		RetrievalRewardsPaid: epoch.RetrievalRewardsPaid,
 		RepairRewardsPaid:    epoch.RepairRewardsPaid,
 		StorageSlashed:       epoch.StorageSlashed,
-		PendingRetrieval:     len(s.data.PendingRetrievalRewards),
 	}
 	for _, bucket := range s.data.MiningRewardVestings {
 		if bucket.Total > bucket.Released {

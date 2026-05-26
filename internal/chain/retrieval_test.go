@@ -100,9 +100,6 @@ func TestSubmitRetrievalReceiptRecordsAccessTelemetryWithoutPayingStorageMiner(t
 	if stats.RetrievalSuccess != 1 || stats.RetrievalBytes != receipt.BytesServed || stats.RetrievalRewards != 0 || stats.Rewards != 0 {
 		t.Fatalf("unexpected retrieval miner stats %+v", stats)
 	}
-	if len(store.data.PendingRetrievalRewards) != 0 {
-		t.Fatalf("expected no legacy pending retrieval reward, got %d", len(store.data.PendingRetrievalRewards))
-	}
 	if len(store.data.MiningRewardVestings) != 0 {
 		t.Fatalf("expected no mining vesting bucket for raw retrieval telemetry, got %d", len(store.data.MiningRewardVestings))
 	}

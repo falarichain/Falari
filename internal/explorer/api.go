@@ -679,7 +679,7 @@ func (srv *Server) handleMiner(w http.ResponseWriter, r *http.Request) {
 func (srv *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rows, err := srv.store.Pool().Query(ctx,
-		"SELECT validator_address, public_key, stake, delegated_stake, status, consensus, produced_blocks, slashed, evidence_count, rewards FROM validators ORDER BY stake DESC LIMIT 100")
+		"SELECT validator_address, public_key, stake, delegated_stake, status, consensus, produced_blocks, slashed, evidence_count, rewards, commission_rate_bps FROM validators ORDER BY stake DESC LIMIT 100")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -689,20 +689,21 @@ func (srv *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 	validators := make([]map[string]any, 0)
 	for rows.Next() {
 		var addr, pubKey, status string
-		var stake, delStake, prodBlocks, slash, evidence, rewards int64
+		var stake, delStake, prodBlocks, slash, evidence, rewards, commissionBPS int64
 		var consensus bool
-		rows.Scan(&addr, &pubKey, &stake, &delStake, &status, &consensus, &prodBlocks, &slash, &evidence, &rewards)
+		rows.Scan(&addr, &pubKey, &stake, &delStake, &status, &consensus, &prodBlocks, &slash, &evidence, &rewards, &commissionBPS)
 		validators = append(validators, map[string]any{
-			"validator_address": addr,
-			"public_key":        pubKey,
-			"stake":             stake,
-			"delegated_stake":   delStake,
-			"status":            status,
-			"consensus":         consensus,
-			"produced_blocks":   prodBlocks,
-			"slashed":           slash,
-			"evidence_count":    evidence,
-			"rewards":           rewards,
+			"validator_address":   addr,
+			"public_key":          pubKey,
+			"stake":               stake,
+			"delegated_stake":     delStake,
+			"status":              status,
+			"consensus":           consensus,
+			"produced_blocks":     prodBlocks,
+			"slashed":             slash,
+			"evidence_count":      evidence,
+			"rewards":             rewards,
+			"commission_rate_bps": commissionBPS,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"validators": validators})
@@ -715,14 +716,14 @@ func (srv *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	var addr, pubKey, endpoint, status string
 	var stake, delStake, selfStake int64
 	var consensus bool
-	var prodBlocks, slashed, evidence, delegCount, rewards, delRewards, registeredAt int64
+	var prodBlocks, slashed, evidence, delegCount, rewards, delRewards, registeredAt, commissionBPS int64
 
 	err := srv.store.Pool().QueryRow(ctx, `
 		SELECT validator_address, public_key, endpoint, stake, delegated_stake, self_stake, status,
-			consensus, produced_blocks, slashed, evidence_count, delegator_count, rewards, delegation_rewards, registered_at_unix
+			consensus, produced_blocks, slashed, evidence_count, delegator_count, rewards, delegation_rewards, registered_at_unix, commission_rate_bps
 		FROM validators WHERE validator_address = $1
 	`, address).Scan(&addr, &pubKey, &endpoint, &stake, &delStake, &selfStake, &status,
-		&consensus, &prodBlocks, &slashed, &evidence, &delegCount, &rewards, &delRewards, &registeredAt)
+		&consensus, &prodBlocks, &slashed, &evidence, &delegCount, &rewards, &delRewards, &registeredAt, &commissionBPS)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -743,6 +744,7 @@ func (srv *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		"rewards":             rewards,
 		"delegation_rewards":  delRewards,
 		"registered_at_unix":  registeredAt,
+		"commission_rate_bps": commissionBPS,
 	})
 }
 

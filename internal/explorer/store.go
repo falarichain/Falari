@@ -233,8 +233,8 @@ func (s *Store) refreshValidators(ctx context.Context) {
 		_, err := s.pool.Exec(ctx, `
 			INSERT INTO validators (validator_address, public_key, endpoint, stake,
 				delegated_stake, self_stake, status, consensus, produced_blocks, slashed,
-				evidence_count, delegator_count, rewards, delegation_rewards, registered_at_unix)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+				evidence_count, delegator_count, rewards, delegation_rewards, registered_at_unix, commission_rate_bps)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 			ON CONFLICT (validator_address) DO UPDATE SET
 				stake = EXCLUDED.stake,
 				delegated_stake = EXCLUDED.delegated_stake,
@@ -244,11 +244,12 @@ func (s *Store) refreshValidators(ctx context.Context) {
 				produced_blocks = EXCLUDED.produced_blocks,
 				slashed = EXCLUDED.slashed,
 				evidence_count = EXCLUDED.evidence_count,
-				rewards = EXCLUDED.rewards
+				rewards = EXCLUDED.rewards,
+				commission_rate_bps = EXCLUDED.commission_rate_bps
 		`, v.Address, v.PublicKey, v.Endpoint, v.Stake, v.DelegatedStake,
 			v.SelfStake, v.Status, v.Consensus, v.ProducedBlocks, v.Slashed,
 			v.EvidenceCount, v.DelegatorCount, v.Rewards, v.DelegationRewards,
-			v.RegisteredAtUnix)
+			v.RegisteredAtUnix, v.CommissionRateBPS)
 		if err != nil {
 			log.Printf("explorer: insert validator %s error: %v", v.Address, err)
 		}

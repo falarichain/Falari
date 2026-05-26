@@ -79,7 +79,6 @@ type State struct {
 	DeleteReceipts             map[string]wire.DeleteReceipt             `json:"delete_receipts"`
 	RetrievalReceipts          map[string]wire.RetrievalReceipt          `json:"retrieval_receipts"`
 	RetrievalWindows           map[string]wire.RetrievalRateWindow       `json:"retrieval_windows"`
-	PendingRetrievalRewards    map[string]wire.PendingRetrievalReward    `json:"pending_retrieval_rewards"`
 	MiningRewardVestings       map[string]wire.MiningRewardVestingBucket `json:"mining_reward_vestings"`
 	StakeDelegations           map[string]wire.StakeDelegation           `json:"stake_delegations"`
 	DealHealths                map[string]wire.DealHealth                `json:"deal_healths"`
@@ -136,6 +135,8 @@ type Store struct {
 
 // SetBlockInterval configures the block production interval for per-block reward calculations.
 func (s *Store) SetBlockInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.blockInterval = d
 }
 
@@ -302,51 +303,50 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 
 func newState() State {
 	return State{
-		ChainID:                 "falari-dev",
-		Intents:                 map[string]*Intent{},
-		Deals:                   map[string]string{},
-		Challenges:              map[string]wire.StorageChallenge{},
-		Proofs:                  map[string]wire.StorageProof{},
-		Epochs:                  map[string]wire.ProofEpoch{},
-		Miners:                  map[string]wire.MinerStats{},
-		Accounts:                map[string]wire.Account{},
-		Blocks:                  []wire.Block{},
-		PendingTxs:              []wire.Transaction{},
-		Receipts:                map[string]wire.TransactionReceipt{},
-		Validators:              map[string]wire.ValidatorInfo{},
-		ConsensusValidators:     map[string]bool{},
-		ValidatorEvidence:       map[string]wire.ValidatorEvidence{},
-		ConsensusVotes:          map[string]wire.ConsensusVote{},
-		FeeMarket:               defaultFeeMarket(),
-		FeeChargedTxs:           map[string]bool{},
-		StoragePricing:          defaultStoragePricing(),
-		DealEscrows:             map[string]wire.DealEscrow{},
-		PermanentStorageFunds:   map[string]wire.PermanentStorageFund{},
-		RepairTasks:             map[string]wire.RepairTask{},
-		ProviderRecords:         map[string]wire.StorageProviderRecord{},
-		DeleteTasks:             map[string]wire.DeleteTask{},
-		GovernanceAudits:        []wire.GovernanceAuditRecord{},
-		GovernanceOperators:     map[string]wire.GovernanceOperator{},
-		OperatorNonces:          map[string]uint64{},
-		DeleteReceipts:          map[string]wire.DeleteReceipt{},
-		RetrievalReceipts:       map[string]wire.RetrievalReceipt{},
-		RetrievalWindows:        map[string]wire.RetrievalRateWindow{},
-		PendingRetrievalRewards: map[string]wire.PendingRetrievalReward{},
-		MiningRewardVestings:    map[string]wire.MiningRewardVestingBucket{},
-		StakeDelegations:        map[string]wire.StakeDelegation{},
-		DealHealths:             map[string]wire.DealHealth{},
-		ProposerTurns:           map[string]*wire.ValidatorTurnWindow{},
-		Collections:             map[string]wire.DataCollection{},
-		DataRecords:             map[string]wire.DataRecord{},
-		CollectionRecords:       map[string][]string{},
-		KeyEnvelopes:            map[string]wire.KeyEnvelope{},
-		ShareRecords:            map[string]wire.ShareRecord{},
-		AppliedTxs:              map[string]bool{},
-		ConfirmedTxs:            map[string]bool{},
-		AgentKeys:               map[string]*wire.AgentKey{},
-		GovernanceProposals:     map[string]wire.GovernanceProposal{},
-		GovernanceVotes:         map[string][]wire.GovernanceVote{},
-		MultisigWallets:         map[string]*wire.MultisigWallet{},
+		ChainID:               "falari-dev",
+		Intents:               map[string]*Intent{},
+		Deals:                 map[string]string{},
+		Challenges:            map[string]wire.StorageChallenge{},
+		Proofs:                map[string]wire.StorageProof{},
+		Epochs:                map[string]wire.ProofEpoch{},
+		Miners:                map[string]wire.MinerStats{},
+		Accounts:              map[string]wire.Account{},
+		Blocks:                []wire.Block{},
+		PendingTxs:            []wire.Transaction{},
+		Receipts:              map[string]wire.TransactionReceipt{},
+		Validators:            map[string]wire.ValidatorInfo{},
+		ConsensusValidators:   map[string]bool{},
+		ValidatorEvidence:     map[string]wire.ValidatorEvidence{},
+		ConsensusVotes:        map[string]wire.ConsensusVote{},
+		FeeMarket:             defaultFeeMarket(),
+		FeeChargedTxs:         map[string]bool{},
+		StoragePricing:        defaultStoragePricing(),
+		DealEscrows:           map[string]wire.DealEscrow{},
+		PermanentStorageFunds: map[string]wire.PermanentStorageFund{},
+		RepairTasks:           map[string]wire.RepairTask{},
+		ProviderRecords:       map[string]wire.StorageProviderRecord{},
+		DeleteTasks:           map[string]wire.DeleteTask{},
+		GovernanceAudits:      []wire.GovernanceAuditRecord{},
+		GovernanceOperators:   map[string]wire.GovernanceOperator{},
+		OperatorNonces:        map[string]uint64{},
+		DeleteReceipts:        map[string]wire.DeleteReceipt{},
+		RetrievalReceipts:     map[string]wire.RetrievalReceipt{},
+		RetrievalWindows:      map[string]wire.RetrievalRateWindow{},
+		MiningRewardVestings:  map[string]wire.MiningRewardVestingBucket{},
+		StakeDelegations:      map[string]wire.StakeDelegation{},
+		DealHealths:           map[string]wire.DealHealth{},
+		ProposerTurns:         map[string]*wire.ValidatorTurnWindow{},
+		Collections:           map[string]wire.DataCollection{},
+		DataRecords:           map[string]wire.DataRecord{},
+		CollectionRecords:     map[string][]string{},
+		KeyEnvelopes:          map[string]wire.KeyEnvelope{},
+		ShareRecords:          map[string]wire.ShareRecord{},
+		AppliedTxs:            map[string]bool{},
+		ConfirmedTxs:          map[string]bool{},
+		AgentKeys:             map[string]*wire.AgentKey{},
+		GovernanceProposals:   map[string]wire.GovernanceProposal{},
+		GovernanceVotes:       map[string][]wire.GovernanceVote{},
+		MultisigWallets:       map[string]*wire.MultisigWallet{},
 		// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 		DataModerationThresholdNum: 1,
 		DataModerationThresholdDen: 3,
@@ -451,9 +451,6 @@ func normalizeState(state *State) {
 	}
 	if state.RetrievalWindows == nil {
 		state.RetrievalWindows = map[string]wire.RetrievalRateWindow{}
-	}
-	if state.PendingRetrievalRewards == nil {
-		state.PendingRetrievalRewards = map[string]wire.PendingRetrievalReward{}
 	}
 	if state.MiningRewardVestings == nil {
 		state.MiningRewardVestings = map[string]wire.MiningRewardVestingBucket{}
@@ -661,6 +658,15 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 	retrievalAmount := req.LockedFee * defaultStorageRetrievalBPS / 10_000
 	foundationAmount := req.LockedFee * defaultStorageFoundationBPS / 10_000
 	minerPortion := req.LockedFee - burnAmount - retrievalAmount - foundationAmount
+	intentID, err := randomID("intent")
+	if err != nil {
+		return wire.CreateIntentResponse{}, err
+	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, req.LockedFee); err != nil {
+			return wire.CreateIntentResponse{}, err
+		}
+	}
 	userAccount.Balance -= req.LockedFee
 	userAccount.LockedStorage += minerPortion
 	s.data.Accounts[userAccount.Address] = userAccount
@@ -687,10 +693,6 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 		burnAmount += foundationAmount
 	}
 
-	intentID, err := randomID("intent")
-	if err != nil {
-		return wire.CreateIntentResponse{}, err
-	}
 	now := time.Now().Unix()
 	s.data.Intents[intentID] = &Intent{
 		IntentView: wire.IntentView{
@@ -762,20 +764,8 @@ func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitRespon
 		return wire.BatchCommitResponse{}, errors.New("intent expired")
 	}
 
-	for _, receipt := range req.Receipts {
-		if err := validateReceipt(intent, receipt); err != nil {
-			return wire.BatchCommitResponse{}, err
-		}
-		if err := s.validateReceiptAssignmentLocked(intent, receipt); err != nil {
-			return wire.BatchCommitResponse{}, err
-		}
-		miner, err := s.registeredMinerLocked(receipt.MinerAddress, receipt.MinerPublicKey)
-		if err != nil {
-			return wire.BatchCommitResponse{}, err
-		}
-		if miner.UsedBytes+uint64(receipt.ShardSize) > miner.CapacityBytes {
-			return wire.BatchCommitResponse{}, errors.New("miner capacity exceeded")
-		}
+	if err := s.validateBatchCommitCapacityLocked(intent, req.Receipts); err != nil {
+		return wire.BatchCommitResponse{}, err
 	}
 	if requestUsesAgent(req.AgentKeyID) {
 		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "batch_commit", 0, func(agentPub string) error {
@@ -791,21 +781,14 @@ func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitRespon
 		}
 		s.consumeAccountNonceLocked(req.User)
 	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return wire.BatchCommitResponse{}, err
+		}
+	}
 
 	for _, receipt := range req.Receipts {
-		if err := validateReceipt(intent, receipt); err != nil {
-			return wire.BatchCommitResponse{}, err
-		}
-		if err := s.validateReceiptAssignmentLocked(intent, receipt); err != nil {
-			return wire.BatchCommitResponse{}, err
-		}
-		miner, err := s.registeredMinerLocked(receipt.MinerAddress, receipt.MinerPublicKey)
-		if err != nil {
-			return wire.BatchCommitResponse{}, err
-		}
-		if miner.UsedBytes+uint64(receipt.ShardSize) > miner.CapacityBytes {
-			return wire.BatchCommitResponse{}, errors.New("miner capacity exceeded")
-		}
+		miner := s.minerStatsLocked(receipt.MinerAddress)
 		if intent.Receipts[receipt.SegmentID] == nil {
 			intent.Receipts[receipt.SegmentID] = map[int]wire.MinerReceipt{}
 		}
@@ -901,6 +884,11 @@ func (s *Store) Finalize(req wire.FinalizeRequest) (wire.FinalizeResponse, error
 	dealID, err := randomID("deal")
 	if err != nil {
 		return wire.FinalizeResponse{}, err
+	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return wire.FinalizeResponse{}, err
+		}
 	}
 	intent.DealID = dealID
 	intent.Status = wire.StatusFinalized
@@ -1590,6 +1578,9 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 
 	existing := s.validatorLocked(req.Address)
 	account := s.accountLocked(req.Address)
+	if req.Stake < MinValidatorStake {
+		return wire.RegisterValidatorResponse{}, errors.New("validator stake below minimum required")
+	}
 	if req.Stake > existing.Stake {
 		additionalStake := req.Stake - existing.Stake
 		if account.Balance < additionalStake {
@@ -1603,6 +1594,7 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 	existing.Endpoint = req.Endpoint
 	existing.Stake = req.Stake
 	existing.SelfStake = req.Stake
+	existing.CommissionRateBPS = req.CommissionRateBPS
 	existing.Status = wire.ValidatorStatusActive
 	if existing.RegisteredAtUnix == 0 {
 		existing.RegisteredAtUnix = time.Now().Unix()
@@ -1773,6 +1765,47 @@ func validateReceipt(intent *Intent, receipt wire.MinerReceipt) error {
 	}
 	if time.Now().Unix() > receipt.ExpiresAtUnix {
 		return errors.New("receipt expired")
+	}
+	return nil
+}
+
+func (s *Store) validateBatchCommitCapacityLocked(intent *Intent, receipts []wire.MinerReceipt) error {
+	projectedUsed := map[string]uint64{}
+	for _, receipt := range receipts {
+		if err := validateReceipt(intent, receipt); err != nil {
+			return err
+		}
+		if err := s.validateReceiptAssignmentLocked(intent, receipt); err != nil {
+			return err
+		}
+		miner, err := s.registeredMinerLocked(receipt.MinerAddress, receipt.MinerPublicKey)
+		if err != nil {
+			return err
+		}
+		used, ok := projectedUsed[receipt.MinerAddress]
+		if !ok {
+			used = miner.UsedBytes
+		}
+		if oldReceipt, exists := intent.Receipts[receipt.SegmentID][receipt.ShardIndex]; exists {
+			if oldReceipt.MinerAddress == receipt.MinerAddress {
+				continue
+			}
+			oldUsed, ok := projectedUsed[oldReceipt.MinerAddress]
+			if !ok {
+				oldUsed = s.minerStatsLocked(oldReceipt.MinerAddress).UsedBytes
+			}
+			oldSize := uint64(oldReceipt.ShardSize)
+			if oldUsed < oldSize {
+				projectedUsed[oldReceipt.MinerAddress] = 0
+			} else {
+				projectedUsed[oldReceipt.MinerAddress] = oldUsed - oldSize
+			}
+		}
+		size := uint64(receipt.ShardSize)
+		if used > miner.CapacityBytes || size > miner.CapacityBytes-used {
+			return errors.New("miner capacity exceeded")
+		}
+		projectedUsed[receipt.MinerAddress] = used + size
 	}
 	return nil
 }

@@ -22,10 +22,11 @@ func TestPeerNetworkSyncOnceFetchesMissingBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-a", 0)
+	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, producer, identity, MinValidatorStake)
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +79,7 @@ func TestPeerNetworkSyncOnceFetchesMissingBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, peer, identity, MinValidatorStake)
 	network := NewPeerNetwork(peer, server.URL)
 	network.SyncOnce()
 
@@ -101,10 +103,11 @@ func TestLibP2PGossipBroadcastsBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-libp2p", 0)
+	registration, err := identity.RegistrationRequest("http://validator-libp2p", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, producer, identity, MinValidatorStake)
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +128,7 @@ func TestLibP2PGossipBroadcastsBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, peerStore, identity, MinValidatorStake)
 	peerNetwork, err := NewPeerNetworkWithConfig(peerStore, PeerNetworkConfig{
 		LibP2PListen: "/ip4/127.0.0.1/tcp/0",
 		LibP2PPeers:  strings.Join(producerNetwork.LibP2PAddrs(), ","),
@@ -251,10 +255,11 @@ func TestAcceptedTransactionIsAppliedWhenProduced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://validator-b", 0)
+	registration, err := identity.RegistrationRequest("http://validator-b", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fundValidatorForTest(t, producer, identity, MinValidatorStake)
 	if _, err := producer.RegisterValidator(registration); err != nil {
 		t.Fatal(err)
 	}

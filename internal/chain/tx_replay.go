@@ -444,6 +444,9 @@ func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorReque
 	}
 	existing := s.validatorLocked(req.Address)
 	account := s.accountLocked(req.Address)
+	if req.Stake < MinValidatorStake {
+		return errors.New("replay validator registration below minimum required stake")
+	}
 	if req.Stake > existing.Stake {
 		additionalStake := req.Stake - existing.Stake
 		if account.Balance < additionalStake {
@@ -537,6 +540,11 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 			return err
 		}
 		s.consumeAccountNonceLocked(req.User)
+	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, req.LockedFee); err != nil {
+			return err
+		}
 	}
 	account = s.accountLocked(req.User)
 	burnAmount := req.LockedFee * defaultStorageBurnBPS / 10_000
@@ -640,6 +648,11 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 		}
 		s.consumeAccountNonceLocked(req.User)
 	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return err
+		}
+	}
 	for _, receipt := range req.Receipts {
 		miner := s.minerStatsLocked(receipt.MinerAddress)
 		if intent.Receipts[receipt.SegmentID] == nil {
@@ -711,6 +724,11 @@ func (s *Store) applyFinalizeDealLocked(payload finalizeDealTxPayload) error {
 			return err
 		}
 		s.consumeAccountNonceLocked(req.User)
+	}
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return err
+		}
 	}
 	intent.DealID = payload.DealID
 	intent.Status = wire.StatusFinalized

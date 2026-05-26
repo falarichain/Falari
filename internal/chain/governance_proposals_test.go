@@ -3,6 +3,7 @@ package chain
 import (
 	"crypto/ecdsa"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func testGovernanceSetup(t *testing.T) (*Store, [3]*ecdsa.PrivateKey, [3]string)
 	return store, privKeys, addresses
 }
 
-func testGovernanceProposalReq(t *testing.T, address string, privKey *ecdsa.PrivateKey) wire.CreateGovernanceProposalRequest {
+func testGovernanceProposalReq(t *testing.T, store *Store, address string, privKey *ecdsa.PrivateKey) wire.CreateGovernanceProposalRequest {
 	t.Helper()
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:      address,
@@ -58,6 +59,7 @@ func testGovernanceProposalReq(t *testing.T, address string, privKey *ecdsa.Priv
 		Action:        "freeze",
 		ReasonHash:    "reason_hash_test",
 		ExpiresAtUnix: time.Now().Add(48 * time.Hour).Unix(),
+		Nonce:         store.data.OperatorNonces[normalizeGovernanceOperator(address)],
 		CreatedAtUnix: time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKey); err != nil {
@@ -66,10 +68,39 @@ func testGovernanceProposalReq(t *testing.T, address string, privKey *ecdsa.Priv
 	return req
 }
 
+func testGovernanceVoteReq(t *testing.T, store *Store, proposalID, address string, approve bool, privKey *ecdsa.PrivateKey) wire.CastGovernanceVoteRequest {
+	t.Helper()
+	req := wire.CastGovernanceVoteRequest{
+		ProposalID:    proposalID,
+		Voter:         address,
+		Approve:       approve,
+		Nonce:         store.data.OperatorNonces[normalizeGovernanceOperator(address)],
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceVote(&req, privKey); err != nil {
+		t.Fatalf("failed to sign vote: %v", err)
+	}
+	return req
+}
+
+func testGovernanceExecuteReq(t *testing.T, store *Store, proposalID, address string, privKey *ecdsa.PrivateKey) wire.ExecuteGovernanceProposalRequest {
+	t.Helper()
+	req := wire.ExecuteGovernanceProposalRequest{
+		ProposalID:    proposalID,
+		Executor:      address,
+		Nonce:         store.data.OperatorNonces[normalizeGovernanceOperator(address)],
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceExecute(&req, privKey); err != nil {
+		t.Fatalf("failed to sign execute: %v", err)
+	}
+	return req
+}
+
 func TestCreateGovernanceProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	req := testGovernanceProposalReq(t, addresses[0], privKeys[0])
+	req := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
 	resp, err := store.CreateGovernanceProposal(req)
 	if err != nil {
 		t.Fatalf("CreateGovernanceProposal failed: %v", err)
@@ -105,7 +136,6 @@ func TestCreateGovernanceProposalInvalidSignature(t *testing.T) {
 func TestCreateGovernanceProposalUnauthorizedOperator(t *testing.T) {
 	store, privKeys, _ := testGovernanceSetup(t)
 
-	// Use an address that is not in governance operators.
 	fakePriv, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -130,23 +160,13 @@ func TestCreateGovernanceProposalUnauthorizedOperator(t *testing.T) {
 func TestCastGovernanceVote(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Create proposal.
-	proposalReq := testGovernanceProposalReq(t, addresses[0], privKeys[0])
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
 	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Cast vote.
-	voteReq := wire.CastGovernanceVoteRequest{
-		ProposalID:    proposalResp.Proposal.ProposalID,
-		Voter:         addresses[1],
-		Approve:       true,
-		CreatedAtUnix: time.Now().Unix(),
-	}
-	if err := wire.SignGovernanceVote(&voteReq, privKeys[1]); err != nil {
-		t.Fatal(err)
-	}
+	voteReq := testGovernanceVoteReq(t, store, proposalResp.Proposal.ProposalID, addresses[1], true, privKeys[1])
 	voteResp, err := store.CastGovernanceVote(voteReq)
 	if err != nil {
 		t.Fatalf("CastGovernanceVote failed: %v", err)
@@ -162,37 +182,20 @@ func TestCastGovernanceVote(t *testing.T) {
 func TestCastGovernanceVoteDoubleVoting(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Create proposal.
-	proposalReq := testGovernanceProposalReq(t, addresses[0], privKeys[0])
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
 	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// First vote.
-	voteReq := wire.CastGovernanceVoteRequest{
-		ProposalID:    proposalResp.Proposal.ProposalID,
-		Voter:         addresses[0],
-		Approve:       true,
-		CreatedAtUnix: time.Now().Unix(),
-	}
-	if err := wire.SignGovernanceVote(&voteReq, privKeys[0]); err != nil {
-		t.Fatal(err)
-	}
+	voteReq := testGovernanceVoteReq(t, store, proposalResp.Proposal.ProposalID, addresses[0], true, privKeys[0])
 	if _, err := store.CastGovernanceVote(voteReq); err != nil {
 		t.Fatal(err)
 	}
 
-	// Second vote (same voter) should fail.
-	voteReq2 := wire.CastGovernanceVoteRequest{
-		ProposalID:    proposalResp.Proposal.ProposalID,
-		Voter:         addresses[0],
-		Approve:       false,
-		CreatedAtUnix: time.Now().Unix(),
-	}
-	if err := wire.SignGovernanceVote(&voteReq2, privKeys[0]); err != nil {
-		t.Fatal(err)
-	}
+	// Second vote (same voter) should fail — nonce has advanced.
+	voteReq2 := testGovernanceVoteReq(t, store, proposalResp.Proposal.ProposalID, addresses[0], false, privKeys[0])
 	if _, err := store.CastGovernanceVote(voteReq2); err == nil {
 		t.Fatal("expected error for double voting")
 	}
@@ -202,7 +205,7 @@ func TestExecuteGovernanceProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
 	// Create proposal.
-	proposalReq := testGovernanceProposalReq(t, addresses[0], privKeys[0])
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
 	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
 	if err != nil {
 		t.Fatal(err)
@@ -211,15 +214,7 @@ func TestExecuteGovernanceProposal(t *testing.T) {
 
 	// All 3 operators vote approve (threshold for 3 operators = 2).
 	for i := 0; i < 3; i++ {
-		voteReq := wire.CastGovernanceVoteRequest{
-			ProposalID:    proposalID,
-			Voter:         addresses[i],
-			Approve:       true,
-			CreatedAtUnix: time.Now().Unix(),
-		}
-		if err := wire.SignGovernanceVote(&voteReq, privKeys[i]); err != nil {
-			t.Fatal(err)
-		}
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
 		voteResp, err := store.CastGovernanceVote(voteReq)
 		if err != nil {
 			t.Fatalf("vote %d failed: %v", i, err)
@@ -229,13 +224,11 @@ func TestExecuteGovernanceProposal(t *testing.T) {
 		}
 	}
 
-	// Check proposal was executed.
 	proposal := store.data.GovernanceProposals[proposalID]
 	if proposal.Status != wire.GovProposalExecuted {
 		t.Fatalf("expected status executed, got %s", proposal.Status)
 	}
 
-	// Verify the intent was frozen.
 	intent := store.data.Intents["intent_lifecycle"]
 	if intent.ModerationStatus != wire.ModerationStatusFrozen {
 		t.Fatalf("expected moderation frozen, got %s", intent.ModerationStatus)
@@ -245,47 +238,157 @@ func TestExecuteGovernanceProposal(t *testing.T) {
 func TestExecuteGovernanceProposalInsufficientVotes(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Create proposal.
-	proposalReq := testGovernanceProposalReq(t, addresses[0], privKeys[0])
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
 	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Only 1 approval vote (threshold for 3 operators = 2).
-	voteReq := wire.CastGovernanceVoteRequest{
-		ProposalID:    proposalResp.Proposal.ProposalID,
-		Voter:         addresses[0],
-		Approve:       true,
-		CreatedAtUnix: time.Now().Unix(),
-	}
-	if err := wire.SignGovernanceVote(&voteReq, privKeys[0]); err != nil {
-		t.Fatal(err)
-	}
+	// One reject vote — keeps proposal pending (remaining votes can still reach threshold).
+	voteReq := testGovernanceVoteReq(t, store, proposalResp.Proposal.ProposalID, addresses[0], false, privKeys[0])
 	if _, err := store.CastGovernanceVote(voteReq); err != nil {
 		t.Fatal(err)
 	}
 
-	// Try to execute — should fail with insufficient votes.
-	_, err = store.ExecuteGovernanceProposal(wire.ExecuteGovernanceProposalRequest{
-		ProposalID: proposalResp.Proposal.ProposalID,
-	})
+	// Try to execute with proper auth — should fail with insufficient votes.
+	execReq := testGovernanceExecuteReq(t, store, proposalResp.Proposal.ProposalID, addresses[1], privKeys[1])
+	_, err = store.ExecuteGovernanceProposal(execReq)
 	if err == nil {
 		t.Fatal("expected error for insufficient votes")
+	}
+	if !strings.Contains(err.Error(), "insufficient approval votes") {
+		t.Fatalf("expected insufficient votes error, got: %v", err)
+	}
+}
+
+func TestExecuteGovernanceProposalUnauthorizedExecutor(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
+	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a non-operator key to execute — should be rejected.
+	fakePriv, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeAddr := wire.AccountAddress(&fakePriv.PublicKey)
+	execReq := wire.ExecuteGovernanceProposalRequest{
+		ProposalID:    proposalResp.Proposal.ProposalID,
+		Executor:      fakeAddr,
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceExecute(&execReq, fakePriv); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.ExecuteGovernanceProposal(execReq)
+	if err == nil {
+		t.Fatal("expected error for unauthorized executor")
+	}
+	if !strings.Contains(err.Error(), "not an enabled governance operator") {
+		t.Fatalf("expected unauthorized executor error, got: %v", err)
+	}
+}
+
+func TestExecuteGovernanceProposalNoSignature(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
+	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Execute without signature — should be rejected.
+	_, err = store.ExecuteGovernanceProposal(wire.ExecuteGovernanceProposalRequest{
+		ProposalID: proposalResp.Proposal.ProposalID,
+		Executor:   addresses[0],
+	})
+	if err == nil {
+		t.Fatal("expected error for missing signature")
+	}
+}
+
+func TestGovernanceNonceReplayProtection(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	// Create a proposal (this increments addresses[0] nonce to 1).
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
+	_, err := store.CreateGovernanceProposal(proposalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to replay the same proposal (nonce 0 is now stale).
+	replayReq := wire.CreateGovernanceProposalRequest{
+		Proposer:      addresses[0],
+		IntentID:      "intent_lifecycle",
+		Action:        "freeze",
+		ReasonHash:    "reason_hash_test",
+		ExpiresAtUnix: time.Now().Add(48 * time.Hour).Unix(),
+		Nonce:         0, // stale nonce
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceProposal(&replayReq, privKeys[0]); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.CreateGovernanceProposal(replayReq)
+	if err == nil {
+		t.Fatal("expected error for nonce replay")
+	}
+	if !strings.Contains(err.Error(), "invalid proposer nonce") {
+		t.Fatalf("expected nonce error, got: %v", err)
+	}
+}
+
+func TestGovernanceVoteNonceReplayProtection(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	// Create proposal (addresses[0] nonce → 1).
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
+	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Vote reject (addresses[1] nonce → 1) — keeps proposal pending.
+	voteReq := testGovernanceVoteReq(t, store, proposalResp.Proposal.ProposalID, addresses[1], false, privKeys[1])
+	if _, err := store.CastGovernanceVote(voteReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to replay vote with stale nonce 0.
+	replayVote := wire.CastGovernanceVoteRequest{
+		ProposalID:    proposalResp.Proposal.ProposalID,
+		Voter:         addresses[1],
+		Approve:       true,
+		Nonce:         0, // stale
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceVote(&replayVote, privKeys[1]); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.CastGovernanceVote(replayVote)
+	if err == nil {
+		t.Fatal("expected error for vote nonce replay")
+	}
+	if !strings.Contains(err.Error(), "invalid voter nonce") {
+		t.Fatalf("expected nonce error, got: %v", err)
 	}
 }
 
 func TestCancelGovernanceProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Create proposal.
-	proposalReq := testGovernanceProposalReq(t, addresses[0], privKeys[0])
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
 	_, err := store.CreateGovernanceProposal(proposalReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Cancel it.
 	cancelReq := wire.CreateGovernanceProposalRequest{
 		Proposer:      addresses[0],
 		IntentID:      "intent_lifecycle",
@@ -309,13 +412,10 @@ func TestCancelGovernanceProposal(t *testing.T) {
 func TestGovernanceThreshold(t *testing.T) {
 	store, _, _ := testGovernanceSetup(t)
 
-	// 3 enabled operators, default thresholds: data moderation = 1/3, operator changes = 2/3.
-	// Data moderation: ceil(3 * 1/3) = 1.
 	dataModThreshold := store.governanceThresholdLocked("freeze")
 	if dataModThreshold != 1 {
 		t.Fatalf("expected data moderation threshold 1 for 3 operators, got %d", dataModThreshold)
 	}
-	// Operator changes: ceil(3 * 2/3) = 2.
 	opChangeThreshold := store.governanceThresholdLocked("add_operator")
 	if opChangeThreshold != 2 {
 		t.Fatalf("expected operator change threshold 2 for 3 operators, got %d", opChangeThreshold)
@@ -325,7 +425,6 @@ func TestGovernanceThreshold(t *testing.T) {
 func TestAddOperatorViaProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Generate a key for the new operator.
 	newPriv, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -333,13 +432,13 @@ func TestAddOperatorViaProposal(t *testing.T) {
 	newPubHex := testEncodeHex(ethcrypto.FromECDSAPub(&newPriv.PublicKey))
 	newAddr := wire.AccountAddress(&newPriv.PublicKey)
 
-	// Propose add_operator (no intent_id needed).
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:          addresses[0],
 		Action:            "add_operator",
 		ReasonHash:        "add_new_member",
 		TargetPublicKey:   newPubHex,
 		TargetPermissions: []string{"freeze", "block"},
+		Nonce:             store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:     time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -354,17 +453,8 @@ func TestAddOperatorViaProposal(t *testing.T) {
 	}
 	proposalID := propResp.Proposal.ProposalID
 
-	// Vote to approve (need 2 of 3).
 	for i := 0; i < 2; i++ {
-		voteReq := wire.CastGovernanceVoteRequest{
-			ProposalID:    proposalID,
-			Voter:         addresses[i],
-			Approve:       true,
-			CreatedAtUnix: time.Now().Unix(),
-		}
-		if err := wire.SignGovernanceVote(&voteReq, privKeys[i]); err != nil {
-			t.Fatal(err)
-		}
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
 		voteResp, err := store.CastGovernanceVote(voteReq)
 		if err != nil {
 			t.Fatalf("vote %d failed: %v", i, err)
@@ -374,7 +464,6 @@ func TestAddOperatorViaProposal(t *testing.T) {
 		}
 	}
 
-	// Verify new operator was added at the derived address.
 	op, ok := store.data.GovernanceOperators[newAddr]
 	if !ok {
 		t.Fatal("new operator was not added")
@@ -389,7 +478,6 @@ func TestAddOperatorViaProposal(t *testing.T) {
 		t.Fatalf("unexpected permissions: %v", op.Permissions)
 	}
 
-	// Verify threshold now reflects 4 operators (operator change = 2/3: ceil(4*2/3) = 3).
 	threshold := store.governanceThresholdLocked("add_operator")
 	if threshold != 3 {
 		t.Fatalf("expected threshold 3 for 4 operators, got %d", threshold)
@@ -400,12 +488,12 @@ func TestRemoveOperatorViaProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 	targetAddr := addresses[2]
 
-	// Propose remove_operator.
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:       addresses[0],
 		Action:         "remove_operator",
 		ReasonHash:     "remove_member",
 		TargetOperator: targetAddr,
+		Nonce:          store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:  time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -417,17 +505,8 @@ func TestRemoveOperatorViaProposal(t *testing.T) {
 	}
 	proposalID := propResp.Proposal.ProposalID
 
-	// Vote to approve (2 of 3; the target can also vote).
 	for i := 0; i < 2; i++ {
-		voteReq := wire.CastGovernanceVoteRequest{
-			ProposalID:    proposalID,
-			Voter:         addresses[i],
-			Approve:       true,
-			CreatedAtUnix: time.Now().Unix(),
-		}
-		if err := wire.SignGovernanceVote(&voteReq, privKeys[i]); err != nil {
-			t.Fatal(err)
-		}
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
 		voteResp, err := store.CastGovernanceVote(voteReq)
 		if err != nil {
 			t.Fatalf("vote %d failed: %v", i, err)
@@ -437,13 +516,11 @@ func TestRemoveOperatorViaProposal(t *testing.T) {
 		}
 	}
 
-	// Verify operator was disabled.
 	op := store.data.GovernanceOperators[targetAddr]
 	if op.Enabled {
 		t.Fatal("removed operator should be disabled")
 	}
 
-	// Threshold should now reflect 2 enabled operators (operator change = 2/3: ceil(2*2/3) = 2).
 	threshold := store.governanceThresholdLocked("remove_operator")
 	if threshold != 2 {
 		t.Fatalf("expected threshold 2 for 2 enabled operators, got %d", threshold)
@@ -454,13 +531,13 @@ func TestUpdateOperatorViaProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 	targetAddr := addresses[1]
 
-	// Propose update_operator with new permissions only (no key change).
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:          addresses[0],
 		Action:            "update_operator",
 		ReasonHash:        "update_permissions",
 		TargetOperator:    targetAddr,
 		TargetPermissions: []string{"freeze"},
+		Nonce:             store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:     time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -472,17 +549,8 @@ func TestUpdateOperatorViaProposal(t *testing.T) {
 	}
 	proposalID := propResp.Proposal.ProposalID
 
-	// Vote to approve.
 	for i := 0; i < 2; i++ {
-		voteReq := wire.CastGovernanceVoteRequest{
-			ProposalID:    proposalID,
-			Voter:         addresses[i],
-			Approve:       true,
-			CreatedAtUnix: time.Now().Unix(),
-		}
-		if err := wire.SignGovernanceVote(&voteReq, privKeys[i]); err != nil {
-			t.Fatal(err)
-		}
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
 		voteResp, err := store.CastGovernanceVote(voteReq)
 		if err != nil {
 			t.Fatalf("vote %d failed: %v", i, err)
@@ -492,7 +560,6 @@ func TestUpdateOperatorViaProposal(t *testing.T) {
 		}
 	}
 
-	// Verify operator permissions were updated.
 	op := store.data.GovernanceOperators[targetAddr]
 	if len(op.Permissions) != 1 || op.Permissions[0] != "freeze" {
 		t.Fatalf("expected permissions [freeze], got %v", op.Permissions)
@@ -503,14 +570,12 @@ func TestUpdateOperatorKeyRotationRejected(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 	targetAddr := addresses[1]
 
-	// Generate a new key for attempted rotation.
 	newPriv, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	newPubHex := testEncodeHex(ethcrypto.FromECDSAPub(&newPriv.PublicKey))
 
-	// Propose update_operator with a new public key — should be rejected.
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:          addresses[0],
 		Action:            "update_operator",
@@ -518,6 +583,7 @@ func TestUpdateOperatorKeyRotationRejected(t *testing.T) {
 		TargetOperator:    targetAddr,
 		TargetPublicKey:   newPubHex,
 		TargetPermissions: []string{"freeze"},
+		Nonce:             store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:     time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -531,13 +597,13 @@ func TestUpdateOperatorKeyRotationRejected(t *testing.T) {
 func TestAddOperatorDuplicateRejected(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Try to add an operator with the same public key as an existing operator.
 	existingPubHex := testEncodeHex(ethcrypto.FromECDSAPub(&privKeys[1].PublicKey))
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:        addresses[0],
 		Action:          "add_operator",
 		ReasonHash:      "duplicate",
 		TargetPublicKey: existingPubHex,
+		Nonce:           store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:   time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -551,24 +617,14 @@ func TestAddOperatorDuplicateRejected(t *testing.T) {
 func TestDataModerationThresholdLowerThanOperatorChange(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Default: data moderation = 1/3, so for 3 operators threshold = ceil(3*1/3) = 1.
-	// A single vote should auto-execute a freeze proposal.
-	proposalReq := testGovernanceProposalReq(t, addresses[0], privKeys[0])
+	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
 	proposalResp, err := store.CreateGovernanceProposal(proposalReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	proposalID := proposalResp.Proposal.ProposalID
 
-	voteReq := wire.CastGovernanceVoteRequest{
-		ProposalID:    proposalID,
-		Voter:         addresses[0],
-		Approve:       true,
-		CreatedAtUnix: time.Now().Unix(),
-	}
-	if err := wire.SignGovernanceVote(&voteReq, privKeys[0]); err != nil {
-		t.Fatal(err)
-	}
+	voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[0], true, privKeys[0])
 	voteResp, err := store.CastGovernanceVote(voteReq)
 	if err != nil {
 		t.Fatalf("vote failed: %v", err)
@@ -584,7 +640,6 @@ func TestDataModerationThresholdLowerThanOperatorChange(t *testing.T) {
 func TestUpdateConfigViaProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Propose update_config: change data moderation to 2/3, operator change to 3/4.
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:                         addresses[0],
 		Action:                           "update_config",
@@ -593,6 +648,7 @@ func TestUpdateConfigViaProposal(t *testing.T) {
 		TargetDataModerationThresholdDen: 3,
 		TargetOperatorChangeThresholdNum: 3,
 		TargetOperatorChangeThresholdDen: 4,
+		Nonce:                            store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:                    time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -604,17 +660,8 @@ func TestUpdateConfigViaProposal(t *testing.T) {
 	}
 	proposalID := propResp.Proposal.ProposalID
 
-	// Vote to approve (operator change threshold = 2/3 for 3 ops = 2).
 	for i := 0; i < 2; i++ {
-		voteReq := wire.CastGovernanceVoteRequest{
-			ProposalID:    proposalID,
-			Voter:         addresses[i],
-			Approve:       true,
-			CreatedAtUnix: time.Now().Unix(),
-		}
-		if err := wire.SignGovernanceVote(&voteReq, privKeys[i]); err != nil {
-			t.Fatal(err)
-		}
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
 		voteResp, err := store.CastGovernanceVote(voteReq)
 		if err != nil {
 			t.Fatalf("vote %d failed: %v", i, err)
@@ -624,7 +671,6 @@ func TestUpdateConfigViaProposal(t *testing.T) {
 		}
 	}
 
-	// Verify config was updated.
 	if store.data.DataModerationThresholdNum != 2 || store.data.DataModerationThresholdDen != 3 {
 		t.Fatalf("expected data moderation 2/3, got %d/%d",
 			store.data.DataModerationThresholdNum, store.data.DataModerationThresholdDen)
@@ -634,13 +680,10 @@ func TestUpdateConfigViaProposal(t *testing.T) {
 			store.data.OperatorChangeThresholdNum, store.data.OperatorChangeThresholdDen)
 	}
 
-	// Verify new thresholds are reflected.
-	// Data moderation 2/3 for 3 ops: ceil(3*2/3) = 2.
 	dataModThreshold := store.governanceThresholdLocked("freeze")
 	if dataModThreshold != 2 {
 		t.Fatalf("expected data moderation threshold 2, got %d", dataModThreshold)
 	}
-	// Operator change 3/4 for 3 ops: ceil(3*3/4) = 3.
 	opChangeThreshold := store.governanceThresholdLocked("add_operator")
 	if opChangeThreshold != 3 {
 		t.Fatalf("expected operator change threshold 3, got %d", opChangeThreshold)
@@ -652,16 +695,15 @@ func TestUpdateConfigViaProposal(t *testing.T) {
 func TestUpdateMiningParamsViaProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// Record original values.
 	origParams := store.GetMiningParams()
 
-	// Propose update_mining_params: change storage release rate and validator commission.
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:                     addresses[0],
 		Action:                       "update_mining_params",
 		ReasonHash:                   "adjust_mining_params",
 		TargetStorageReleaseRateBPS:  5,
 		TargetValidatorCommissionBPS: 1500,
+		Nonce:                        store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:                time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -673,17 +715,8 @@ func TestUpdateMiningParamsViaProposal(t *testing.T) {
 	}
 	proposalID := propResp.Proposal.ProposalID
 
-	// Vote to approve (need 2 of 3, operator change threshold = 2/3).
 	for i := 0; i < 2; i++ {
-		voteReq := wire.CastGovernanceVoteRequest{
-			ProposalID:    proposalID,
-			Voter:         addresses[i],
-			Approve:       true,
-			CreatedAtUnix: time.Now().Unix(),
-		}
-		if err := wire.SignGovernanceVote(&voteReq, privKeys[i]); err != nil {
-			t.Fatal(err)
-		}
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
 		voteResp, err := store.CastGovernanceVote(voteReq)
 		if err != nil {
 			t.Fatalf("vote %d failed: %v", i, err)
@@ -693,7 +726,6 @@ func TestUpdateMiningParamsViaProposal(t *testing.T) {
 		}
 	}
 
-	// Verify mining params were updated.
 	updatedParams := store.GetMiningParams()
 	if updatedParams.StorageReleaseRateBPS != 5 {
 		t.Fatalf("expected storage release rate 5, got %d", updatedParams.StorageReleaseRateBPS)
@@ -701,7 +733,6 @@ func TestUpdateMiningParamsViaProposal(t *testing.T) {
 	if updatedParams.ValidatorCommissionBPS != 1500 {
 		t.Fatalf("expected validator commission 1500, got %d", updatedParams.ValidatorCommissionBPS)
 	}
-	// Unchanged fields should remain at original values.
 	if updatedParams.StoredBytesWeightBPS != origParams.StoredBytesWeightBPS {
 		t.Fatalf("stored bytes weight should be unchanged: expected %d, got %d",
 			origParams.StoredBytesWeightBPS, updatedParams.StoredBytesWeightBPS)
@@ -713,12 +744,12 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 
 	origParams := store.GetMiningParams()
 
-	// Only change proof score weight.
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:                  addresses[0],
 		Action:                    "update_mining_params",
 		ReasonHash:                "tune_proof_weight",
 		TargetProofScoreWeightBPS: 4000,
+		Nonce:                     store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:             time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -730,17 +761,8 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 	}
 	proposalID := propResp.Proposal.ProposalID
 
-	// Vote to approve.
 	for i := 0; i < 2; i++ {
-		voteReq := wire.CastGovernanceVoteRequest{
-			ProposalID:    proposalID,
-			Voter:         addresses[i],
-			Approve:       true,
-			CreatedAtUnix: time.Now().Unix(),
-		}
-		if err := wire.SignGovernanceVote(&voteReq, privKeys[i]); err != nil {
-			t.Fatal(err)
-		}
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
 		voteResp, err := store.CastGovernanceVote(voteReq)
 		if err != nil {
 			t.Fatalf("vote %d failed: %v", i, err)
@@ -754,7 +776,6 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 	if updatedParams.ProofScoreWeightBPS != 4000 {
 		t.Fatalf("expected proof score weight 4000, got %d", updatedParams.ProofScoreWeightBPS)
 	}
-	// All other fields unchanged.
 	if updatedParams.StorageReleaseRateBPS != origParams.StorageReleaseRateBPS {
 		t.Fatalf("storage release rate should be unchanged")
 	}
@@ -769,11 +790,11 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 func TestUpdateMiningParamsRequiresNonZeroField(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
-	// All target fields zero — should be rejected.
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:      addresses[0],
 		Action:        "update_mining_params",
 		ReasonHash:    "empty_change",
+		Nonce:         store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix: time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
@@ -787,9 +808,7 @@ func TestUpdateMiningParamsRequiresNonZeroField(t *testing.T) {
 func TestUpdateMiningParamsUsesOperatorChangeThreshold(t *testing.T) {
 	store, _, _ := testGovernanceSetup(t)
 
-	// Verify that update_mining_params uses the operator change threshold (2/3).
 	threshold := store.governanceThresholdLocked("update_mining_params")
-	// 3 operators, 2/3 threshold = ceil(3*2/3) = 2.
 	if threshold != 2 {
 		t.Fatalf("expected threshold 2 for update_mining_params with 3 operators, got %d", threshold)
 	}

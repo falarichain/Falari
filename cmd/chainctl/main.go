@@ -1225,6 +1225,11 @@ func governancePropose(args []string) {
 	storageProofSamples := fs.Int("storage-proof-samples", 0, "storage proof samples count (for update_mining_params)")
 	validatorCommissionBPS := fs.Uint64("validator-commission-bps", 0, "validator commission BPS (for update_mining_params)")
 	retrievalWeightBPS := fs.Uint64("retrieval-weight-bps", 0, "retrieval weight BPS (for update_mining_params)")
+	targetBlockBytes := fs.Uint64("target-block-bytes", 0, "target block size in bytes (for update_mining_params)")
+	maxBlockBytes := fs.Uint64("max-block-bytes", 0, "max block size in bytes (for update_mining_params)")
+	maxBlockTxs := fs.Uint64("max-block-txs", 0, "max transactions per block (for update_mining_params)")
+	maxTxBytes := fs.Uint64("max-tx-bytes", 0, "max regular transaction size in bytes (for update_mining_params)")
+	maxStorageTxBytes := fs.Uint64("max-storage-tx-bytes", 0, "max storage metadata transaction size in bytes (for update_mining_params)")
 	fs.Parse(args)
 
 	if *keyPath == "" || *reasonHash == "" {
@@ -1281,6 +1286,12 @@ func governancePropose(args []string) {
 		TargetStorageProofSamples:         *storageProofSamples,
 		TargetValidatorCommissionBPS:      *validatorCommissionBPS,
 		TargetRetrievalWeightBPS:          *retrievalWeightBPS,
+		TargetBlockBytes:                  *targetBlockBytes,
+		TargetMaxBlockBytes:               *maxBlockBytes,
+		TargetMaxBlockTxs:                 *maxBlockTxs,
+		TargetMaxTxBytes:                  *maxTxBytes,
+		TargetMaxStorageTxBytes:           *maxStorageTxBytes,
+		Nonce:                             fetchOperatorNonce(*chainURL, key.Address),
 		CreatedAtUnix:                     now,
 	}
 	if err := wire.SignGovernanceProposal(&req, privKey); err != nil {
@@ -1327,6 +1338,7 @@ func governanceVote(args []string) {
 		ProposalID:    *proposalID,
 		Voter:         key.Address,
 		Approve:       *approve,
+		Nonce:         fetchOperatorNonce(*chainURL, key.Address),
 		CreatedAtUnix: now,
 	}
 	if err := wire.SignGovernanceVote(&req, privKey); err != nil {
@@ -1343,16 +1355,28 @@ func governanceVote(args []string) {
 func governanceExecute(args []string) {
 	fs := flag.NewFlagSet("governance-execute", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	keyPath := fs.String("key", "", "path to governance operator key file")
 	proposalID := fs.String("proposal", "", "proposal id")
 	fs.Parse(args)
 
-	if *proposalID == "" {
-		log.Fatal("-proposal is required")
+	if *keyPath == "" || *proposalID == "" {
+		log.Fatal("-key and -proposal are required")
+	}
+	key := loadGovernanceKey(*keyPath)
+	privKey := loadGovernanceECDSAKey(*keyPath)
+
+	now := time.Now().Unix()
+	req := wire.ExecuteGovernanceProposalRequest{
+		ProposalID:    *proposalID,
+		Executor:      key.Address,
+		Nonce:         fetchOperatorNonce(*chainURL, key.Address),
+		CreatedAtUnix: now,
+	}
+	if err := wire.SignGovernanceExecute(&req, privKey); err != nil {
+		log.Fatalf("failed to sign execute request: %v", err)
 	}
 	var resp wire.ExecuteGovernanceProposalResponse
-	if err := client.NewHTTP(*chainURL).Post("/governance/execute", wire.ExecuteGovernanceProposalRequest{
-		ProposalID: *proposalID,
-	}, &resp); err != nil {
+	if err := client.NewHTTP(*chainURL).Post("/governance/execute", req, &resp); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("proposal executed: id=%s status=%s action=%s access=%s moderation=%s storage=%s\n",
@@ -1410,9 +1434,24 @@ func governanceOperatorsList(args []string) {
 		if op.PublicKey != "" {
 			hasKey = "yes"
 		}
-		fmt.Printf("operator=%s enabled=%v key=%s permissions=%v\n",
-			op.Operator, op.Enabled, hasKey, op.Permissions)
+		fmt.Printf("operator=%s enabled=%v key=%s nonce=%d permissions=%v\n",
+			op.Operator, op.Enabled, hasKey, op.Nonce, op.Permissions)
 	}
+}
+
+// fetchOperatorNonce queries the chain for the current nonce of a governance operator.
+func fetchOperatorNonce(chainURL, address string) uint64 {
+	var resp wire.GovernanceOperatorListResponse
+	if err := client.NewHTTP(chainURL).Get("/governance/operators", &resp); err != nil {
+		log.Fatalf("failed to fetch operator nonce: %v", err)
+	}
+	for _, op := range resp.Operators {
+		if strings.EqualFold(op.Operator, address) {
+			return op.Nonce
+		}
+	}
+	log.Fatalf("operator %s not found", address)
+	return 0
 }
 
 func listDeleteTasks(args []string) {
@@ -3343,10 +3382,17 @@ func agentKeyCreate(args []string) {
 		wire.AccountAddress(&agentPriv.PublicKey),
 		encodeHex(ethcrypto.FromECDSA(agentPriv)),
 	)
+	agentKeyReference := wire.EncodeAgentKeyReferenceString(
+		resp.Key.KeyID,
+		master.Address,
+		wire.AccountAddress(&agentPriv.PublicKey),
+	)
 
 	fmt.Printf("\n============================================================\n")
 	fmt.Printf("  Copy this key to your AI agent:\n")
 	fmt.Printf("  %s\n", agentKeyString)
+	fmt.Printf("\n  Production gateway reference (no private key in header):\n")
+	fmt.Printf("  %s\n", agentKeyReference)
 	fmt.Printf("============================================================\n\n")
 	fmt.Printf("  name:         %s\n", *name)
 	fmt.Printf("  permissions:  %v\n", resp.Key.Permissions)
@@ -3495,7 +3541,7 @@ func usage() {
   chainctl governance-propose -chain http://localhost:8080 -key ./governance-key.json -intent intent_xxx -action freeze -reason-hash hash -expires-at-unix 1893456000
   chainctl governance-propose -chain http://localhost:8080 -key ./governance-key.json -action add_operator -reason-hash hash -target-operator addr -target-public-key base64key -target-permissions freeze,block
   chainctl governance-vote -chain http://localhost:8080 -key ./governance-key.json -proposal gov_proposal_xxx -approve
-  chainctl governance-execute -chain http://localhost:8080 -proposal gov_proposal_xxx
+  chainctl governance-execute -chain http://localhost:8080 -key ./governance-key.json -proposal gov_proposal_xxx
   chainctl governance-proposals -chain http://localhost:8080 -status pending
   chainctl governance-operators -chain http://localhost:8080
   chainctl governance-audit -chain http://localhost:8080 -intent intent_xxx

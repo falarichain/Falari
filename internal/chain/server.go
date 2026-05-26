@@ -82,6 +82,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /miners/", s.getMinerStats)
 	mux.HandleFunc("POST /validators", s.registerValidator)
 	mux.HandleFunc("GET /validators", s.listValidators)
+	mux.HandleFunc("GET /validators/delegations", s.listDelegationsByDelegator)
 	mux.HandleFunc("POST /validators/deregister", s.deregisterValidator)
 	mux.HandleFunc("POST /validators/delegate", s.delegateStake)
 	mux.HandleFunc("POST /validators/undelegate", s.undelegateStake)
@@ -600,6 +601,19 @@ func (s *Server) deregisterValidator(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listValidators(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.Validators())
+}
+
+func (s *Server) listDelegationsByDelegator(w http.ResponseWriter, r *http.Request) {
+	delegator := r.URL.Query().Get("delegator")
+	if delegator == "" {
+		writeError(w, http.StatusBadRequest, errors.New("delegator query parameter is required"))
+		return
+	}
+	delegations := s.store.DelegationsByDelegator(delegator)
+	if delegations == nil {
+		delegations = []wire.StakeDelegation{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"delegations": delegations})
 }
 
 func (s *Server) delegateStake(w http.ResponseWriter, r *http.Request) {

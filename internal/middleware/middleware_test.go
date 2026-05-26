@@ -132,6 +132,43 @@ func TestRateLimitIsPerIP(t *testing.T) {
 	}
 }
 
+func TestRateLimitIgnoresSpoofedForwardedForByDefault(t *testing.T) {
+	handler := RateLimit(1, 1)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for i, xff := range []string{"1.1.1.1", "2.2.2.2"} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "9.9.9.9:1234"
+		req.Header.Set("X-Forwarded-For", xff)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if i == 0 && rec.Code != http.StatusOK {
+			t.Fatalf("expected first request to pass, got %d", rec.Code)
+		}
+		if i == 1 && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected spoofed second request to be rate limited, got %d", rec.Code)
+		}
+	}
+}
+
+func TestRateLimitTrustsForwardedForFromConfiguredProxy(t *testing.T) {
+	handler := RateLimitWithTrustedProxies(1, 1, []string{"9.9.9.9"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, xff := range []string{"1.1.1.1", "2.2.2.2"} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "9.9.9.9:1234"
+		req.Header.Set("X-Forwarded-For", xff)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected trusted proxy request for %s to pass, got %d", xff, rec.Code)
+		}
+	}
+}
+
 func TestChainComposesMiddleware(t *testing.T) {
 	var order []string
 	mw := func(name string) func(http.Handler) http.Handler {

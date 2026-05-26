@@ -29,7 +29,8 @@ func main() {
 	blockInterval := flag.Duration("block-interval", 5*time.Second, "automatic block production interval, disabled when 0")
 	validatorKey := flag.String("validator-key", "./data/validator.json", "validator identity file path")
 	validatorEndpoint := flag.String("validator-endpoint", "", "public validator endpoint")
-	validatorStake := flag.Uint64("validator-stake", 0, "validator stake locked from its account")
+	validatorStake := flag.Uint64("validator-stake", chain.MinValidatorStake, "validator stake locked from its account")
+	validatorCommissionBPS := flag.Uint64("validator-commission-bps", 0, "validator commission rate in basis points (0 = use global default)")
 	peers := flag.String("peers", "", "comma-separated peer chain node URLs")
 	p2pListen := flag.String("p2p-listen", "", "comma-separated libp2p listen multiaddrs, disabled when empty")
 	p2pPeers := flag.String("p2p-peers", "", "comma-separated libp2p peer multiaddrs")
@@ -38,6 +39,7 @@ func main() {
 	corsOrigins := flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
 	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")
 	rateLimitBurst := flag.Int("rate-limit-burst", 0, "rate limit burst size (default: rps+1)")
+	trustedProxies := flag.String("trusted-proxies", "", "comma-separated trusted proxy CIDRs/IPs for X-Forwarded-For")
 	production := flag.Bool("production", false, "enable production mode with strict safety checks")
 	flag.Parse()
 
@@ -48,6 +50,9 @@ func main() {
 		}
 		if *validatorEndpoint == "" {
 			errs = append(errs, "production mode requires explicit --validator-endpoint")
+		}
+		if *validatorStake < chain.MinValidatorStake {
+			errs = append(errs, "production mode requires --validator-stake >= 1000000 GF")
 		}
 		if *rateLimitRPS <= 0 {
 			errs = append(errs, "production mode requires --rate-limit-rps to be set")
@@ -70,6 +75,7 @@ func main() {
 			}
 		}
 	}
+	proxies := parseCSV(*trustedProxies)
 
 	store, err := chain.OpenStoreWithGenesis(*state, *genesis)
 	if err != nil {
@@ -84,7 +90,7 @@ func main() {
 	if endpoint == "" {
 		endpoint = "http://localhost" + *addr
 	}
-	registration, err := identity.RegistrationRequest(endpoint, *validatorStake)
+	registration, err := identity.RegistrationRequest(endpoint, *validatorStake, *validatorCommissionBPS)
 	if err != nil {
 		log.Fatalf("sign validator registration: %v", err)
 	}
@@ -105,7 +111,7 @@ func main() {
 	store.SetBlockBroadcaster(network)
 	store.SetTransactionBroadcaster(network)
 	store.SetConsensusVoteBroadcaster(network)
-	log.Printf("validator %s enabled endpoint=%s stake=%d", identity.Address, endpoint, *validatorStake)
+	log.Printf("validator %s enabled endpoint=%s stake=%d commission_bps=%d", identity.Address, endpoint, *validatorStake, *validatorCommissionBPS)
 	if len(network.Peers()) > 0 {
 		log.Printf("peer network enabled peers=%v", network.Peers())
 	}
@@ -129,7 +135,7 @@ func main() {
 	server := chain.NewServer(store, network)
 	handler := middleware.Chain(
 		middleware.CORS(origins),
-		middleware.RateLimit(*rateLimitRPS, *rateLimitBurst),
+		middleware.RateLimitWithTrustedProxies(*rateLimitRPS, *rateLimitBurst, proxies),
 	)(server.Routes())
 	httpServer := &http.Server{
 		Addr:              *addr,
@@ -156,4 +162,18 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	httpServer.Shutdown(shutdownCtx)
+}
+
+func parseCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var values []string
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }

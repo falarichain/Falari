@@ -64,6 +64,12 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 		return wire.CreateGovernanceProposalResponse{}, err
 	}
 
+	// Verify nonce for replay protection.
+	expectedNonce := s.data.OperatorNonces[proposer]
+	if req.Nonce != expectedNonce {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("invalid proposer nonce")
+	}
+
 	// Validate clock skew.
 	now := time.Now().Unix()
 	if abs64(req.CreatedAtUnix-now) > governanceClockSkewSeconds {
@@ -157,12 +163,19 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
 		TargetMaxConsensusValidators:      req.TargetMaxConsensusValidators,
 		TargetMinConsensusValidators:      req.TargetMinConsensusValidators,
+		TargetBlockBytes:                  req.TargetBlockBytes,
+		TargetMaxBlockBytes:               req.TargetMaxBlockBytes,
+		TargetMaxBlockTxs:                 req.TargetMaxBlockTxs,
+		TargetMaxTxBytes:                  req.TargetMaxTxBytes,
+		TargetMaxStorageTxBytes:           req.TargetMaxStorageTxBytes,
+		ProposerNonce:                     req.Nonce,
 		Status:                            wire.GovProposalPending,
 		CreatedAtUnix:                     now,
 	}
 
 	s.data.GovernanceProposals[proposalID] = proposal
 	s.data.GovernanceVotes[proposalID] = []wire.GovernanceVote{}
+	s.data.OperatorNonces[proposer] = expectedNonce + 1
 
 	resp := wire.CreateGovernanceProposalResponse{Proposal: proposal}
 	s.recordTxLocked("governance_create_proposal", proposer, governanceCreateProposalTxPayload{Request: req, Response: resp})
@@ -214,6 +227,12 @@ func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.Cas
 		return wire.CastGovernanceVoteResponse{}, err
 	}
 
+	// Verify nonce for replay protection.
+	expectedVoteNonce := s.data.OperatorNonces[voter]
+	if req.Nonce != expectedVoteNonce {
+		return wire.CastGovernanceVoteResponse{}, errors.New("invalid voter nonce")
+	}
+
 	// Validate clock skew.
 	if abs64(req.CreatedAtUnix-now) > governanceClockSkewSeconds {
 		return wire.CastGovernanceVoteResponse{}, errors.New("vote timestamp outside acceptable clock skew")
@@ -236,6 +255,7 @@ func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.Cas
 		CreatedAtUnix:  now,
 	}
 	s.data.GovernanceVotes[req.ProposalID] = append(s.data.GovernanceVotes[req.ProposalID], vote)
+	s.data.OperatorNonces[voter] = expectedVoteNonce + 1
 
 	// Count votes.
 	approveCount, rejectCount := s.countGovernanceVotesLocked(req.ProposalID)
@@ -273,9 +293,42 @@ func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.Cas
 }
 
 // ExecuteGovernanceProposal executes a proposal that has reached the approval threshold.
+// The caller must be an enabled governance operator and provide a valid signature.
+// The original proposal signature is also re-verified to prevent tampering.
 func (s *Store) ExecuteGovernanceProposal(req wire.ExecuteGovernanceProposalRequest) (wire.ExecuteGovernanceProposalResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	executor := normalizeGovernanceOperator(req.Executor)
+	if executor == "" {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("executor is required")
+	}
+
+	// Verify executor is an enabled governance operator.
+	operator, ok := s.data.GovernanceOperators[executor]
+	if !ok || !operator.Enabled {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("executor is not an enabled governance operator")
+	}
+	if operator.PublicKey == "" {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("executor has no public key registered")
+	}
+
+	// Verify execute request signature.
+	if err := wire.VerifyGovernanceExecute(req, executor); err != nil {
+		return wire.ExecuteGovernanceProposalResponse{}, err
+	}
+
+	// Verify nonce for replay protection.
+	expectedExecNonce := s.data.OperatorNonces[executor]
+	if req.Nonce != expectedExecNonce {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("invalid executor nonce")
+	}
+
+	// Validate clock skew.
+	now := time.Now().Unix()
+	if abs64(req.CreatedAtUnix-now) > governanceClockSkewSeconds {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("execute timestamp outside acceptable clock skew")
+	}
 
 	proposal, ok := s.data.GovernanceProposals[req.ProposalID]
 	if !ok {
@@ -285,8 +338,6 @@ func (s *Store) ExecuteGovernanceProposal(req wire.ExecuteGovernanceProposalRequ
 		return wire.ExecuteGovernanceProposalResponse{}, errors.New("proposal is not pending")
 	}
 
-	now := time.Now().Unix()
-
 	// Check expiration.
 	if proposal.CreatedAtUnix+governanceProposalTTLSeconds < now {
 		proposal.Status = wire.GovProposalExpired
@@ -294,16 +345,24 @@ func (s *Store) ExecuteGovernanceProposal(req wire.ExecuteGovernanceProposalRequ
 		return wire.ExecuteGovernanceProposalResponse{}, errors.New("proposal has expired")
 	}
 
+	// Re-verify original proposal signature to prevent tampering.
+	originalReq := proposalToCreateRequest(proposal)
+	if err := wire.VerifyGovernanceProposal(originalReq, normalizeGovernanceOperator(proposal.Proposer)); err != nil {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("proposal signature re-verification failed: " + err.Error())
+	}
+
 	execResult, err := s.executeGovernanceProposalLocked(proposal, now)
 	if err != nil {
 		return wire.ExecuteGovernanceProposalResponse{}, err
 	}
 
+	s.data.OperatorNonces[executor] = expectedExecNonce + 1
+
 	resp := wire.ExecuteGovernanceProposalResponse{
 		Proposal:         s.data.GovernanceProposals[req.ProposalID],
 		GovernanceResult: execResult,
 	}
-	s.recordTxLocked("governance_execute_proposal", proposal.Proposer, governanceExecuteProposalTxPayload{Request: req, Response: resp})
+	s.recordTxLocked("governance_execute_proposal", executor, governanceExecuteProposalTxPayload{Request: req, Response: resp})
 	if err := s.saveLocked(); err != nil {
 		return wire.ExecuteGovernanceProposalResponse{}, err
 	}
@@ -495,6 +554,11 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.BlockProductionRewardBPS, proposal.TargetBlockProductionRewardBPS)
 	applyIfNonZero(&p.MaxConsensusValidators, proposal.TargetMaxConsensusValidators)
 	applyIfNonZero(&p.MinConsensusValidators, proposal.TargetMinConsensusValidators)
+	applyIfNonZero(&p.TargetBlockBytes, proposal.TargetBlockBytes)
+	applyIfNonZero(&p.MaxBlockBytes, proposal.TargetMaxBlockBytes)
+	applyIfNonZero(&p.MaxBlockTxs, proposal.TargetMaxBlockTxs)
+	applyIfNonZero(&p.MaxTxBytes, proposal.TargetMaxTxBytes)
+	applyIfNonZero(&p.MaxStorageTxBytes, proposal.TargetMaxStorageTxBytes)
 
 	return wire.GovernanceDealActionResponse{
 		GovernanceType: "governance_update_mining_params",
@@ -852,10 +916,110 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest) 
 		req.TargetAvailabilityThresholdBPS != 0 ||
 		req.TargetBlockProductionRewardBPS != 0 ||
 		req.TargetMaxConsensusValidators != 0 ||
-		req.TargetMinConsensusValidators != 0 {
-		return nil
+		req.TargetMinConsensusValidators != 0 ||
+		req.TargetBlockBytes != 0 ||
+		req.TargetMaxBlockBytes != 0 ||
+		req.TargetMaxBlockTxs != 0 ||
+		req.TargetMaxTxBytes != 0 ||
+		req.TargetMaxStorageTxBytes != 0 {
+		return validateMiningParamSizeTargets(req)
 	}
 	return errors.New("update_mining_params requires at least one non-zero target field")
+}
+
+func validateMiningParamSizeTargets(req wire.CreateGovernanceProposalRequest) error {
+	targetBlockBytes := nonZeroOr(req.TargetBlockBytes, defaultTargetBlockBytes)
+	maxBlockBytes := nonZeroOr(req.TargetMaxBlockBytes, defaultMaxBlockBytes)
+	maxBlockTxs := nonZeroOr(req.TargetMaxBlockTxs, defaultMaxBlockTxs)
+	maxTxBytes := nonZeroOr(req.TargetMaxTxBytes, defaultMaxTxBytes)
+	maxStorageTxBytes := nonZeroOr(req.TargetMaxStorageTxBytes, defaultMaxStorageTxBytes)
+	if targetBlockBytes < defaultBlockSizeHeadroom {
+		return errors.New("target block bytes is too small")
+	}
+	if targetBlockBytes > maxBlockBytes {
+		return errors.New("target block bytes cannot exceed max block bytes")
+	}
+	if maxBlockBytes < defaultBlockSizeHeadroom {
+		return errors.New("max block bytes is too small")
+	}
+	if maxBlockBytes > defaultMaxBlockBytes {
+		return errors.New("max block bytes exceeds node transport limit")
+	}
+	if maxBlockTxs == 0 {
+		return errors.New("max block txs must be positive")
+	}
+	if maxTxBytes == 0 || maxStorageTxBytes == 0 {
+		return errors.New("transaction byte limits must be positive")
+	}
+	if maxTxBytes > maxBlockBytes || maxStorageTxBytes > maxBlockBytes {
+		return errors.New("transaction byte limits cannot exceed max block bytes")
+	}
+	return nil
+}
+
+func nonZeroOr(value uint64, fallback uint64) uint64 {
+	if value != 0 {
+		return value
+	}
+	return fallback
+}
+
+// proposalToCreateRequest reconstructs the original CreateGovernanceProposalRequest
+// from a stored GovernanceProposal for signature re-verification.
+func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernanceProposalRequest {
+	return wire.CreateGovernanceProposalRequest{
+		Proposer:                          p.Proposer,
+		IntentID:                          p.IntentID,
+		Action:                            p.Action,
+		ReasonHash:                        p.ReasonHash,
+		ExpiresAtUnix:                     p.ExpiresAtUnix,
+		PreserveStorage:                   p.PreserveStorage,
+		AppealDeadlineUnix:                p.AppealDeadlineUnix,
+		TargetOperator:                    p.TargetOperator,
+		TargetPublicKey:                   p.TargetPublicKey,
+		TargetPermissions:                 p.TargetPermissions,
+		TargetDataModerationThresholdNum:  p.TargetDataModerationThresholdNum,
+		TargetDataModerationThresholdDen:  p.TargetDataModerationThresholdDen,
+		TargetOperatorChangeThresholdNum:  p.TargetOperatorChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:  p.TargetOperatorChangeThresholdDen,
+		TargetStorageReleaseRateBPS:       p.TargetStorageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:     p.TargetRetrievalReleaseRateBPS,
+		TargetValidatorReleaseRateBPS:     p.TargetValidatorReleaseRateBPS,
+		TargetStoredBytesWeightBPS:        p.TargetStoredBytesWeightBPS,
+		TargetProofScoreWeightBPS:         p.TargetProofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:       p.TargetAvailabilityWeightBPS,
+		TargetDecentralizationWeightBPS:   p.TargetDecentralizationWeightBPS,
+		TargetRetrievalRewardPerMiB:       p.TargetRetrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow: p.TargetMaxRetrievalRewardPerWindow,
+		TargetRepairRewardPerShard:        p.TargetRepairRewardPerShard,
+		TargetRepairPoolTakeoverBPS:       p.TargetRepairPoolTakeoverBPS,
+		TargetRepairPoolSubsidyBPS:        p.TargetRepairPoolSubsidyBPS,
+		TargetMinerDegradeThreshold:       p.TargetMinerDegradeThreshold,
+		TargetStorageProofSamples:         p.TargetStorageProofSamples,
+		TargetValidatorCommissionBPS:      p.TargetValidatorCommissionBPS,
+		TargetRetrievalWeightBPS:          p.TargetRetrievalWeightBPS,
+		TargetFoundationReleaseRateBPS:    p.TargetFoundationReleaseRateBPS,
+		TargetFoundationAddress:           p.TargetFoundationAddress,
+		TargetRetrievalAddress:            p.TargetRetrievalAddress,
+		TargetStorageAnnualRateBPS:        p.TargetStorageAnnualRateBPS,
+		TargetRetrievalAnnualRateBPS:      p.TargetRetrievalAnnualRateBPS,
+		TargetValidatorAnnualRateBPS:      p.TargetValidatorAnnualRateBPS,
+		TargetFoundationAnnualRateBPS:     p.TargetFoundationAnnualRateBPS,
+		TargetReleaseCoefficientBPS:       p.TargetReleaseCoefficientBPS,
+		TargetAvailabilityWindowSize:      p.TargetAvailabilityWindowSize,
+		TargetAvailabilityThresholdBPS:    p.TargetAvailabilityThresholdBPS,
+		TargetBlockProductionRewardBPS:    p.TargetBlockProductionRewardBPS,
+		TargetMaxConsensusValidators:      p.TargetMaxConsensusValidators,
+		TargetMinConsensusValidators:      p.TargetMinConsensusValidators,
+		TargetBlockBytes:                  p.TargetBlockBytes,
+		TargetMaxBlockBytes:               p.TargetMaxBlockBytes,
+		TargetMaxBlockTxs:                 p.TargetMaxBlockTxs,
+		TargetMaxTxBytes:                  p.TargetMaxTxBytes,
+		TargetMaxStorageTxBytes:           p.TargetMaxStorageTxBytes,
+		Signature:                         p.ProposerSignature,
+		Nonce:                             p.ProposerNonce,
+		CreatedAtUnix:                     p.CreatedAtUnix,
+	}
 }
 
 // abs64 returns the absolute value of an int64.

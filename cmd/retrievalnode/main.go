@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -41,9 +42,13 @@ func main() {
 	dataShards := flag.Int("gateway-data-shards", 4, "data shards for erasure coding")
 	parityShards := flag.Int("gateway-parity-shards", 2, "parity shards for erasure coding")
 	segmentSize := flag.Int64("gateway-segment-size", 1<<26, "segment size in bytes (default 64 MiB)")
+	gatewayMaxUploadBytes := flag.Int64("gateway-max-upload-bytes", 1<<30, "maximum HTTP upload request size in bytes")
+	gatewayAgentKeyFile := flag.String("gateway-agent-key-file", "", "JSON map of agent key id to private key for gateway-side signing")
+	gatewayAllowPrivateKeyAPIKeys := flag.Bool("gateway-allow-private-key-api-keys", true, "allow legacy API keys that include private keys in request headers")
 	corsOrigins := flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
 	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")
 	rateLimitBurst := flag.Int("rate-limit-burst", 0, "rate limit burst size (default: rps+1)")
+	trustedProxies := flag.String("trusted-proxies", "", "comma-separated trusted proxy CIDRs/IPs for X-Forwarded-For")
 	production := flag.Bool("production", false, "enable production mode with strict safety checks")
 	flag.Parse()
 
@@ -60,6 +65,14 @@ func main() {
 		}
 		if *chainURL == "" {
 			errs = append(errs, "production mode requires --chain to register on-chain")
+		}
+		if *gatewayEnabled {
+			if *gatewayAgentKeyFile == "" {
+				errs = append(errs, "production gateway requires --gateway-agent-key-file")
+			}
+			if *gatewayAllowPrivateKeyAPIKeys {
+				errs = append(errs, "production gateway requires --gateway-allow-private-key-api-keys=false")
+			}
 		}
 		if len(errs) > 0 {
 			for _, e := range errs {
@@ -90,6 +103,7 @@ func main() {
 		registeredEndpoint = "http://localhost" + *addr
 	}
 	node.ConfigureChain(*chainURL, registeredEndpoint)
+	node.RequireChainAuthorization(*production)
 	if *chainURL != "" {
 		if err := node.Register(*chainURL, registeredEndpoint, *capacity, *stake); err != nil {
 			log.Fatalf("register retrieval node: %v", err)
@@ -154,13 +168,23 @@ func main() {
 			tmpDir = *data + "/gateway"
 		}
 		storageEndpoints := splitCSV(*gatewayStorage)
+		agentPrivateKeys, err := loadGatewayAgentKeys(*gatewayAgentKeyFile)
+		if err != nil {
+			log.Fatalf("load gateway agent keys: %v", err)
+		}
+		if !*gatewayAllowPrivateKeyAPIKeys && len(agentPrivateKeys) == 0 {
+			log.Fatal("-gateway-agent-key-file must contain at least one key when private-key API headers are disabled")
+		}
 		gwHandler, err = gateway.New(gateway.Config{
-			ChainURL:         *chainURL,
-			StorageEndpoints: storageEndpoints,
-			TmpDir:           tmpDir,
-			DataShards:       *dataShards,
-			ParityShards:     *parityShards,
-			SegmentSize:      *segmentSize,
+			ChainURL:               *chainURL,
+			StorageEndpoints:       storageEndpoints,
+			TmpDir:                 tmpDir,
+			DataShards:             *dataShards,
+			ParityShards:           *parityShards,
+			SegmentSize:            *segmentSize,
+			MaxUploadBytes:         *gatewayMaxUploadBytes,
+			AgentPrivateKeys:       agentPrivateKeys,
+			AllowPrivateKeyAPIKeys: *gatewayAllowPrivateKeyAPIKeys,
 		})
 		if err != nil {
 			log.Fatalf("start gateway: %v", err)
@@ -185,7 +209,7 @@ func main() {
 
 	handler := middleware.Chain(
 		middleware.CORS(origins),
-		middleware.RateLimit(*rateLimitRPS, *rateLimitBurst),
+		middleware.RateLimitWithTrustedProxies(*rateLimitRPS, *rateLimitBurst, splitCSV(*trustedProxies)),
 	)(mux)
 
 	log.Printf("retrieval node %s listening on %s", node.Address(), *addr)
@@ -237,6 +261,31 @@ func splitCSV(s string) []string {
 		parts = append(parts, p)
 	}
 	return parts
+}
+
+func loadGatewayAgentKeys(path string) (map[string]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	keys := map[string]string{}
+	if err := json.Unmarshal(raw, &keys); err == nil && len(keys) > 0 {
+		return keys, nil
+	}
+	var single struct {
+		AgentKeyID string `json:"agent_key_id"`
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.Unmarshal(raw, &single); err != nil {
+		return nil, err
+	}
+	if single.AgentKeyID == "" || single.PrivateKey == "" {
+		return nil, nil
+	}
+	return map[string]string{single.AgentKeyID: single.PrivateKey}, nil
 }
 
 func trimSpace(s string) string {

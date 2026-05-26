@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS validators (
     delegator_count         INT NOT NULL DEFAULT 0,
     rewards                 BIGINT NOT NULL DEFAULT 0,
     delegation_rewards      BIGINT NOT NULL DEFAULT 0,
+    commission_rate_bps     BIGINT NOT NULL DEFAULT 0,
     registered_at_unix      BIGINT NOT NULL DEFAULT 0,
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

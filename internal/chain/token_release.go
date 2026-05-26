@@ -269,7 +269,12 @@ func (s *Store) distributeValidatorRewardLocked(validatorAddress string, amount 
 		s.data.Validators[validatorAddress] = validator
 		return
 	}
-	commission := amount * s.miningParamsLocked().ValidatorCommissionBPS / 10000
+	// Use per-validator commission rate if set, otherwise fall back to global default
+	commissionBPS := validator.CommissionRateBPS
+	if commissionBPS == 0 {
+		commissionBPS = s.miningParamsLocked().ValidatorCommissionBPS
+	}
+	commission := amount * commissionBPS / 10000
 	selfReward := amount * selfStake / totalPower
 	validatorReward := saturatingAdd(commission, selfReward)
 	if validatorReward > amount {

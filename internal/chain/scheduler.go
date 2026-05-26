@@ -52,13 +52,6 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 			}
 			s.mu.Unlock()
 
-			released, totalRewards, err := s.ReleasePendingRetrievalRewards()
-			if err != nil {
-				log.Printf("auto release retrieval rewards failed: %v", err)
-			} else if released > 0 {
-				log.Printf("auto released %d pending retrieval rewards total=%d", released, totalRewards)
-			}
-
 			finalized, err := s.FinalizeExpiredEpochs()
 			if err != nil {
 				log.Printf("auto finalize epochs failed: %v", err)
