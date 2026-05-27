@@ -720,7 +720,7 @@ func finalize(args []string) {
 
 func mine(args []string) {
 	fs := flag.NewFlagSet("mine", flag.ExitOnError)
-	addr := fs.String("addr", ":9090", "HTTP listen address for upload/download service")
+	addr := fs.String("addr", ":9092", "HTTP listen address for upload/download service")
 	data := fs.String("data", "./data/miner1", "storage data directory")
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL for miner registration")
 	endpoint := fs.String("endpoint", "", "public endpoint registered on chain")

@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"chain/internal/chain"
+	"chain/internal/config"
 	"chain/internal/middleware"
 )
 
 func main() {
+	configPath := flag.String("config", "", "path to YAML config file (flags override config values)")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	state := flag.String("state", "./data/chain.json", "state file path")
 	genesis := flag.String("genesis", "", "genesis file path (applied only on first start)")
@@ -41,6 +43,87 @@ func main() {
 	trustedProxies := flag.String("trusted-proxies", "", "comma-separated trusted proxy CIDRs/IPs for X-Forwarded-For")
 	production := flag.Bool("production", false, "enable production mode with strict safety checks")
 	flag.Parse()
+
+	// Load YAML config and apply flag overrides (flag > config > default).
+	if *configPath != "" {
+		var cfg config.ChainNodeConfig
+		if err := config.Load(*configPath, &cfg); err != nil {
+			log.Fatalf("load config: %v", err)
+		}
+		if !config.IsFlagSet("addr") && cfg.HTTP.Addr != "" {
+			*addr = cfg.HTTP.Addr
+		}
+		if !config.IsFlagSet("state") && cfg.State != "" {
+			*state = cfg.State
+		}
+		if !config.IsFlagSet("genesis") && cfg.Genesis != "" {
+			*genesis = cfg.Genesis
+		}
+		if !config.IsFlagSet("epoch-interval") && cfg.Epoch.Interval.Duration() != 0 {
+			*epochInterval = cfg.Epoch.Interval.Duration()
+		}
+		if !config.IsFlagSet("epoch-duration") && cfg.Epoch.Duration.Duration() != 0 {
+			*epochDuration = cfg.Epoch.Duration.Duration()
+		}
+		if !config.IsFlagSet("epoch-challenges") && cfg.Epoch.Challenges != 0 {
+			*epochChallenges = cfg.Epoch.Challenges
+		}
+		if !config.IsFlagSet("epoch-reward") && cfg.Epoch.Reward != 0 {
+			*epochReward = cfg.Epoch.Reward
+		}
+		if !config.IsFlagSet("epoch-slash") && cfg.Epoch.Slash != 0 {
+			*epochSlash = cfg.Epoch.Slash
+		}
+		if !config.IsFlagSet("settle-interval") && cfg.Settle.Duration() != 0 {
+			*settleInterval = cfg.Settle.Duration()
+		}
+		if !config.IsFlagSet("renew-interval") && cfg.Renew.Duration() != 0 {
+			*renewInterval = cfg.Renew.Duration()
+		}
+		if !config.IsFlagSet("block-interval") && cfg.Block.Duration() != 0 {
+			*blockInterval = cfg.Block.Duration()
+		}
+		if !config.IsFlagSet("validator-endpoint") && cfg.Validator.Endpoint != "" {
+			*validatorEndpoint = cfg.Validator.Endpoint
+		}
+		if !config.IsFlagSet("validator-stake") && cfg.Validator.Stake != 0 {
+			*validatorStake = cfg.Validator.Stake
+		}
+		if !config.IsFlagSet("validator-commission-bps") && cfg.Validator.CommissionBPS != 0 {
+			*validatorCommissionBPS = cfg.Validator.CommissionBPS
+		}
+		if !config.IsFlagSet("peers") && cfg.Peers != "" {
+			*peers = cfg.Peers
+		}
+		if !config.IsFlagSet("p2p-listen") && cfg.P2P.Listen != "" {
+			*p2pListen = cfg.P2P.Listen
+		}
+		if !config.IsFlagSet("p2p-peers") && cfg.P2P.Peers != "" {
+			*p2pPeers = cfg.P2P.Peers
+		}
+		if !config.IsFlagSet("p2p-topic") && cfg.P2P.Topic != "" {
+			*p2pTopic = cfg.P2P.Topic
+		}
+		if !config.IsFlagSet("sync-interval") && cfg.Sync.Duration() != 0 {
+			*syncInterval = cfg.Sync.Duration()
+		}
+		if !config.IsFlagSet("cors-origins") && len(cfg.HTTP.CORSOrigins) > 0 {
+			*corsOrigins = strings.Join(cfg.HTTP.CORSOrigins, ",")
+		}
+		if !config.IsFlagSet("rate-limit-rps") && cfg.HTTP.RateLimitRPS != 0 {
+			*rateLimitRPS = cfg.HTTP.RateLimitRPS
+		}
+		if !config.IsFlagSet("rate-limit-burst") && cfg.HTTP.RateLimitBurst != 0 {
+			*rateLimitBurst = cfg.HTTP.RateLimitBurst
+		}
+		if !config.IsFlagSet("trusted-proxies") && len(cfg.HTTP.TrustedProxies) > 0 {
+			*trustedProxies = strings.Join(cfg.HTTP.TrustedProxies, ",")
+		}
+		if !config.IsFlagSet("production") && cfg.HTTP.Production {
+			*production = cfg.HTTP.Production
+		}
+		log.Printf("config loaded from %s", *configPath)
+	}
 
 	if *production {
 		var errs []string

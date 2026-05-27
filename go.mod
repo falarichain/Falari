@@ -11,6 +11,8 @@ require (
 	github.com/libp2p/go-libp2p-pubsub v0.14.2
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/multiformats/go-multihash v0.2.3
+	golang.org/x/time v0.12.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -112,7 +114,6 @@ require (
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260409153401-be6f6cb8b1fa // indirect
 	golang.org/x/text v0.36.0 // indirect
-	golang.org/x/time v0.12.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	gonum.org/v1/gonum v0.17.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

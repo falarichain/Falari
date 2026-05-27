@@ -19,7 +19,7 @@ func main() {
 	var (
 		databaseURL    = flag.String("db", "postgres://localhost:5432/falari_explorer?sslmode=disable", "PostgreSQL connection URL")
 		chainURL       = flag.String("chain", "http://localhost:8080", "Chain node HTTP API URL")
-		listenAddr     = flag.String("addr", ":9090", "Explorer API listen address")
+		listenAddr     = flag.String("addr", ":9095", "Explorer API listen address")
 		syncInterval   = flag.Duration("sync-interval", 5*time.Second, "Block sync interval")
 		corsOrigins    = flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
 		rateLimitRPS   = flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")

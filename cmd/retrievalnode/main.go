@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"chain/internal/config"
 	falaridht "chain/internal/dht"
 	"chain/internal/gateway"
 	"chain/internal/middleware"
@@ -19,6 +20,7 @@ import (
 )
 
 func main() {
+	configPath := flag.String("config", "", "path to YAML config file (flags override config values)")
 	addr := flag.String("addr", ":9091", "HTTP listen address")
 	data := flag.String("data", "./data/retrieval1", "retrieval data directory")
 	chainURL := flag.String("chain", "", "chain node URL for receipt submission and miner registration")
@@ -51,6 +53,105 @@ func main() {
 	trustedProxies := flag.String("trusted-proxies", "", "comma-separated trusted proxy CIDRs/IPs for X-Forwarded-For")
 	production := flag.Bool("production", false, "enable production mode with strict safety checks")
 	flag.Parse()
+
+	// Load YAML config and apply flag overrides (flag > config > default).
+	if *configPath != "" {
+		var cfg config.RetrievalNodeConfig
+		if err := config.Load(*configPath, &cfg); err != nil {
+			log.Fatalf("load config: %v", err)
+		}
+		if !config.IsFlagSet("addr") && cfg.HTTP.Addr != "" {
+			*addr = cfg.HTTP.Addr
+		}
+		if !config.IsFlagSet("data") && cfg.Data != "" {
+			*data = cfg.Data
+		}
+		if !config.IsFlagSet("chain") && cfg.Chain.URL != "" {
+			*chainURL = cfg.Chain.URL
+		}
+		if !config.IsFlagSet("endpoint") && cfg.Chain.Endpoint != "" {
+			*endpoint = cfg.Chain.Endpoint
+		}
+		if !config.IsFlagSet("capacity") && cfg.Chain.Capacity != 0 {
+			*capacity = cfg.Chain.Capacity
+		}
+		if !config.IsFlagSet("stake") && cfg.Chain.Stake != 0 {
+			*stake = cfg.Chain.Stake
+		}
+		if !config.IsFlagSet("auto-collect") {
+			*autoCollect = cfg.AutoCollect.Enabled
+		}
+		if !config.IsFlagSet("collect-interval") && cfg.AutoCollect.Interval.Duration() != 0 {
+			*collectInterval = cfg.AutoCollect.Interval.Duration()
+		}
+		if !config.IsFlagSet("cache-size") && cfg.CacheSize != 0 {
+			*cacheSize = cfg.CacheSize
+		}
+		if !config.IsFlagSet("p2p-listen") && cfg.P2P.Listen != "" {
+			*p2pListen = cfg.P2P.Listen
+		}
+		if !config.IsFlagSet("p2p-peers") && cfg.P2P.Peers != "" {
+			*p2pPeers = cfg.P2P.Peers
+		}
+		if !config.IsFlagSet("p2p-topic") && cfg.P2P.Topic != "" {
+			*p2pTopic = cfg.P2P.Topic
+		}
+		if !config.IsFlagSet("dht") && cfg.DHT.Enabled {
+			*dhtEnabled = cfg.DHT.Enabled
+		}
+		if !config.IsFlagSet("dht-bootstrap") && len(cfg.DHT.Bootstrap) > 0 {
+			*dhtBootstrap = strings.Join(cfg.DHT.Bootstrap, ",")
+		}
+		if !config.IsFlagSet("dht-namespace") && cfg.DHT.Namespace != "" {
+			*dhtNamespace = cfg.DHT.Namespace
+		}
+		if !config.IsFlagSet("dht-republish") && cfg.DHT.Republish.Duration() != 0 {
+			*dhtRepublish = cfg.DHT.Republish.Duration()
+		}
+		if !config.IsFlagSet("gateway") && cfg.Gateway.Enabled {
+			*gatewayEnabled = cfg.Gateway.Enabled
+		}
+		if !config.IsFlagSet("gateway-storage") && len(cfg.Gateway.StorageEndpoints) > 0 {
+			*gatewayStorage = strings.Join(cfg.Gateway.StorageEndpoints, ",")
+		}
+		if !config.IsFlagSet("gateway-tmp") && cfg.Gateway.TmpDir != "" {
+			*gatewayTmp = cfg.Gateway.TmpDir
+		}
+		if !config.IsFlagSet("gateway-data-shards") && cfg.Gateway.DataShards != 0 {
+			*dataShards = cfg.Gateway.DataShards
+		}
+		if !config.IsFlagSet("gateway-parity-shards") && cfg.Gateway.ParityShards != 0 {
+			*parityShards = cfg.Gateway.ParityShards
+		}
+		if !config.IsFlagSet("gateway-segment-size") && cfg.Gateway.SegmentSize != 0 {
+			*segmentSize = cfg.Gateway.SegmentSize
+		}
+		if !config.IsFlagSet("gateway-max-upload-bytes") && cfg.Gateway.MaxUploadBytes != 0 {
+			*gatewayMaxUploadBytes = cfg.Gateway.MaxUploadBytes
+		}
+		if !config.IsFlagSet("gateway-agent-key-file") && cfg.Gateway.AgentKeyFile != "" {
+			*gatewayAgentKeyFile = cfg.Gateway.AgentKeyFile
+		}
+		if !config.IsFlagSet("gateway-allow-private-key-api-keys") {
+			*gatewayAllowPrivateKeyAPIKeys = cfg.Gateway.AllowPrivateKeyAPIKeys
+		}
+		if !config.IsFlagSet("cors-origins") && len(cfg.HTTP.CORSOrigins) > 0 {
+			*corsOrigins = strings.Join(cfg.HTTP.CORSOrigins, ",")
+		}
+		if !config.IsFlagSet("rate-limit-rps") && cfg.HTTP.RateLimitRPS != 0 {
+			*rateLimitRPS = cfg.HTTP.RateLimitRPS
+		}
+		if !config.IsFlagSet("rate-limit-burst") && cfg.HTTP.RateLimitBurst != 0 {
+			*rateLimitBurst = cfg.HTTP.RateLimitBurst
+		}
+		if !config.IsFlagSet("trusted-proxies") && len(cfg.HTTP.TrustedProxies) > 0 {
+			*trustedProxies = strings.Join(cfg.HTTP.TrustedProxies, ",")
+		}
+		if !config.IsFlagSet("production") && cfg.HTTP.Production {
+			*production = cfg.HTTP.Production
+		}
+		log.Printf("config loaded from %s", *configPath)
+	}
 
 	if *production {
 		var errs []string
