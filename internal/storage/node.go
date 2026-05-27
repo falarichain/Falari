@@ -267,6 +267,10 @@ func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, 
 	if chainURL == "" {
 		return nil
 	}
+	chainID, nonce, err := fetchChainIDAndNonce(chainURL)
+	if err != nil {
+		return fmt.Errorf("fetch chain info for registration: %w", err)
+	}
 	req := wire.RegisterMinerRequest{
 		MinerAddress:  n.address,
 		PublicKey:     n.PublicKeyHex(),
@@ -274,7 +278,7 @@ func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, 
 		CapacityBytes: capacityBytes,
 		Stake:         stake,
 	}
-	if err := wire.SignMinerRegistration(&req, n.privateKey); err != nil {
+	if err := wire.SignMinerRegistration(&req, chainID, nonce, n.privateKey); err != nil {
 		return err
 	}
 	return postJSON(chainURL, "/miners", req)
@@ -550,6 +554,22 @@ func postJSON(baseURL string, path string, value any) error {
 		return fmt.Errorf("post %s failed: http %d: %s", path, resp.StatusCode, body.String())
 	}
 	return nil
+}
+
+func fetchChainIDAndNonce(baseURL string) (string, uint64, error) {
+	resp, err := http.Get(strings.TrimRight(baseURL, "/") + "/status")
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	var status struct {
+		ChainID string `json:"chain_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return "", 0, err
+	}
+	// Nonce defaults to 0 for new miners; the chain will reject stale nonces.
+	return status.ChainID, 0, nil
 }
 
 func (n *Node) StartAutoReceiptCollector(chainURL string, interval time.Duration) {

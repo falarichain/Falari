@@ -151,7 +151,7 @@ func registerTestMiner(t *testing.T, store *Store, _ string, endpoint string, ca
 		CapacityBytes: capacity,
 		Stake:         gfTokens(1),
 	}
-	if err := wire.SignMinerRegistration(&req, key); err != nil {
+	if err := wire.SignMinerRegistration(&req, store.data.ChainID, store.accountLocked(address).Nonce, key); err != nil {
 		t.Fatal(err)
 	}
 	store.data.Accounts[address] = wire.Account{Address: address, Balance: gfTokens(1)}

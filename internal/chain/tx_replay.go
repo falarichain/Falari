@@ -3,8 +3,8 @@ package chain
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
-	"time"
 
 	"chain/internal/wire"
 )
@@ -19,14 +19,16 @@ type batchCommitTxPayload struct {
 	Request           wire.BatchCommitRequest `json:"request"`
 	CommittedSegments int                     `json:"committed_segments"`
 	UploadedSize      int64                   `json:"uploaded_size"`
+	CommittedAtUnix   int64                   `json:"committed_at_unix,omitempty"`
 }
 
 type finalizeDealTxPayload struct {
-	Request      wire.FinalizeRequest `json:"request"`
-	IntentID     string               `json:"intent_id"`
-	DealID       string               `json:"deal_id"`
-	User         string               `json:"user"`
-	ManifestRoot string               `json:"manifest_root"`
+	Request         wire.FinalizeRequest `json:"request"`
+	IntentID        string               `json:"intent_id"`
+	DealID          string               `json:"deal_id"`
+	User            string               `json:"user"`
+	ManifestRoot    string               `json:"manifest_root"`
+	FinalizedAtUnix int64                `json:"finalized_at_unix,omitempty"`
 }
 
 type settleIntentTxPayload struct {
@@ -59,29 +61,37 @@ type finalizeEpochTxPayload struct {
 }
 
 func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
+	blockSnapshot, err := cloneStateForRollback(s.data)
+	if err != nil {
+		return err
+	}
+	restoreBlock := func(err error) error {
+		s.data = blockSnapshot
+		return err
+	}
 	for _, tx := range block.Transactions {
 		if s.data.ConfirmedTxs[tx.TxID] {
-			return errors.New("block contains already confirmed transaction")
+			return restoreBlock(errors.New("block contains already confirmed transaction"))
 		}
 		if err := s.validateTransactionFeeLocked(tx); err != nil {
-			return err
+			return restoreBlock(err)
 		}
 		if tx.AgentKeyID != "" {
 			if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
-				return err
+				return restoreBlock(err)
 			}
 		}
 		if err := s.validateAgentKeyTxLocked(tx); err != nil {
-			return err
+			return restoreBlock(err)
 		}
 		if !s.data.AppliedTxs[tx.TxID] {
 			if err := s.applyTransactionLocked(tx); err != nil {
-				return err
+				return restoreBlock(err)
 			}
 			s.data.AppliedTxs[tx.TxID] = true
 		}
 		if err := s.chargeTransactionFeeLocked(tx, block.ProducerAddress); err != nil {
-			return err
+			return restoreBlock(err)
 		}
 		s.data.ConfirmedTxs[tx.TxID] = true
 	}
@@ -94,29 +104,53 @@ func (s *Store) applyPendingTransactionsForBlockLocked(txs []wire.Transaction, p
 		if s.data.ConfirmedTxs[tx.TxID] {
 			continue
 		}
+		txSnapshot, err := cloneStateForRollback(s.data)
+		if err != nil {
+			return nil, err
+		}
+		restoreTx := func() {
+			s.data = txSnapshot
+		}
 		if err := s.validateTransactionFeeLocked(tx); err != nil {
+			restoreTx()
 			continue
 		}
 		if tx.AgentKeyID != "" {
 			if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
+				restoreTx()
 				continue
 			}
 		}
 		if err := s.validateAgentKeyTxLocked(tx); err != nil {
+			restoreTx()
 			continue
 		}
 		if !s.data.AppliedTxs[tx.TxID] {
 			if err := s.applyTransactionLocked(tx); err != nil {
+				restoreTx()
 				continue
 			}
 			s.data.AppliedTxs[tx.TxID] = true
 		}
 		if err := s.chargeTransactionFeeLocked(tx, producerAddress); err != nil {
+			restoreTx()
 			continue
 		}
 		applied = append(applied, tx)
 	}
 	return applied, nil
+}
+
+func cloneStateForRollback(state State) (State, error) {
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return State{}, err
+	}
+	var cloned State
+	if err := json.Unmarshal(raw, &cloned); err != nil {
+		return State{}, err
+	}
+	return cloned, nil
 }
 
 func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
@@ -149,13 +183,13 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 		if err := json.Unmarshal(tx.Payload, &req); err != nil {
 			return err
 		}
-		return s.applyValidatorRegistrationLocked(req)
+		return s.applyValidatorRegistrationLocked(req, tx.CreatedAtUnix)
 	case "register_miner":
 		var req wire.RegisterMinerRequest
 		if err := json.Unmarshal(tx.Payload, &req); err != nil {
 			return err
 		}
-		return s.applyMinerRegistrationLocked(req)
+		return s.applyMinerRegistrationLocked(req, tx.CreatedAtUnix)
 	case "create_intent":
 		var payload createIntentTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -355,6 +389,24 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyMultisigExecLocked(payload)
+	case "bridge_out":
+		var req wire.BridgeOutRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return err
+		}
+		return s.applyBridgeOutLocked(req)
+	case "bridge_in_claim":
+		var req wire.BridgeInClaimRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return err
+		}
+		return s.applyBridgeInClaimLocked(req)
+	case "bridge_set_config":
+		var req wire.BridgeSetConfigRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return err
+		}
+		return s.applyBridgeSetConfigLocked(req)
 	default:
 		return nil
 	}
@@ -438,13 +490,33 @@ func (s *Store) applySignedTransferLocked(req wire.TransferRequest, publicKey st
 	return from, to, nil
 }
 
-func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorRequest) error {
-	if err := wire.VerifyValidatorRegistration(req); err != nil {
-		return err
+func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorRequest, registeredAt int64) error {
+	if registeredAt <= 0 {
+		return errors.New("replay validator registration missing transaction timestamp")
 	}
 	req.OwnerAddress = wire.NormalizeAddress(req.OwnerAddress)
 	req.OperatorAddress = wire.NormalizeAddress(req.OperatorAddress)
+
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.OwnerAddress, req.Nonce, func() error {
+		return wire.VerifyValidatorRegistration(req)
+	}); err != nil {
+		return err
+	}
+
 	existing := s.validatorLocked(req.OwnerAddress)
+
+	// State guard: reject re-registration in terminal/penalty states.
+	switch existing.Status {
+	case wire.ValidatorStatusExiting:
+		return errors.New("replay validator registration: validator is exiting")
+	case wire.ValidatorStatusExited:
+		return errors.New("replay validator registration: validator has exited")
+	case wire.ValidatorStatusSlashed:
+		return errors.New("replay validator registration: validator has been slashed")
+	case wire.ValidatorStatusJailed:
+		return errors.New("replay validator registration: validator is jailed")
+	}
+
 	account := s.accountLocked(req.OwnerAddress)
 	if req.Stake < MinValidatorStake {
 		return errors.New("replay validator registration below minimum required stake")
@@ -465,8 +537,9 @@ func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorReque
 	existing.SelfStake = req.Stake
 	existing.Status = wire.ValidatorStatusActive
 	if existing.RegisteredAtUnix == 0 {
-		existing.RegisteredAtUnix = time.Now().Unix()
+		existing.RegisteredAtUnix = registeredAt
 	}
+	s.consumeAccountNonceLocked(req.OwnerAddress)
 	s.data.Accounts[account.Address] = account
 	s.data.Validators[req.OwnerAddress] = existing
 	s.data.ConsensusValidators[req.OwnerAddress] = true
@@ -477,11 +550,30 @@ func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorReque
 	return nil
 }
 
-func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest) error {
-	if err := wire.VerifyMinerRegistration(req); err != nil {
+func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, registeredAt int64) error {
+	if registeredAt <= 0 {
+		return errors.New("replay miner registration missing transaction timestamp")
+	}
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
+
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyMinerRegistration(req)
+	}); err != nil {
 		return err
 	}
+
 	existing := s.minerStatsLocked(req.MinerAddress)
+
+	// State guard: reject re-registration in terminal/penalty states.
+	switch existing.Status {
+	case wire.MinerStatusExiting:
+		return errors.New("replay miner registration: miner is exiting")
+	case wire.MinerStatusExited:
+		return errors.New("replay miner registration: miner has exited")
+	case wire.MinerStatusJailed:
+		return errors.New("replay miner registration: miner is jailed")
+	}
+
 	account := s.accountLocked(req.MinerAddress)
 	if req.Stake > existing.Stake {
 		additionalStake := req.Stake - existing.Stake
@@ -501,8 +593,9 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest) erro
 	existing.Stake = req.Stake
 	existing.Status = "active"
 	if existing.RegisteredAtUnix == 0 {
-		existing.RegisteredAtUnix = time.Now().Unix()
+		existing.RegisteredAtUnix = registeredAt
 	}
+	s.consumeAccountNonceLocked(req.MinerAddress)
 	s.data.Accounts[req.MinerAddress] = account
 	s.data.Miners[req.MinerAddress] = existing
 	return nil
@@ -579,8 +672,8 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 	}
 
 	createdAt := payload.CreatedAtUnix
-	if createdAt == 0 {
-		createdAt = time.Now().Unix()
+	if createdAt <= 0 {
+		return errors.New("replay create intent missing create timestamp")
 	}
 	s.data.Intents[payload.IntentID] = &Intent{
 		IntentView: wire.IntentView{
@@ -622,6 +715,10 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 
 func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 	req := payload.Request
+	committedAt := payload.CommittedAtUnix
+	if committedAt <= 0 {
+		return errors.New("replay batch commit missing commit timestamp")
+	}
 	intent, ok := s.data.Intents[req.IntentID]
 	if !ok {
 		return errors.New("replay batch commit intent not found")
@@ -702,11 +799,15 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 	intent.CommittedSegments = payload.CommittedSegments
 	intent.UploadedSize = payload.UploadedSize
 	intent.Status = wire.StatusPartial
-	intent.UpdatedAt = time.Now().Unix()
+	intent.UpdatedAt = committedAt
 	return nil
 }
 
 func (s *Store) applyFinalizeDealLocked(payload finalizeDealTxPayload) error {
+	now := payload.FinalizedAtUnix
+	if now <= 0 {
+		return errors.New("replay finalize deal missing finalize timestamp")
+	}
 	intent, ok := s.data.Intents[payload.IntentID]
 	if !ok {
 		return errors.New("replay finalize deal intent not found")
@@ -739,7 +840,6 @@ func (s *Store) applyFinalizeDealLocked(payload finalizeDealTxPayload) error {
 	}
 	intent.DealID = payload.DealID
 	intent.Status = wire.StatusFinalized
-	now := time.Now().Unix()
 	intent.StorageStatus = wire.StorageStatusActive
 	intent.AccessStatus = defaultAccessStatus(intent.IntentView)
 	intent.ModerationStatus = wire.ModerationStatusNone
@@ -770,8 +870,8 @@ func (s *Store) applySettleIntentLocked(payload settleIntentTxPayload) error {
 		return err
 	}
 	settledAt := payload.SettledAtUnix
-	if settledAt == 0 {
-		settledAt = time.Now().Unix()
+	if settledAt <= 0 {
+		return errors.New("replay settle intent missing settle timestamp")
 	}
 	resp, err := s.settleIntentLocked(intent, settledAt)
 	if err != nil {
@@ -887,48 +987,294 @@ func (s *Store) applyGovernanceBlockDealLocked(payload governanceBlockDealTxPayl
 }
 
 func (s *Store) applyGovernanceCreateProposalLocked(payload governanceCreateProposalTxPayload) error {
+	req := payload.Request
+
+	proposer := normalizeGovernanceOperator(req.Proposer)
+	if proposer == "" {
+		return errors.New("replay governance create: proposer is required")
+	}
+
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return errors.New("replay governance create: chain_id mismatch")
+	}
+
+	// Verify proposer is an authorized governance operator.
+	operator, ok := s.data.GovernanceOperators[proposer]
+	if !ok || !operator.Enabled {
+		return errors.New("replay governance create: proposer is not an authorized operator")
+	}
+	if operator.PublicKey == "" {
+		return errors.New("replay governance create: operator has no public key")
+	}
+
+	// Verify request signature.
+	if err := wire.VerifyGovernanceProposal(req, proposer); err != nil {
+		return errors.New("replay governance create: " + err.Error())
+	}
+
+	// Verify nonce.
+	expectedNonce := s.data.OperatorNonces[proposer]
+	if req.Nonce != expectedNonce {
+		return errors.New("replay governance create: invalid proposer nonce")
+	}
+
+	// Validate action.
+	if !validGovernanceAction(req.Action) {
+		return errors.New("replay governance create: invalid governance action")
+	}
+
+	// Check permission.
+	if err := s.validateGovernanceOperatorLocked(proposer, req.Action); err != nil {
+		return errors.New("replay governance create: " + err.Error())
+	}
+	if req.CreatedAtUnix == 0 {
+		return errors.New("replay governance create: missing signed timestamp")
+	}
+
+	// Validate action-specific fields.
+	if err := validateGovernanceActionFields(req.Action, req.ExpiresAtUnix, req.AppealDeadlineUnix, req.CreatedAtUnix); err != nil {
+		return errors.New("replay governance create: " + err.Error())
+	}
+
+	if isOperatorManagementAction(req.Action) {
+		if err := validateOperatorManagementFields(req.Action, req.TargetOperator, req.TargetPublicKey, req.TargetPermissions, s.data.GovernanceOperators); err != nil {
+			return errors.New("replay governance create: " + err.Error())
+		}
+	} else if isConfigAction(req.Action) {
+		if err := validateConfigChangeFields(req); err != nil {
+			return errors.New("replay governance create: " + err.Error())
+		}
+	} else if isMiningParamsAction(req.Action) {
+		if err := validateMiningParamsChangeFields(req); err != nil {
+			return errors.New("replay governance create: " + err.Error())
+		}
+	} else {
+		if _, ok := s.data.Intents[req.IntentID]; !ok {
+			return errors.New("replay governance create: intent not found")
+		}
+	}
+
+	// Validate the response proposal matches the request.
 	proposal := payload.Response.Proposal
+	if proposal.ProposalID == "" {
+		return errors.New("replay governance create: missing proposal id")
+	}
+	expectedProposal := governanceProposalFromRequest(req, proposer, proposal.ProposalID, req.CreatedAtUnix)
+	if !reflect.DeepEqual(proposal, expectedProposal) {
+		return errors.New("replay governance create: response proposal mismatch")
+	}
+
+	// Consume nonce and write proposal.
+	s.data.OperatorNonces[proposer] = expectedNonce + 1
 	s.data.GovernanceProposals[proposal.ProposalID] = proposal
 	s.data.GovernanceVotes[proposal.ProposalID] = []wire.GovernanceVote{}
 	return nil
 }
 
 func (s *Store) applyGovernanceCastVoteLocked(payload governanceCastVoteTxPayload) error {
-	vote := payload.Response.Vote
-	s.data.GovernanceVotes[vote.ProposalID] = append(s.data.GovernanceVotes[vote.ProposalID], vote)
+	req := payload.Request
+
+	voter := normalizeGovernanceOperator(req.Voter)
+	if voter == "" {
+		return errors.New("replay governance vote: voter is required")
+	}
+
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return errors.New("replay governance vote: chain_id mismatch")
+	}
+
+	// Look up proposal — must exist and be pending.
+	proposal, ok := s.data.GovernanceProposals[req.ProposalID]
+	if !ok {
+		return errors.New("replay governance vote: proposal not found")
+	}
+	if proposal.Status != wire.GovProposalPending {
+		return errors.New("replay governance vote: proposal is not pending")
+	}
+
+	// Verify voter is an authorized operator.
+	operator, ok := s.data.GovernanceOperators[voter]
+	if !ok || !operator.Enabled {
+		return errors.New("replay governance vote: voter is not an authorized operator")
+	}
+	if operator.PublicKey == "" {
+		return errors.New("replay governance vote: voter has no public key")
+	}
+
+	// Verify vote request signature.
+	if err := wire.VerifyGovernanceVote(req, voter); err != nil {
+		return errors.New("replay governance vote: " + err.Error())
+	}
+
+	// Verify nonce.
+	expectedNonce := s.data.OperatorNonces[voter]
+	if req.Nonce != expectedNonce {
+		return errors.New("replay governance vote: invalid voter nonce")
+	}
+	if req.CreatedAtUnix == 0 {
+		return errors.New("replay governance vote: missing signed timestamp")
+	}
+
+	// Check double voting.
+	votes := s.data.GovernanceVotes[req.ProposalID]
+	for _, v := range votes {
+		if normalizeGovernanceOperator(v.Voter) == voter {
+			return errors.New("replay governance vote: voter already voted")
+		}
+	}
+
+	// Record vote using the verified request data.
+	vote := wire.GovernanceVote{
+		ProposalID:     req.ProposalID,
+		Voter:          voter,
+		VoterSignature: req.Signature,
+		Approve:        req.Approve,
+		CreatedAtUnix:  req.CreatedAtUnix,
+	}
+	if payload.Response.Vote != vote {
+		return errors.New("replay governance vote: response vote mismatch")
+	}
+
+	// Recompute vote counts without mutating state first.
+	approveCount, rejectCount := 0, 0
+	for _, existing := range append(append([]wire.GovernanceVote(nil), votes...), vote) {
+		voterAddr := normalizeGovernanceOperator(existing.Voter)
+		op, ok := s.data.GovernanceOperators[voterAddr]
+		if !ok || !op.Enabled {
+			continue
+		}
+		if existing.Approve {
+			approveCount++
+		} else {
+			rejectCount++
+		}
+	}
+	threshold := s.governanceThresholdLocked(proposal.Action)
+
+	totalEnabled := s.countEnabledOperatorsLocked()
+	remaining := totalEnabled - approveCount - rejectCount
+	executed := approveCount >= threshold
+	if approveCount >= threshold {
+		originalReq := proposalToCreateRequest(proposal)
+		if err := wire.VerifyGovernanceProposal(originalReq, normalizeGovernanceOperator(proposal.Proposer)); err != nil {
+			return errors.New("replay governance vote: proposal signature re-verification failed: " + err.Error())
+		}
+	}
+
+	if approveCount != payload.Response.ApproveCount ||
+		rejectCount != payload.Response.RejectCount ||
+		threshold != payload.Response.Threshold ||
+		executed != payload.Response.Executed {
+		return errors.New("replay governance vote: response mismatch")
+	}
+
+	s.data.GovernanceVotes[req.ProposalID] = append(s.data.GovernanceVotes[req.ProposalID], vote)
+	s.data.OperatorNonces[voter] = expectedNonce + 1
+
+	if executed {
+		if _, err := s.executeGovernanceProposalLocked(proposal, req.CreatedAtUnix); err != nil {
+			return errors.New("replay governance vote: execute failed: " + err.Error())
+		}
+	} else if approveCount+remaining < threshold {
+		proposal.Status = wire.GovProposalRejected
+		s.data.GovernanceProposals[req.ProposalID] = proposal
+	}
+
 	return nil
 }
 
 func (s *Store) applyGovernanceExecuteProposalLocked(payload governanceExecuteProposalTxPayload) error {
-	proposal := payload.Response.Proposal
-	s.data.GovernanceProposals[proposal.ProposalID] = proposal
+	req := payload.Request
 
-	now := payload.Response.GovernanceResult.UpdatedAtUnix
+	executor := normalizeGovernanceOperator(req.Executor)
+	if executor == "" {
+		return errors.New("replay governance execute: executor is required")
+	}
 
-	// Route operator management actions to dedicated handler.
-	if isOperatorManagementAction(proposal.Action) {
-		_, err := s.executeOperatorManagementLocked(proposal, now)
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return errors.New("replay governance execute: chain_id mismatch")
+	}
+
+	// Verify executor is an authorized operator.
+	operator, ok := s.data.GovernanceOperators[executor]
+	if !ok || !operator.Enabled {
+		return errors.New("replay governance execute: executor is not an authorized operator")
+	}
+	if operator.PublicKey == "" {
+		return errors.New("replay governance execute: executor has no public key")
+	}
+
+	// Verify execute request signature.
+	if err := wire.VerifyGovernanceExecute(req, executor); err != nil {
+		return errors.New("replay governance execute: " + err.Error())
+	}
+
+	// Verify nonce.
+	expectedNonce := s.data.OperatorNonces[executor]
+	if req.Nonce != expectedNonce {
+		return errors.New("replay governance execute: invalid executor nonce")
+	}
+	if req.CreatedAtUnix == 0 {
+		return errors.New("replay governance execute: missing signed timestamp")
+	}
+
+	// Verify proposal exists and is pending.
+	proposal, ok := s.data.GovernanceProposals[req.ProposalID]
+	if !ok {
+		return errors.New("replay governance execute: proposal not found")
+	}
+	if proposal.Status != wire.GovProposalPending {
+		return errors.New("replay governance execute: proposal is not pending")
+	}
+	if proposal.CreatedAtUnix+governanceProposalTTLSeconds < req.CreatedAtUnix {
+		return errors.New("replay governance execute: proposal has expired")
+	}
+
+	// Re-verify original proposal signature to prevent tampering.
+	originalReq := proposalToCreateRequest(proposal)
+	if err := wire.VerifyGovernanceProposal(originalReq, normalizeGovernanceOperator(proposal.Proposer)); err != nil {
+		return errors.New("replay governance execute: proposal signature re-verification failed: " + err.Error())
+	}
+
+	// Re-count votes and verify threshold.
+	approveCount := 0
+	for _, v := range s.data.GovernanceVotes[proposal.ProposalID] {
+		if !v.Approve {
+			continue
+		}
+		voterAddr := normalizeGovernanceOperator(v.Voter)
+		op, ok := s.data.GovernanceOperators[voterAddr]
+		if !ok || !op.Enabled {
+			continue
+		}
+		approveCount++
+	}
+	threshold := s.governanceThresholdLocked(proposal.Action)
+	if approveCount < threshold {
+		return errors.New("replay governance execute: insufficient approval votes")
+	}
+
+	// Re-execute the governance action and compare result.
+	now := req.CreatedAtUnix
+	execSnapshot, err := cloneStateForRollback(s.data)
+	if err != nil {
 		return err
 	}
-
-	// Route config change actions to dedicated handler.
-	if isConfigAction(proposal.Action) {
-		_, err := s.executeConfigChangeLocked(proposal, now)
-		return err
+	execResult, err := s.executeGovernanceProposalLocked(proposal, now)
+	if err != nil {
+		s.data = execSnapshot
+		return errors.New("replay governance execute: " + err.Error())
 	}
-
-	// Re-execute the deal action.
-	govReq := wire.GovernanceDealActionRequest{
-		IntentID:           proposal.IntentID,
-		Operator:           proposal.Proposer,
-		Action:             proposal.Action,
-		ReasonHash:         proposal.ReasonHash,
-		ExpiresAtUnix:      proposal.ExpiresAtUnix,
-		PreserveStorage:    proposal.PreserveStorage,
-		AppealDeadlineUnix: proposal.AppealDeadlineUnix,
+	if execResult != payload.Response.GovernanceResult {
+		s.data = execSnapshot
+		return errors.New("replay governance execute: result mismatch")
 	}
-	_, err := s.governanceDealActionLocked(govReq, now)
-	return err
+	s.data.OperatorNonces[executor] = expectedNonce + 1
+
+	return nil
 }
 
 func (s *Store) applySubmitDeleteReceiptLocked(payload submitDeleteReceiptTxPayload) error {
@@ -1121,7 +1467,11 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 		s.addSlashedToRepairPoolLocked(slash)
 		if stats.Status == wire.MinerStatusJailed && stats.Stake == 0 {
 			stats.Status = wire.MinerStatusExiting
-			stats.ExitedAtUnix = time.Now().Add(7 * 24 * time.Hour).Unix()
+			exitBase := epoch.DeadlineUnix
+			if exitBase == 0 {
+				exitBase = epoch.StartedAtUnix
+			}
+			stats.ExitedAtUnix = exitBase + 7*24*60*60
 		}
 		s.data.Accounts[account.Address] = account
 		s.data.Miners[challenge.MinerAddress] = stats

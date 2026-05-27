@@ -86,6 +86,16 @@ func (s *Store) TopUpPermanentFund(req wire.PermanentFundTopUpRequest) (wire.Per
 func (s *Store) applyPermanentFundTopUpLocked(payload permanentFundTopUpTxPayload) error {
 	req := payload.Request
 	req.User = wire.NormalizeAddress(req.User)
+	if req.IntentID == "" || req.User == "" {
+		return errors.New("intent id and user are required")
+	}
+	if req.Amount == 0 {
+		return errors.New("amount must be positive")
+	}
+	toppedUpAt := payload.ToppedUpAtUnix
+	if toppedUpAt <= 0 {
+		return errors.New("replay permanent fund topup missing timestamp")
+	}
 	intent, ok := s.data.Intents[req.IntentID]
 	if !ok {
 		return errors.New("intent not found")
@@ -101,6 +111,20 @@ func (s *Store) applyPermanentFundTopUpLocked(payload permanentFundTopUpTxPayloa
 	}); err != nil {
 		return err
 	}
+	fund := s.ensurePermanentFundLocked(intent, toppedUpAt)
+	fund.Balance = saturatingAdd(fund.Balance, req.Amount)
+	fund.Contributed = saturatingAdd(fund.Contributed, req.Amount)
+	fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
+	fund.InitialDailyRate = fund.SustainableDailyRate
+	fund.UpdatedAtUnix = toppedUpAt
+	fund.Closed = false
+	fund.ClosedReason = ""
+	fund.ClosedAtUnix = 0
+	fund.TransferredToPool = 0
+	expectedResp := wire.PermanentFundTopUpResponse{Fund: fund}
+	if payload.Response != expectedResp {
+		return errors.New("replay permanent fund topup response mismatch")
+	}
 	account := s.accountLocked(req.User)
 	if account.Balance < req.Amount {
 		return errors.New("replay permanent fund topup has insufficient balance")
@@ -110,22 +134,13 @@ func (s *Store) applyPermanentFundTopUpLocked(payload permanentFundTopUpTxPayloa
 	account.Balance -= req.Amount
 	account.LockedStorage = saturatingAdd(account.LockedStorage, req.Amount)
 	s.data.Accounts[req.User] = account
-	fund := payload.Response.Fund
-	if fund.IntentID == "" {
-		fund = s.ensurePermanentFundLocked(intent, payload.ToppedUpAtUnix)
-		fund.Balance = saturatingAdd(fund.Balance, req.Amount)
-		fund.Contributed = saturatingAdd(fund.Contributed, req.Amount)
-		fund.UpdatedAtUnix = payload.ToppedUpAtUnix
-	}
-	fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
-	fund.InitialDailyRate = fund.SustainableDailyRate
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
 	intent.LockedFee = saturatingAdd(intent.LockedFee, req.Amount)
-	s.addDealEscrowFundsLocked(intent, req.Amount, payload.ToppedUpAtUnix)
+	s.addDealEscrowFundsLocked(intent, req.Amount, toppedUpAt)
 	s.data.StorageFeePool.PermanentFundBalance = saturatingAdd(s.data.StorageFeePool.PermanentFundBalance, req.Amount)
 	intent.PermanentFundBalance = fund.Balance
 	intent.PermanentFundPaid = fund.Paid
-	intent.UpdatedAt = payload.ToppedUpAtUnix
+	intent.UpdatedAt = toppedUpAt
 	return nil
 }
 

@@ -532,8 +532,12 @@ func transactionRequiresSignature(txType string) bool {
 	switch txType {
 	case "create_intent", "batch_commit", "finalize_deal", "settle_intent",
 		"permanent_fund_topup", "renew_deal", "terminate_deal",
-		"set_access_policy", "delegate_stake", "undelegate_stake":
+		"set_access_policy", "delegate_stake", "undelegate_stake",
+		"governance_create_proposal", "governance_cast_vote", "governance_execute_proposal":
 		return true
+	// bridge_out, bridge_in_claim, bridge_set_config use their own
+	// payload-level signatures (user / relayer / governance operator)
+	// verified by applyBridge*Locked — no envelope signature needed.
 	}
 	return false
 }
@@ -600,6 +604,20 @@ func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction
 			tx.NonceProtected == normalized.NonceProtected &&
 			tx.AgentKeyID == normalized.AgentKeyID &&
 			tx.AgentNonce == normalized.AgentNonce
+	case "bridge_out":
+		return wire.NormalizeAddress(tx.From) == normalized.From &&
+			tx.Fee == normalized.Fee &&
+			tx.Nonce == normalized.Nonce &&
+			tx.NonceProtected == normalized.NonceProtected
+	case "bridge_in_claim":
+		return tx.Nonce == normalized.Nonce &&
+			tx.NonceProtected == normalized.NonceProtected
+	case "bridge_set_config":
+		return true
+	case "governance_create_proposal", "governance_cast_vote", "governance_execute_proposal":
+		return wire.NormalizeAddress(tx.From) == normalized.From &&
+			tx.Nonce == normalized.Nonce &&
+			tx.NonceProtected == normalized.NonceProtected
 	default:
 		return true
 	}
@@ -1142,6 +1160,48 @@ func enrichTransactionMetadata(tx *wire.Transaction) {
 			return
 		}
 		enrichAccountMetadata(tx, payload.Request.Owner, payload.Request.AccountNonce, 0)
+	case "bridge_out":
+		var req wire.BridgeOutRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(req.Sender)
+		tx.Fee = req.Fee
+		tx.NonceProtected = true
+		tx.Nonce = req.Nonce
+	case "bridge_in_claim":
+		var req wire.BridgeInClaimRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return
+		}
+		tx.NonceProtected = true
+		tx.Nonce = req.Nonce
+	case "bridge_set_config":
+		// Governance operations do not use account nonces.
+	case "governance_create_proposal":
+		var payload governanceCreateProposalTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(payload.Request.Proposer)
+		tx.Nonce = payload.Request.Nonce
+		tx.NonceProtected = true
+	case "governance_cast_vote":
+		var payload governanceCastVoteTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(payload.Request.Voter)
+		tx.Nonce = payload.Request.Nonce
+		tx.NonceProtected = true
+	case "governance_execute_proposal":
+		var payload governanceExecuteProposalTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(payload.Request.Executor)
+		tx.Nonce = payload.Request.Nonce
+		tx.NonceProtected = true
 	}
 }
 

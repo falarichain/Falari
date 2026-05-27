@@ -55,6 +55,7 @@ func testGovernanceProposalReq(t *testing.T, store *Store, address string, privK
 	t.Helper()
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:      address,
+		ChainID:       store.data.ChainID,
 		IntentID:      "intent_lifecycle",
 		Action:        "freeze",
 		ReasonHash:    "reason_hash_test",
@@ -74,6 +75,7 @@ func testGovernanceVoteReq(t *testing.T, store *Store, proposalID, address strin
 		ProposalID:    proposalID,
 		Voter:         address,
 		Approve:       approve,
+		ChainID:       store.data.ChainID,
 		Nonce:         store.data.OperatorNonces[normalizeGovernanceOperator(address)],
 		CreatedAtUnix: time.Now().Unix(),
 	}
@@ -88,6 +90,7 @@ func testGovernanceExecuteReq(t *testing.T, store *Store, proposalID, address st
 	req := wire.ExecuteGovernanceProposalRequest{
 		ProposalID:    proposalID,
 		Executor:      address,
+		ChainID:       store.data.ChainID,
 		Nonce:         store.data.OperatorNonces[normalizeGovernanceOperator(address)],
 		CreatedAtUnix: time.Now().Unix(),
 	}
@@ -121,6 +124,7 @@ func TestCreateGovernanceProposalInvalidSignature(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:      addresses[0],
+		ChainID:       store.data.ChainID,
 		IntentID:      "intent_lifecycle",
 		Action:        "freeze",
 		ReasonHash:    "reason_hash",
@@ -143,6 +147,7 @@ func TestCreateGovernanceProposalUnauthorizedOperator(t *testing.T) {
 	fakeAddr := wire.AccountAddress(&fakePriv.PublicKey)
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:      fakeAddr,
+		ChainID:       store.data.ChainID,
 		IntentID:      "intent_lifecycle",
 		Action:        "freeze",
 		ReasonHash:    "reason_hash",
@@ -279,6 +284,7 @@ func TestExecuteGovernanceProposalUnauthorizedExecutor(t *testing.T) {
 	execReq := wire.ExecuteGovernanceProposalRequest{
 		ProposalID:    proposalResp.Proposal.ProposalID,
 		Executor:      fakeAddr,
+		ChainID:       store.data.ChainID,
 		CreatedAtUnix: time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceExecute(&execReq, fakePriv); err != nil {
@@ -306,6 +312,7 @@ func TestExecuteGovernanceProposalNoSignature(t *testing.T) {
 	_, err = store.ExecuteGovernanceProposal(wire.ExecuteGovernanceProposalRequest{
 		ProposalID: proposalResp.Proposal.ProposalID,
 		Executor:   addresses[0],
+		ChainID:    store.data.ChainID,
 	})
 	if err == nil {
 		t.Fatal("expected error for missing signature")
@@ -325,6 +332,7 @@ func TestGovernanceNonceReplayProtection(t *testing.T) {
 	// Try to replay the same proposal (nonce 0 is now stale).
 	replayReq := wire.CreateGovernanceProposalRequest{
 		Proposer:      addresses[0],
+		ChainID:       store.data.ChainID,
 		IntentID:      "intent_lifecycle",
 		Action:        "freeze",
 		ReasonHash:    "reason_hash_test",
@@ -365,6 +373,7 @@ func TestGovernanceVoteNonceReplayProtection(t *testing.T) {
 		ProposalID:    proposalResp.Proposal.ProposalID,
 		Voter:         addresses[1],
 		Approve:       true,
+		ChainID:       store.data.ChainID,
 		Nonce:         0, // stale
 		CreatedAtUnix: time.Now().Unix(),
 	}
@@ -391,6 +400,7 @@ func TestCancelGovernanceProposal(t *testing.T) {
 
 	cancelReq := wire.CreateGovernanceProposalRequest{
 		Proposer:      addresses[0],
+		ChainID:       store.data.ChainID,
 		IntentID:      "intent_lifecycle",
 		Action:        "freeze",
 		ReasonHash:    "reason_hash_test",
@@ -434,6 +444,7 @@ func TestAddOperatorViaProposal(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:          addresses[0],
+		ChainID:           store.data.ChainID,
 		Action:            "add_operator",
 		ReasonHash:        "add_new_member",
 		TargetPublicKey:   newPubHex,
@@ -490,6 +501,7 @@ func TestRemoveOperatorViaProposal(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:       addresses[0],
+		ChainID:        store.data.ChainID,
 		Action:         "remove_operator",
 		ReasonHash:     "remove_member",
 		TargetOperator: targetAddr,
@@ -533,6 +545,7 @@ func TestUpdateOperatorViaProposal(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:          addresses[0],
+		ChainID:           store.data.ChainID,
 		Action:            "update_operator",
 		ReasonHash:        "update_permissions",
 		TargetOperator:    targetAddr,
@@ -578,6 +591,7 @@ func TestUpdateOperatorKeyRotationRejected(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:          addresses[0],
+		ChainID:           store.data.ChainID,
 		Action:            "update_operator",
 		ReasonHash:        "rotate_key",
 		TargetOperator:    targetAddr,
@@ -600,6 +614,7 @@ func TestAddOperatorDuplicateRejected(t *testing.T) {
 	existingPubHex := testEncodeHex(ethcrypto.FromECDSAPub(&privKeys[1].PublicKey))
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:        addresses[0],
+		ChainID:         store.data.ChainID,
 		Action:          "add_operator",
 		ReasonHash:      "duplicate",
 		TargetPublicKey: existingPubHex,
@@ -642,6 +657,7 @@ func TestUpdateConfigViaProposal(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:                         addresses[0],
+		ChainID:                          store.data.ChainID,
 		Action:                           "update_config",
 		ReasonHash:                       "adjust_thresholds",
 		TargetDataModerationThresholdNum: 2,
@@ -699,6 +715,7 @@ func TestUpdateMiningParamsViaProposal(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:                     addresses[0],
+		ChainID:                      store.data.ChainID,
 		Action:                       "update_mining_params",
 		ReasonHash:                   "adjust_mining_params",
 		TargetStorageReleaseRateBPS:  5,
@@ -746,6 +763,7 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:                  addresses[0],
+		ChainID:                   store.data.ChainID,
 		Action:                    "update_mining_params",
 		ReasonHash:                "tune_proof_weight",
 		TargetProofScoreWeightBPS: 4000,
@@ -792,6 +810,7 @@ func TestUpdateMiningParamsRequiresNonZeroField(t *testing.T) {
 
 	req := wire.CreateGovernanceProposalRequest{
 		Proposer:      addresses[0],
+		ChainID:       store.data.ChainID,
 		Action:        "update_mining_params",
 		ReasonHash:    "empty_change",
 		Nonce:         store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],

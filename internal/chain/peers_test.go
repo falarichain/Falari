@@ -19,7 +19,7 @@ func TestPeerNetworkSyncOnceFetchesMissingBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(producer.ChainID(), producer.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestLibP2PGossipBroadcastsBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-libp2p", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(producer.ChainID(), producer.AccountNonce(identity.OwnerAddress), "http://validator-libp2p", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestAcceptedTransactionIsAppliedWhenProduced(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-b", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(producer.ChainID(), producer.AccountNonce(identity.OwnerAddress), "http://validator-b", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

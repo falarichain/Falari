@@ -124,6 +124,13 @@ type State struct {
 	OperatorMap map[string]string `json:"operator_map,omitempty"`
 	// Unbonding entries for staking withdrawal delays.
 	UnbondingEntries map[string]wire.UnbondingEntry `json:"unbonding_entries,omitempty"`
+
+	// Bridge state.
+	BridgeConfig           *wire.BridgeConfig                     `json:"bridge_config,omitempty"`
+	BridgeOutbounds        map[uint64]*wire.BridgeOutbound        `json:"bridge_outbounds,omitempty"`
+	BridgeInbounds         map[string]*wire.BridgeInbound         `json:"bridge_inbounds,omitempty"`
+	BridgeConsumedMessages map[string]*wire.BridgeConsumedMessage `json:"bridge_consumed_messages,omitempty"`
+	BridgeOutboundNonce    uint64                                 `json:"bridge_outbound_nonce,omitempty"`
 }
 
 type Store struct {
@@ -314,52 +321,55 @@ func newStateFromGenesis(doc wire.GenesisDoc) State {
 
 func newState() State {
 	return State{
-		ChainID:               "falari-dev",
-		Intents:               map[string]*Intent{},
-		Deals:                 map[string]string{},
-		Challenges:            map[string]wire.StorageChallenge{},
-		Proofs:                map[string]wire.StorageProof{},
-		Epochs:                map[string]wire.ProofEpoch{},
-		Miners:                map[string]wire.MinerStats{},
-		Accounts:              map[string]wire.Account{},
-		Blocks:                []wire.Block{},
-		PendingTxs:            []wire.Transaction{},
-		Receipts:              map[string]wire.TransactionReceipt{},
-		Validators:            map[string]wire.ValidatorInfo{},
-		ConsensusValidators:   map[string]bool{},
-		ValidatorEvidence:     map[string]wire.ValidatorEvidence{},
-		ConsensusVotes:        map[string]wire.ConsensusVote{},
-		FeeMarket:             defaultFeeMarket(),
-		FeeChargedTxs:         map[string]bool{},
-		StoragePricing:        defaultStoragePricing(),
-		DealEscrows:           map[string]wire.DealEscrow{},
-		PermanentStorageFunds: map[string]wire.PermanentStorageFund{},
-		RepairTasks:           map[string]wire.RepairTask{},
-		ProviderRecords:       map[string]wire.StorageProviderRecord{},
-		DeleteTasks:           map[string]wire.DeleteTask{},
-		GovernanceAudits:      []wire.GovernanceAuditRecord{},
-		GovernanceOperators:   map[string]wire.GovernanceOperator{},
-		OperatorNonces:        map[string]uint64{},
-		DeleteReceipts:        map[string]wire.DeleteReceipt{},
-		RetrievalReceipts:     map[string]wire.RetrievalReceipt{},
-		RetrievalWindows:      map[string]wire.RetrievalRateWindow{},
-		MiningRewardVestings:  map[string]wire.MiningRewardVestingBucket{},
-		StakeDelegations:      map[string]wire.StakeDelegation{},
-		DealHealths:           map[string]wire.DealHealth{},
-		ProposerTurns:         map[string]*wire.ValidatorTurnWindow{},
-		Collections:           map[string]wire.DataCollection{},
-		DataRecords:           map[string]wire.DataRecord{},
-		CollectionRecords:     map[string][]string{},
-		KeyEnvelopes:          map[string]wire.KeyEnvelope{},
-		ShareRecords:          map[string]wire.ShareRecord{},
-		AppliedTxs:            map[string]bool{},
-		ConfirmedTxs:          map[string]bool{},
-		AgentKeys:             map[string]*wire.AgentKey{},
-		GovernanceProposals:   map[string]wire.GovernanceProposal{},
-		GovernanceVotes:       map[string][]wire.GovernanceVote{},
-		MultisigWallets:       map[string]*wire.MultisigWallet{},
-		OperatorMap:           map[string]string{},
-		UnbondingEntries:      map[string]wire.UnbondingEntry{},
+		ChainID:                "falari-dev",
+		Intents:                map[string]*Intent{},
+		Deals:                  map[string]string{},
+		Challenges:             map[string]wire.StorageChallenge{},
+		Proofs:                 map[string]wire.StorageProof{},
+		Epochs:                 map[string]wire.ProofEpoch{},
+		Miners:                 map[string]wire.MinerStats{},
+		Accounts:               map[string]wire.Account{},
+		Blocks:                 []wire.Block{},
+		PendingTxs:             []wire.Transaction{},
+		Receipts:               map[string]wire.TransactionReceipt{},
+		Validators:             map[string]wire.ValidatorInfo{},
+		ConsensusValidators:    map[string]bool{},
+		ValidatorEvidence:      map[string]wire.ValidatorEvidence{},
+		ConsensusVotes:         map[string]wire.ConsensusVote{},
+		FeeMarket:              defaultFeeMarket(),
+		FeeChargedTxs:          map[string]bool{},
+		StoragePricing:         defaultStoragePricing(),
+		DealEscrows:            map[string]wire.DealEscrow{},
+		PermanentStorageFunds:  map[string]wire.PermanentStorageFund{},
+		RepairTasks:            map[string]wire.RepairTask{},
+		ProviderRecords:        map[string]wire.StorageProviderRecord{},
+		DeleteTasks:            map[string]wire.DeleteTask{},
+		GovernanceAudits:       []wire.GovernanceAuditRecord{},
+		GovernanceOperators:    map[string]wire.GovernanceOperator{},
+		OperatorNonces:         map[string]uint64{},
+		DeleteReceipts:         map[string]wire.DeleteReceipt{},
+		RetrievalReceipts:      map[string]wire.RetrievalReceipt{},
+		RetrievalWindows:       map[string]wire.RetrievalRateWindow{},
+		MiningRewardVestings:   map[string]wire.MiningRewardVestingBucket{},
+		StakeDelegations:       map[string]wire.StakeDelegation{},
+		DealHealths:            map[string]wire.DealHealth{},
+		ProposerTurns:          map[string]*wire.ValidatorTurnWindow{},
+		Collections:            map[string]wire.DataCollection{},
+		DataRecords:            map[string]wire.DataRecord{},
+		CollectionRecords:      map[string][]string{},
+		KeyEnvelopes:           map[string]wire.KeyEnvelope{},
+		ShareRecords:           map[string]wire.ShareRecord{},
+		AppliedTxs:             map[string]bool{},
+		ConfirmedTxs:           map[string]bool{},
+		AgentKeys:              map[string]*wire.AgentKey{},
+		GovernanceProposals:    map[string]wire.GovernanceProposal{},
+		GovernanceVotes:        map[string][]wire.GovernanceVote{},
+		MultisigWallets:        map[string]*wire.MultisigWallet{},
+		OperatorMap:            map[string]string{},
+		UnbondingEntries:       map[string]wire.UnbondingEntry{},
+		BridgeOutbounds:        map[uint64]*wire.BridgeOutbound{},
+		BridgeInbounds:         map[string]*wire.BridgeInbound{},
+		BridgeConsumedMessages: map[string]*wire.BridgeConsumedMessage{},
 		// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 		DataModerationThresholdNum: 1,
 		DataModerationThresholdDen: 3,
@@ -593,6 +603,17 @@ func normalizeState(state *State) {
 		normalizeIntentLifecycle(intent)
 	}
 	rebuildStorageFeePoolForState(state)
+
+	// Bridge state initialization.
+	if state.BridgeOutbounds == nil {
+		state.BridgeOutbounds = map[uint64]*wire.BridgeOutbound{}
+	}
+	if state.BridgeInbounds == nil {
+		state.BridgeInbounds = map[string]*wire.BridgeInbound{}
+	}
+	if state.BridgeConsumedMessages == nil {
+		state.BridgeConsumedMessages = map[string]*wire.BridgeConsumedMessage{}
+	}
 }
 
 func defaultFeeMarket() wire.FeeMarket {
@@ -844,11 +865,13 @@ func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitRespon
 	intent.CommittedSegments = committedSegments(intent)
 	intent.UploadedSize = committedSize(intent)
 	intent.Status = wire.StatusPartial
-	intent.UpdatedAt = time.Now().Unix()
+	committedAt := time.Now().Unix()
+	intent.UpdatedAt = committedAt
 	s.recordTxLocked("batch_commit", req.User, batchCommitTxPayload{
 		Request:           req,
 		CommittedSegments: intent.CommittedSegments,
 		UploadedSize:      intent.UploadedSize,
+		CommittedAtUnix:   committedAt,
 	})
 
 	if err := s.saveLocked(); err != nil {
@@ -916,11 +939,12 @@ func (s *Store) Finalize(req wire.FinalizeRequest) (wire.FinalizeResponse, error
 	s.activateDealEscrowLocked(intent, now)
 	s.data.Deals[dealID] = intent.IntentID
 	s.recordTxLocked("finalize_deal", req.User, finalizeDealTxPayload{
-		Request:      req,
-		IntentID:     intent.IntentID,
-		DealID:       dealID,
-		User:         req.User,
-		ManifestRoot: req.ManifestRoot,
+		Request:         req,
+		IntentID:        intent.IntentID,
+		DealID:          dealID,
+		User:            req.User,
+		ManifestRoot:    req.ManifestRoot,
+		FinalizedAtUnix: now,
 	})
 
 	if err := s.saveLocked(); err != nil {
@@ -1496,9 +1520,7 @@ func (s *Store) Transfer(req wire.TransferRequest) (wire.TransferResponse, error
 }
 
 func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMinerResponse, error) {
-	if err := wire.VerifyMinerRegistration(req); err != nil {
-		return wire.RegisterMinerResponse{}, err
-	}
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
 	if req.MinerAddress == "" || req.PublicKey == "" || req.Endpoint == "" {
 		return wire.RegisterMinerResponse{}, errors.New("miner address, public key, and endpoint are required")
 	}
@@ -1512,7 +1534,25 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Verify chain_id, nonce, and signature — prevents replay of old registration signatures.
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyMinerRegistration(req)
+	}); err != nil {
+		return wire.RegisterMinerResponse{}, err
+	}
+
 	existing := s.minerStatsLocked(req.MinerAddress)
+
+	// State guard: reject re-registration of miners in non-active terminal/penalty states.
+	switch existing.Status {
+	case wire.MinerStatusExiting:
+		return wire.RegisterMinerResponse{}, errors.New("miner is currently exiting; wait for exit to complete")
+	case wire.MinerStatusExited:
+		return wire.RegisterMinerResponse{}, errors.New("miner has exited; registration replay is not allowed")
+	case wire.MinerStatusJailed:
+		return wire.RegisterMinerResponse{}, errors.New("miner is jailed; must go through unjailing process")
+	}
+
 	account := s.accountLocked(req.MinerAddress)
 	if req.Stake > existing.Stake {
 		additionalStake := req.Stake - existing.Stake
@@ -1535,27 +1575,29 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 	if existing.RegisteredAtUnix == 0 {
 		existing.RegisteredAtUnix = time.Now().Unix()
 	}
+	s.consumeAccountNonceLocked(req.MinerAddress)
 	s.data.Accounts[req.MinerAddress] = account
 	s.data.Miners[req.MinerAddress] = existing
-	s.recordTxLocked("register_miner", req.MinerAddress, map[string]any{
-		"miner_address":  req.MinerAddress,
-		"public_key":     req.PublicKey,
-		"endpoint":       req.Endpoint,
-		"capacity_bytes": req.CapacityBytes,
-		"stake":          req.Stake,
-		"signature":      req.Signature,
-	})
+	s.recordTxLocked("register_miner", req.MinerAddress, req)
 	if err := s.saveLocked(); err != nil {
 		return wire.RegisterMinerResponse{}, err
 	}
 	return wire.RegisterMinerResponse{Miner: existing}, nil
 }
 
-func (s *Store) DeregisterMiner(minerAddress string) error {
+func (s *Store) DeregisterMiner(req wire.DeregisterMinerRequest) error {
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stats := s.minerStatsLocked(minerAddress)
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyDeregisterMiner(req)
+	}); err != nil {
+		return err
+	}
+
+	stats := s.minerStatsLocked(req.MinerAddress)
 	if stats.Status == wire.MinerStatusExited {
 		return errors.New("miner already exited")
 	}
@@ -1563,9 +1605,10 @@ func (s *Store) DeregisterMiner(minerAddress string) error {
 		stats.Status = wire.MinerStatusExiting
 		stats.ExitedAtUnix = time.Now().Add(7 * 24 * time.Hour).Unix()
 	}
-	s.data.Miners[minerAddress] = stats
-	s.recordTxLocked("deregister_miner", minerAddress, map[string]any{
-		"miner_address": minerAddress,
+	s.consumeAccountNonceLocked(req.MinerAddress)
+	s.data.Miners[req.MinerAddress] = stats
+	s.recordTxLocked("deregister_miner", req.MinerAddress, map[string]any{
+		"miner_address": req.MinerAddress,
 		"exited_at":     stats.ExitedAtUnix,
 	})
 	return s.saveLocked()
@@ -1577,10 +1620,21 @@ func (s *Store) SetOperatorIdentity(identity *OperatorIdentity) {
 	s.operatorIdentity = identity
 }
 
+// ChainID returns the chain identifier. Safe for concurrent use.
+func (s *Store) ChainID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.ChainID
+}
+
+// AccountNonce returns the current nonce for the given address. Safe for concurrent use.
+func (s *Store) AccountNonce(address string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.accountLocked(wire.NormalizeAddress(address)).Nonce
+}
+
 func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.RegisterValidatorResponse, error) {
-	if err := wire.VerifyValidatorRegistration(req); err != nil {
-		return wire.RegisterValidatorResponse{}, err
-	}
 	if req.OwnerAddress == "" || req.OperatorAddress == "" || req.OperatorPublicKey == "" {
 		return wire.RegisterValidatorResponse{}, errors.New("owner address, operator address and operator public key are required")
 	}
@@ -1590,6 +1644,13 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Verify chain_id, nonce, and both owner + operator signatures.
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.OwnerAddress, req.Nonce, func() error {
+		return wire.VerifyValidatorRegistration(req)
+	}); err != nil {
+		return wire.RegisterValidatorResponse{}, err
+	}
+
 	// Check operator uniqueness: operator must not already be mapped.
 	if s.data.OperatorMap == nil {
 		s.data.OperatorMap = map[string]string{}
@@ -1597,10 +1658,21 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 	if existingOwner, mapped := s.data.OperatorMap[req.OperatorAddress]; mapped {
 		return wire.RegisterValidatorResponse{}, errors.New("operator address already registered for owner " + existingOwner)
 	}
-	// Check owner uniqueness: owner must not already have a validator.
+	// Check owner uniqueness and state guard against replay.
 	existing := s.validatorLocked(req.OwnerAddress)
-	if existing.OwnerAddress != "" && existing.Status == wire.ValidatorStatusActive {
-		return wire.RegisterValidatorResponse{}, errors.New("owner already has an active validator")
+	if existing.OwnerAddress != "" {
+		switch existing.Status {
+		case wire.ValidatorStatusActive:
+			return wire.RegisterValidatorResponse{}, errors.New("owner already has an active validator")
+		case wire.ValidatorStatusExiting:
+			return wire.RegisterValidatorResponse{}, errors.New("validator is currently exiting; wait for exit to complete")
+		case wire.ValidatorStatusExited:
+			return wire.RegisterValidatorResponse{}, errors.New("validator has exited; registration replay is not allowed")
+		case wire.ValidatorStatusSlashed:
+			return wire.RegisterValidatorResponse{}, errors.New("validator has been slashed; must go through governance recovery")
+		case wire.ValidatorStatusJailed:
+			return wire.RegisterValidatorResponse{}, errors.New("validator is jailed; must go through unjailing process")
+		}
 	}
 
 	account := s.accountLocked(req.OwnerAddress)
@@ -1626,31 +1698,31 @@ func (s *Store) RegisterValidator(req wire.RegisterValidatorRequest) (wire.Regis
 	if existing.RegisteredAtUnix == 0 {
 		existing.RegisteredAtUnix = time.Now().Unix()
 	}
+	s.consumeAccountNonceLocked(req.OwnerAddress)
 	s.data.Accounts[account.Address] = account
 	s.data.Validators[req.OwnerAddress] = existing
 	s.data.ConsensusValidators[req.OwnerAddress] = true
 	s.data.OperatorMap[req.OperatorAddress] = req.OwnerAddress
-	s.recordTxLocked("register_validator", req.OwnerAddress, map[string]any{
-		"owner_address":      req.OwnerAddress,
-		"operator_address":   req.OperatorAddress,
-		"operator_public_key": req.OperatorPublicKey,
-		"endpoint":           req.Endpoint,
-		"stake":              req.Stake,
-		"signature":          req.Signature,
-		"operator_signature": req.OperatorSignature,
-	})
+	s.recordTxLocked("register_validator", req.OwnerAddress, req)
 	if err := s.saveLocked(); err != nil {
 		return wire.RegisterValidatorResponse{}, err
 	}
 	return wire.RegisterValidatorResponse{Validator: existing}, nil
 }
 
-func (s *Store) DeregisterValidator(ownerAddress string) error {
+func (s *Store) DeregisterValidator(req wire.DeregisterValidatorRequest) error {
+	req.ValidatorAddress = wire.NormalizeAddress(req.ValidatorAddress)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	ownerAddress = wire.NormalizeAddress(ownerAddress)
-	validator, ok := s.data.Validators[ownerAddress]
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.ValidatorAddress, req.Nonce, func() error {
+		return wire.VerifyDeregisterValidator(req)
+	}); err != nil {
+		return err
+	}
+
+	validator, ok := s.data.Validators[req.ValidatorAddress]
 	if !ok {
 		return errors.New("validator not found")
 	}
@@ -1660,15 +1732,16 @@ func (s *Store) DeregisterValidator(ownerAddress string) error {
 	if validator.Status != wire.ValidatorStatusExiting {
 		validator.Status = wire.ValidatorStatusExiting
 	}
-	delete(s.data.ConsensusValidators, ownerAddress)
+	s.consumeAccountNonceLocked(req.ValidatorAddress)
+	delete(s.data.ConsensusValidators, req.ValidatorAddress)
 	// Remove operator mapping.
 	if validator.OperatorAddress != "" {
 		delete(s.data.OperatorMap, validator.OperatorAddress)
 	}
-	s.data.Validators[ownerAddress] = validator
-	s.recordTxLocked("deregister_validator", ownerAddress, map[string]any{
-		"owner_address": ownerAddress,
-		"status":        validator.Status,
+	s.data.Validators[req.ValidatorAddress] = validator
+	s.recordTxLocked("deregister_validator", req.ValidatorAddress, map[string]any{
+		"validator_address": req.ValidatorAddress,
+		"status":            validator.Status,
 	})
 	return s.saveLocked()
 }

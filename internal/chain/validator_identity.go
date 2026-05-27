@@ -61,7 +61,7 @@ func (o *OperatorIdentity) OperatorPublicKeyHex() string {
 	return wire.EncodeHex(ethcrypto.CompressPubkey(o.OperatorPublicKey))
 }
 
-func (o *OperatorIdentity) RegistrationRequest(endpoint string, stake uint64, commissionRateBPS uint64) (wire.RegisterValidatorRequest, error) {
+func (o *OperatorIdentity) RegistrationRequest(chainID string, nonce uint64, endpoint string, stake uint64, commissionRateBPS uint64) (wire.RegisterValidatorRequest, error) {
 	req := wire.RegisterValidatorRequest{
 		OwnerAddress:      o.OwnerAddress,
 		OperatorAddress:   o.OperatorAddress,
@@ -73,7 +73,7 @@ func (o *OperatorIdentity) RegistrationRequest(endpoint string, stake uint64, co
 	if o.ownerPrivateKey == nil {
 		return req, errors.New("OWNER_PRIVATE_KEY is required for initial registration; set it in the environment")
 	}
-	if err := wire.SignValidatorRegistration(&req, o.ownerPrivateKey); err != nil {
+	if err := wire.SignValidatorRegistration(&req, chainID, nonce, o.ownerPrivateKey); err != nil {
 		return wire.RegisterValidatorRequest{}, err
 	}
 	if err := wire.SignOperatorProofOfPossession(&req, o.OperatorPrivateKey); err != nil {

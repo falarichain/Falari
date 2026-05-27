@@ -8,21 +8,27 @@ import (
 )
 
 type validatorRegistrationPayload struct {
+	Action            string `json:"action"`
 	OwnerAddress      string `json:"owner_address"`
 	OperatorAddress   string `json:"operator_address"`
 	OperatorPublicKey string `json:"operator_public_key"`
 	CommissionRateBPS uint64 `json:"commission_rate_bps,omitempty"`
+	ChainID           string `json:"chain_id"`
 	Endpoint          string `json:"endpoint,omitempty"`
+	Nonce             uint64 `json:"nonce"`
 	Stake             uint64 `json:"stake"`
 }
 
 func ValidatorRegistrationPayload(req RegisterValidatorRequest) ([]byte, error) {
 	payload := validatorRegistrationPayload{
+		Action:            "register_validator",
 		OwnerAddress:      req.OwnerAddress,
 		OperatorAddress:   req.OperatorAddress,
 		OperatorPublicKey: req.OperatorPublicKey,
 		CommissionRateBPS: req.CommissionRateBPS,
+		ChainID:           req.ChainID,
 		Endpoint:          req.Endpoint,
+		Nonce:             req.Nonce,
 		Stake:             req.Stake,
 	}
 	return json.Marshal(payload)
@@ -30,13 +36,18 @@ func ValidatorRegistrationPayload(req RegisterValidatorRequest) ([]byte, error) 
 
 // SignValidatorRegistration signs the registration with the Owner key.
 // The operator proof-of-possession must be set separately via SignOperatorProofOfPossession.
-func SignValidatorRegistration(req *RegisterValidatorRequest, ownerKey *ecdsa.PrivateKey) error {
+func SignValidatorRegistration(req *RegisterValidatorRequest, chainID string, nonce uint64, ownerKey *ecdsa.PrivateKey) error {
+	req.ChainID = chainID
+	req.Nonce = nonce
 	payload := validatorRegistrationPayload{
+		Action:            "register_validator",
 		OwnerAddress:      req.OwnerAddress,
 		OperatorAddress:   req.OperatorAddress,
 		OperatorPublicKey: req.OperatorPublicKey,
 		CommissionRateBPS: req.CommissionRateBPS,
+		ChainID:           req.ChainID,
 		Endpoint:          req.Endpoint,
+		Nonce:             req.Nonce,
 		Stake:             req.Stake,
 	}
 	sig, _, err := signInfraPayload(payload, ownerKey)
@@ -51,11 +62,14 @@ func SignValidatorRegistration(req *RegisterValidatorRequest, ownerKey *ecdsa.Pr
 // to prove possession of the operator private key.
 func SignOperatorProofOfPossession(req *RegisterValidatorRequest, operatorKey *ecdsa.PrivateKey) error {
 	payload := validatorRegistrationPayload{
+		Action:            "register_validator",
 		OwnerAddress:      req.OwnerAddress,
 		OperatorAddress:   req.OperatorAddress,
 		OperatorPublicKey: req.OperatorPublicKey,
 		CommissionRateBPS: req.CommissionRateBPS,
+		ChainID:           req.ChainID,
 		Endpoint:          req.Endpoint,
+		Nonce:             req.Nonce,
 		Stake:             req.Stake,
 	}
 	sig, pub, err := signInfraPayload(payload, operatorKey)
@@ -71,11 +85,14 @@ func SignOperatorProofOfPossession(req *RegisterValidatorRequest, operatorKey *e
 
 func VerifyValidatorRegistration(req RegisterValidatorRequest) error {
 	payload := validatorRegistrationPayload{
+		Action:            "register_validator",
 		OwnerAddress:      req.OwnerAddress,
 		OperatorAddress:   req.OperatorAddress,
 		OperatorPublicKey: req.OperatorPublicKey,
 		CommissionRateBPS: req.CommissionRateBPS,
+		ChainID:           req.ChainID,
 		Endpoint:          req.Endpoint,
+		Nonce:             req.Nonce,
 		Stake:             req.Stake,
 	}
 	if err := verifyInfraSignature(req.OwnerAddress, req.Signature, payload); err != nil {
@@ -89,6 +106,7 @@ type rotateOperatorPayload struct {
 	OwnerAddress         string `json:"owner_address"`
 	NewOperatorAddress   string `json:"new_operator_address"`
 	NewOperatorPublicKey string `json:"new_operator_public_key"`
+	ChainID              string `json:"chain_id"`
 	Nonce                uint64 `json:"nonce"`
 }
 
@@ -98,6 +116,7 @@ func SignRotateOperator(req *RotateOperatorRequest, ownerKey *ecdsa.PrivateKey) 
 		OwnerAddress:         req.OwnerAddress,
 		NewOperatorAddress:   req.NewOperatorAddress,
 		NewOperatorPublicKey: req.NewOperatorPublicKey,
+		ChainID:              req.ChainID,
 		Nonce:                req.Nonce,
 	}
 	sig, _, err := signInfraPayload(payload, ownerKey)
@@ -114,6 +133,7 @@ func SignRotateOperatorProofOfPossession(req *RotateOperatorRequest, newOperator
 		OwnerAddress:         req.OwnerAddress,
 		NewOperatorAddress:   req.NewOperatorAddress,
 		NewOperatorPublicKey: req.NewOperatorPublicKey,
+		ChainID:              req.ChainID,
 		Nonce:                req.Nonce,
 	}
 	sig, pub, err := signInfraPayload(payload, newOperatorKey)
@@ -133,12 +153,45 @@ func VerifyRotateOperator(req RotateOperatorRequest) error {
 		OwnerAddress:         req.OwnerAddress,
 		NewOperatorAddress:   req.NewOperatorAddress,
 		NewOperatorPublicKey: req.NewOperatorPublicKey,
+		ChainID:              req.ChainID,
 		Nonce:                req.Nonce,
 	}
 	if err := verifyInfraSignature(req.OwnerAddress, req.Signature, payload); err != nil {
 		return err
 	}
 	return verifyInfraSignature(req.NewOperatorAddress, req.OperatorSignature, payload)
+}
+
+type deregisterValidatorPayload struct {
+	Action           string `json:"action"`
+	ChainID          string `json:"chain_id"`
+	ValidatorAddress string `json:"validator_address"`
+	Nonce            uint64 `json:"nonce"`
+}
+
+func SignDeregisterValidator(req *DeregisterValidatorRequest, privateKey *ecdsa.PrivateKey) error {
+	payload := deregisterValidatorPayload{
+		Action:           "deregister_validator",
+		ChainID:          req.ChainID,
+		ValidatorAddress: req.ValidatorAddress,
+		Nonce:            req.Nonce,
+	}
+	sig, _, err := signInfraPayload(payload, privateKey)
+	if err != nil {
+		return err
+	}
+	req.Signature = sig
+	return nil
+}
+
+func VerifyDeregisterValidator(req DeregisterValidatorRequest) error {
+	payload := deregisterValidatorPayload{
+		Action:           "deregister_validator",
+		ChainID:          req.ChainID,
+		ValidatorAddress: req.ValidatorAddress,
+		Nonce:            req.Nonce,
+	}
+	return verifyInfraSignature(req.ValidatorAddress, req.Signature, payload)
 }
 
 type blockSigningPayload struct {

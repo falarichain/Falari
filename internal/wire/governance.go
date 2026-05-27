@@ -13,6 +13,7 @@ import (
 // The Signature field is excluded — it is what we are computing.
 type governanceProposalSigningPayload struct {
 	Proposer                          string   `json:"proposer"`
+	ChainID                           string   `json:"chain_id"`
 	IntentID                          string   `json:"intent_id,omitempty"`
 	Action                            string   `json:"action"`
 	ReasonHash                        string   `json:"reason_hash"`
@@ -69,6 +70,7 @@ type governanceVoteSigningPayload struct {
 	ProposalID    string `json:"proposal_id"`
 	Voter         string `json:"voter"`
 	Approve       bool   `json:"approve"`
+	ChainID       string `json:"chain_id"`
 	Nonce         uint64 `json:"nonce"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
 }
@@ -77,6 +79,7 @@ type governanceVoteSigningPayload struct {
 func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, error) {
 	payload := governanceProposalSigningPayload{
 		Proposer:                          req.Proposer,
+		ChainID:                           req.ChainID,
 		IntentID:                          req.IntentID,
 		Action:                            req.Action,
 		ReasonHash:                        req.ReasonHash,
@@ -215,6 +218,7 @@ func GovernanceVotePayload(req CastGovernanceVoteRequest) ([]byte, error) {
 		ProposalID:    req.ProposalID,
 		Voter:         req.Voter,
 		Approve:       req.Approve,
+		ChainID:       req.ChainID,
 		Nonce:         req.Nonce,
 		CreatedAtUnix: req.CreatedAtUnix,
 	}
@@ -290,6 +294,7 @@ func VerifyGovernanceVote(req CastGovernanceVoteRequest, expectedAddress string)
 type governanceExecuteSigningPayload struct {
 	ProposalID    string `json:"proposal_id"`
 	Executor      string `json:"executor"`
+	ChainID       string `json:"chain_id"`
 	Nonce         uint64 `json:"nonce"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
 }
@@ -299,6 +304,7 @@ func GovernanceExecuteHash(req ExecuteGovernanceProposalRequest) ([]byte, error)
 	p, err := json.Marshal(governanceExecuteSigningPayload{
 		ProposalID:    req.ProposalID,
 		Executor:      NormalizeAddress(req.Executor),
+		ChainID:       req.ChainID,
 		Nonce:         req.Nonce,
 		CreatedAtUnix: req.CreatedAtUnix,
 	})

@@ -25,12 +25,14 @@ type multisigExecSigningPayload struct {
 	Wallet      string `json:"wallet"`
 	Operation   string `json:"operation"`
 	PayloadHash string `json:"payload_hash"`
+	ChainID     string `json:"chain_id"`
 	Nonce       uint64 `json:"nonce"`
 	Fee         uint64 `json:"fee"`
 }
 
 // multisigCreateSigningPayload is the canonical payload for multisig creation signatures.
 type multisigCreateSigningPayload struct {
+	ChainID   string   `json:"chain_id"`
 	Signers   []string `json:"signers"`
 	Threshold uint8    `json:"threshold"`
 	Salt      uint64   `json:"salt"`
@@ -98,6 +100,7 @@ func MultisigCreateHash(req MultisigCreateRequest) ([]byte, error) {
 		sorted[i] = NormalizeAddress(s)
 	}
 	payload, err := json.Marshal(multisigCreateSigningPayload{
+		ChainID:   req.ChainID,
 		Signers:   sorted,
 		Threshold: req.Threshold,
 		Salt:      req.Salt,
@@ -158,6 +161,7 @@ func MultisigExecHash(req MultisigExecRequest) ([]byte, error) {
 		Wallet:      NormalizeAddress(req.Wallet),
 		Operation:   req.Operation,
 		PayloadHash: encodeHex(innerHash),
+		ChainID:     req.ChainID,
 		Nonce:       req.Nonce,
 		Fee:         req.Fee,
 	})

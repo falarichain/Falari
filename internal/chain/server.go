@@ -108,6 +108,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /multisig", s.listMultisigWallets)
 	mux.HandleFunc("GET /multisig/{address}", s.getMultisigWallet)
 	mux.HandleFunc("POST /multisig/exec", s.multisigExec)
+	// Bridge routes
+	mux.HandleFunc("GET /bridge/config", s.getBridgeConfig)
+	mux.HandleFunc("GET /bridge/outbound/{nonce}", s.getBridgeOutbound)
+	mux.HandleFunc("GET /bridge/inbound/{hash}", s.getBridgeInbound)
+	mux.HandleFunc("GET /bridge/pending", s.getBridgePending)
+	mux.HandleFunc("POST /bridge/out", s.bridgeOut)
+	mux.HandleFunc("POST /bridge/claim", s.bridgeClaim)
+	mux.HandleFunc("POST /bridge/admin/config", s.requireOperator(s.bridgeAdminConfig))
 	return mux
 }
 
@@ -561,13 +569,11 @@ func (s *Server) registerMiner(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deregisterMiner(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		MinerAddress string `json:"miner_address"`
-	}
+	var req wire.DeregisterMinerRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.store.DeregisterMiner(req.MinerAddress); err != nil {
+	if err := s.store.DeregisterMiner(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -588,13 +594,11 @@ func (s *Server) registerValidator(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deregisterValidator(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ValidatorAddress string `json:"validator_address"`
-	}
+	var req wire.DeregisterValidatorRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.store.DeregisterValidator(req.ValidatorAddress); err != nil {
+	if err := s.store.DeregisterValidator(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

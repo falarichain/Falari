@@ -43,6 +43,11 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 		return wire.CreateGovernanceProposalResponse{}, errors.New("proposer is required")
 	}
 
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("governance proposal chain_id mismatch")
+	}
+
 	// Look up proposer in governance operators.
 	operator, ok := s.data.GovernanceOperators[proposer]
 	if !ok || !operator.Enabled {
@@ -117,7 +122,22 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 		return wire.CreateGovernanceProposalResponse{}, errors.New("failed to generate proposal id")
 	}
 
-	proposal := wire.GovernanceProposal{
+	proposal := governanceProposalFromRequest(req, proposer, proposalID, req.CreatedAtUnix)
+
+	s.data.GovernanceProposals[proposalID] = proposal
+	s.data.GovernanceVotes[proposalID] = []wire.GovernanceVote{}
+	s.data.OperatorNonces[proposer] = expectedNonce + 1
+
+	resp := wire.CreateGovernanceProposalResponse{Proposal: proposal}
+	s.recordTxLocked("governance_create_proposal", proposer, governanceCreateProposalTxPayload{Request: req, Response: resp})
+	if err := s.saveLocked(); err != nil {
+		return wire.CreateGovernanceProposalResponse{}, err
+	}
+	return resp, nil
+}
+
+func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, proposer, proposalID string, createdAtUnix int64) wire.GovernanceProposal {
+	return wire.GovernanceProposal{
 		ProposalID:                        proposalID,
 		Proposer:                          proposer,
 		ProposerSignature:                 req.Signature,
@@ -168,21 +188,11 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 		TargetMaxBlockTxs:                 req.TargetMaxBlockTxs,
 		TargetMaxTxBytes:                  req.TargetMaxTxBytes,
 		TargetMaxStorageTxBytes:           req.TargetMaxStorageTxBytes,
+		ChainID:                           req.ChainID,
 		ProposerNonce:                     req.Nonce,
 		Status:                            wire.GovProposalPending,
-		CreatedAtUnix:                     now,
+		CreatedAtUnix:                     createdAtUnix,
 	}
-
-	s.data.GovernanceProposals[proposalID] = proposal
-	s.data.GovernanceVotes[proposalID] = []wire.GovernanceVote{}
-	s.data.OperatorNonces[proposer] = expectedNonce + 1
-
-	resp := wire.CreateGovernanceProposalResponse{Proposal: proposal}
-	s.recordTxLocked("governance_create_proposal", proposer, governanceCreateProposalTxPayload{Request: req, Response: resp})
-	if err := s.saveLocked(); err != nil {
-		return wire.CreateGovernanceProposalResponse{}, err
-	}
-	return resp, nil
 }
 
 // CastGovernanceVote casts a signed vote on a pending governance proposal.
@@ -193,6 +203,11 @@ func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.Cas
 	voter := normalizeGovernanceOperator(req.Voter)
 	if voter == "" {
 		return wire.CastGovernanceVoteResponse{}, errors.New("voter is required")
+	}
+
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return wire.CastGovernanceVoteResponse{}, errors.New("governance vote chain_id mismatch")
 	}
 
 	// Look up proposal.
@@ -252,7 +267,7 @@ func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.Cas
 		Voter:          voter,
 		VoterSignature: req.Signature,
 		Approve:        req.Approve,
-		CreatedAtUnix:  now,
+		CreatedAtUnix:  req.CreatedAtUnix,
 	}
 	s.data.GovernanceVotes[req.ProposalID] = append(s.data.GovernanceVotes[req.ProposalID], vote)
 	s.data.OperatorNonces[voter] = expectedVoteNonce + 1
@@ -267,7 +282,7 @@ func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.Cas
 	executed := false
 	if approveCount >= threshold {
 		// Threshold met — auto-execute.
-		execResult, err := s.executeGovernanceProposalLocked(proposal, now)
+		execResult, err := s.executeGovernanceProposalLocked(proposal, req.CreatedAtUnix)
 		if err == nil {
 			executed = true
 			_ = execResult // recorded via governanceDealActionLocked
@@ -302,6 +317,11 @@ func (s *Store) ExecuteGovernanceProposal(req wire.ExecuteGovernanceProposalRequ
 	executor := normalizeGovernanceOperator(req.Executor)
 	if executor == "" {
 		return wire.ExecuteGovernanceProposalResponse{}, errors.New("executor is required")
+	}
+
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return wire.ExecuteGovernanceProposalResponse{}, errors.New("governance execute chain_id mismatch")
 	}
 
 	// Verify executor is an enabled governance operator.
@@ -351,7 +371,7 @@ func (s *Store) ExecuteGovernanceProposal(req wire.ExecuteGovernanceProposalRequ
 		return wire.ExecuteGovernanceProposalResponse{}, errors.New("proposal signature re-verification failed: " + err.Error())
 	}
 
-	execResult, err := s.executeGovernanceProposalLocked(proposal, now)
+	execResult, err := s.executeGovernanceProposalLocked(proposal, req.CreatedAtUnix)
 	if err != nil {
 		return wire.ExecuteGovernanceProposalResponse{}, err
 	}
@@ -969,6 +989,7 @@ func nonZeroOr(value uint64, fallback uint64) uint64 {
 func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernanceProposalRequest {
 	return wire.CreateGovernanceProposalRequest{
 		Proposer:                          p.Proposer,
+		ChainID:                           p.ChainID,
 		IntentID:                          p.IntentID,
 		Action:                            p.Action,
 		ReasonHash:                        p.ReasonHash,

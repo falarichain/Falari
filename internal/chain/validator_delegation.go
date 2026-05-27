@@ -380,7 +380,7 @@ func (s *Store) RotateOperator(req wire.RotateOperatorRequest) (wire.RotateOpera
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.verifyAccountRequestLocked("", req.OwnerAddress, req.Nonce, func() error {
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.OwnerAddress, req.Nonce, func() error {
 		return wire.VerifyRotateOperator(req)
 	}); err != nil {
 		return wire.RotateOperatorResponse{}, err

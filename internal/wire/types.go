@@ -41,6 +41,12 @@ const (
 	GovProposalCancelled = "cancelled"
 )
 
+const (
+	BridgeStatusLocked   = "locked"
+	BridgeStatusPending  = "pending"
+	BridgeStatusClaimed  = "claimed"
+)
+
 type StoragePolicy struct {
 	Class          string `json:"class"`
 	Duration       int64  `json:"duration"`
@@ -1156,6 +1162,8 @@ type RegisterMinerRequest struct {
 	Endpoint      string `json:"endpoint"`
 	CapacityBytes uint64 `json:"capacity_bytes"`
 	Stake         uint64 `json:"stake"`
+	ChainID       string `json:"chain_id"`
+	Nonce         uint64 `json:"nonce,omitempty"`
 	Signature     string `json:"signature"`
 }
 
@@ -1430,6 +1438,8 @@ type RegisterValidatorRequest struct {
 	Endpoint          string `json:"endpoint,omitempty"`
 	Stake             uint64 `json:"stake"`
 	CommissionRateBPS uint64 `json:"commission_rate_bps,omitempty"`
+	ChainID           string `json:"chain_id"`
+	Nonce             uint64 `json:"nonce,omitempty"`
 	Signature         string `json:"signature"`
 	OperatorSignature string `json:"operator_signature"`
 }
@@ -1451,10 +1461,25 @@ type UnbondingEntry struct {
 	MaturesAtUnix int64  `json:"matures_at_unix"`
 }
 
+type DeregisterMinerRequest struct {
+	MinerAddress string `json:"miner_address"`
+	ChainID      string `json:"chain_id"`
+	Nonce        uint64 `json:"nonce,omitempty"`
+	Signature    string `json:"signature"`
+}
+
+type DeregisterValidatorRequest struct {
+	ValidatorAddress string `json:"validator_address"`
+	ChainID          string `json:"chain_id"`
+	Nonce            uint64 `json:"nonce,omitempty"`
+	Signature        string `json:"signature"`
+}
+
 type RotateOperatorRequest struct {
 	OwnerAddress         string `json:"owner_address"`
 	NewOperatorAddress   string `json:"new_operator_address"`
 	NewOperatorPublicKey string `json:"new_operator_public_key"`
+	ChainID              string `json:"chain_id"`
 	Nonce                uint64 `json:"nonce,omitempty"`
 	Signature            string `json:"signature"`
 	OperatorSignature    string `json:"operator_signature"`
@@ -1709,6 +1734,7 @@ type GovernanceProposal struct {
 	TargetMaxBlockTxs                 uint64 `json:"target_max_block_txs,omitempty"`
 	TargetMaxTxBytes                  uint64 `json:"target_max_tx_bytes,omitempty"`
 	TargetMaxStorageTxBytes           uint64 `json:"target_max_storage_tx_bytes,omitempty"`
+	ChainID                           string `json:"chain_id"`
 	ProposerNonce                     uint64 `json:"proposer_nonce"`
 	Status                            string `json:"status"`
 	CreatedAtUnix                     int64  `json:"created_at_unix"`
@@ -1726,6 +1752,7 @@ type GovernanceVote struct {
 // CreateGovernanceProposalRequest is the HTTP request to create a governance proposal.
 type CreateGovernanceProposalRequest struct {
 	Proposer                         string   `json:"proposer"`
+	ChainID                          string   `json:"chain_id"`
 	IntentID                         string   `json:"intent_id,omitempty"`
 	Action                           string   `json:"action"`
 	ReasonHash                       string   `json:"reason_hash"`
@@ -1789,6 +1816,7 @@ type CastGovernanceVoteRequest struct {
 	ProposalID    string `json:"proposal_id"`
 	Voter         string `json:"voter"`
 	Approve       bool   `json:"approve"`
+	ChainID       string `json:"chain_id"`
 	Signature     string `json:"signature"`
 	Nonce         uint64 `json:"nonce"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
@@ -1807,6 +1835,7 @@ type CastGovernanceVoteResponse struct {
 type ExecuteGovernanceProposalRequest struct {
 	ProposalID    string `json:"proposal_id"`
 	Executor      string `json:"executor"`
+	ChainID       string `json:"chain_id"`
 	Signature     string `json:"signature"`
 	Nonce         uint64 `json:"nonce"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
@@ -1849,6 +1878,7 @@ type MultisigWallet struct {
 
 // MultisigCreateRequest is the HTTP request to register a multisig wallet.
 type MultisigCreateRequest struct {
+	ChainID   string   `json:"chain_id"`
 	Signers   []string `json:"signers"`
 	Threshold uint8    `json:"threshold"`
 	Salt      uint64   `json:"salt"`
@@ -1860,6 +1890,7 @@ type MultisigExecRequest struct {
 	Wallet     string              `json:"wallet"`
 	Operation  string              `json:"operation"`
 	Payload    json.RawMessage     `json:"payload"`
+	ChainID    string              `json:"chain_id"`
 	Nonce      uint64              `json:"nonce"`
 	Fee        uint64              `json:"fee"`
 	Signatures []MultisigSignature `json:"signatures"`
@@ -1892,4 +1923,94 @@ type MultisigWalletInfo struct {
 // MultisigWalletListResponse is the response for listing multisig wallets.
 type MultisigWalletListResponse struct {
 	Wallets []MultisigWalletInfo `json:"wallets"`
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Bridge
+// ──────────────────────────────────────────────────────────────────────────────
+
+// BridgeConfig holds the global bridge configuration (singleton).
+type BridgeConfig struct {
+	Enabled           bool   `json:"enabled"`
+	BridgePoolAddress string `json:"bridge_pool_address"`
+	RelayerAddress    string `json:"relayer_address"`
+	MinBridgeAmount   uint64 `json:"min_bridge_amount"`
+	DelaySeconds      int64  `json:"delay_seconds"`
+	MaxAmountPerDay   uint64 `json:"max_amount_per_day"`
+	CurrentDayAmount  uint64 `json:"current_day_amount"`
+	DayStartUnix     int64  `json:"day_start_unix"`
+	Paused            bool   `json:"paused"`
+}
+
+// BridgeOutbound records a user's bridge-out request (Falari → ETH).
+type BridgeOutbound struct {
+	Nonce          uint64 `json:"nonce"`
+	TargetChainID  string `json:"target_chain_id"`
+	Sender         string `json:"sender"`
+	Recipient      string `json:"recipient"`
+	Amount         uint64 `json:"amount"`
+	Fee            uint64 `json:"fee"`
+	Status         string `json:"status"`
+	LockedAtUnix   int64  `json:"locked_at_unix"`
+	ClaimableAfter int64  `json:"claimable_after"`
+}
+
+// BridgeInbound records a bridge-in request originating from ETH (ETH → Falari).
+type BridgeInbound struct {
+	Nonce             uint64 `json:"nonce"`
+	SourceTxHash      string `json:"source_tx_hash"`
+	SourceBlockNumber uint64 `json:"source_block_number"`
+	Recipient         string `json:"recipient"`
+	Amount            uint64 `json:"amount"`
+	Status            string `json:"status"`
+	DetectedAtUnix    int64  `json:"detected_at_unix"`
+	ClaimableAfter    int64  `json:"claimable_after"`
+}
+
+// BridgeConsumedMessage prevents replay of bridge claims.
+type BridgeConsumedMessage struct {
+	MessageHash    string `json:"message_hash"`
+	ConsumedAtUnix int64  `json:"consumed_at_unix"`
+}
+
+// BridgeOutRequest is the user-submitted payload for a bridge_out transaction.
+type BridgeOutRequest struct {
+	Sender        string `json:"sender"`
+	Recipient     string `json:"recipient"`
+	TargetChainID string `json:"target_chain_id"`
+	Amount        uint64 `json:"amount"`
+	Fee           uint64 `json:"fee"`
+	Nonce         uint64 `json:"nonce"`
+	Signature     string `json:"signature"`
+	PublicKey     string `json:"public_key"`
+}
+
+// BridgeInClaimRequest is the relayer-submitted payload for a bridge_in_claim transaction.
+type BridgeInClaimRequest struct {
+	SourceTxHash      string `json:"source_tx_hash"`
+	SourceBlockNumber uint64 `json:"source_block_number"`
+	Recipient         string `json:"recipient"`
+	Amount            uint64 `json:"amount"`
+	Nonce             uint64 `json:"nonce"`
+	Direction         string `json:"direction"` // "in" (ETH→Falari unlock)
+	Signature         string `json:"signature"`
+	PublicKey         string `json:"public_key"`
+}
+
+// BridgeSetConfigRequest is the governance payload to update bridge configuration.
+type BridgeSetConfigRequest struct {
+	Action          string  `json:"action"` // "update_config" / "pause" / "unpause"
+	RelayerAddress  string  `json:"relayer_address,omitempty"`
+	MinBridgeAmount *uint64 `json:"min_bridge_amount,omitempty"`
+	MaxAmountPerDay *uint64 `json:"max_amount_per_day,omitempty"`
+	DelaySeconds    *int64  `json:"delay_seconds,omitempty"`
+	Timestamp       int64   `json:"timestamp"` // unix seconds, replay protection
+	Signature       string  `json:"signature"`
+	PublicKey       string  `json:"public_key"`
+}
+
+// BridgePendingResponse is returned by GET /bridge/pending.
+type BridgePendingResponse struct {
+	Outbounds []*BridgeOutbound `json:"outbounds"`
+	Inbounds  []*BridgeInbound  `json:"inbounds"`
 }

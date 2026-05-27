@@ -137,6 +137,16 @@ func (s *Store) estimateRenewalPriceLocked(intent *Intent, duration int64) uint6
 func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 	req := payload.Request
 	req.User = wire.NormalizeAddress(req.User)
+	if req.IntentID == "" || req.User == "" {
+		return errors.New("intent id and user are required")
+	}
+	if req.Duration <= 0 {
+		return errors.New("renewal duration must be positive")
+	}
+	renewedAt := payload.RenewedAtUnix
+	if renewedAt <= 0 {
+		return errors.New("replay renew deal missing renewal timestamp")
+	}
 	intent, ok := s.data.Intents[req.IntentID]
 	if !ok {
 		return errors.New("intent not found")
@@ -149,7 +159,49 @@ func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 	}); err != nil {
 		return err
 	}
-	price := payload.Response.PaidAmount
+	intentView := *intent
+	if !intentView.Policy.Renewable {
+		return errors.New("deal is not renewable")
+	}
+	normalizeIntentLifecycleAt(&intentView, renewedAt)
+	graceUsed := false
+	switch intentView.Status {
+	case wire.StatusFinalized:
+		if intentView.ExpiresAtUnix <= renewedAt {
+			graceExpiresAt := intentView.ExpiresAtUnix + defaultGracePeriod
+			if renewedAt > graceExpiresAt {
+				return errors.New("grace period has expired")
+			}
+			intentView.Status = wire.StatusFinalized
+			intentView.StorageStatus = wire.StorageStatusActive
+			graceUsed = true
+		}
+	case wire.StatusExpired:
+		graceExpiresAt := intentView.ExpiresAtUnix + defaultGracePeriod
+		if renewedAt > graceExpiresAt {
+			return errors.New("grace period has expired")
+		}
+		intentView.Status = wire.StatusFinalized
+		intentView.StorageStatus = wire.StorageStatusActive
+		graceUsed = true
+	default:
+		return errors.New("intent is not in a renewable state")
+	}
+	if intentView.Policy.Duration > 0 && req.Duration > intentView.Policy.Duration {
+		return errors.New("renewal duration exceeds policy duration")
+	}
+	price := s.estimateRenewalPriceLocked(&intentView, req.Duration)
+	expectedResp := wire.RenewDealResponse{
+		IntentID:      intentView.IntentID,
+		Status:        intentView.Status,
+		ExpiresAtUnix: renewedAt + req.Duration,
+		NewLockedFee:  saturatingAdd(intentView.LockedFee, price),
+		PaidAmount:    price,
+		GraceUsed:     graceUsed,
+	}
+	if payload.Response != expectedResp {
+		return errors.New("replay renew deal response mismatch")
+	}
 	account := s.accountLocked(req.User)
 	if account.Balance < price {
 		return errors.New("replay renew deal has insufficient balance")
@@ -159,13 +211,13 @@ func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 	account.Balance -= price
 	account.LockedStorage = saturatingAdd(account.LockedStorage, price)
 	s.data.Accounts[req.User] = account
-	intent.LockedFee = payload.Response.NewLockedFee
-	intent.Status = payload.Response.Status
+	intent.LockedFee = expectedResp.NewLockedFee
+	intent.Status = expectedResp.Status
 	intent.StorageStatus = wire.StorageStatusActive
-	intent.ExpiresAtUnix = payload.Response.ExpiresAtUnix
+	intent.ExpiresAtUnix = expectedResp.ExpiresAtUnix
 	intent.Policy.Duration = req.Duration
-	intent.UpdatedAt = payload.RenewedAtUnix
-	s.addDealEscrowFundsLocked(intent, price, payload.RenewedAtUnix)
+	intent.UpdatedAt = renewedAt
+	s.addDealEscrowFundsLocked(intent, price, renewedAt)
 	return nil
 }
 

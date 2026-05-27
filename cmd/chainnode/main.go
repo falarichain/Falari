@@ -172,7 +172,7 @@ func main() {
 	if endpoint == "" {
 		endpoint = "http://localhost" + *addr
 	}
-	registration, err := identity.RegistrationRequest(endpoint, *validatorStake, *validatorCommissionBPS)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), endpoint, *validatorStake, *validatorCommissionBPS)
 	if err != nil {
 		log.Fatalf("sign validator registration: %v", err)
 	}

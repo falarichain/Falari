@@ -21,7 +21,7 @@ func TestTransactionsArePackedIntoBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://localhost:8080", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://localhost:8080", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestRegisterValidatorRequiresMinimumStake(t *testing.T) {
 	}
 	identity := testOperatorIdentity(t)
 	fundValidatorForTest(t, store, identity, MinValidatorStake)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake-1, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake-1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestBlockProductionCapsTransactionCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestAcceptPeerBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(producer.ChainID(), producer.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestMempoolProducesContiguousNonceOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestFeeMarketAdjustsAfterBlocks(t *testing.T) {
 	}
 	store.data.FeeMarket.TargetBlockTxs = 1
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestAcceptBlockRejectsInvalidFinalityCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(producer.ChainID(), producer.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +722,7 @@ func TestAcceptBlockRejectsNonCanonicalFinalityVotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(producer.ChainID(), producer.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +757,7 @@ func TestLevelDBStorePersistsState(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -829,7 +829,7 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := testOperatorIdentity(t)
-	registration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	registration, err := identity.RegistrationRequest(producer.ChainID(), producer.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,7 +845,7 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedFinalizedDealForEpochTest(peer)
-	peerRegistration, err := identity.RegistrationRequest("http://validator-a", MinValidatorStake, 0)
+	peerRegistration, err := identity.RegistrationRequest(peer.ChainID(), peer.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

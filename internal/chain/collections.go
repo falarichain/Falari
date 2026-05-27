@@ -2,6 +2,7 @@ package chain
 
 import (
 	"errors"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -238,22 +239,35 @@ func (s *Store) applyDataCollectionLocked(collection wire.DataCollection) {
 }
 
 func (s *Store) applyDataCollectionPayloadLocked(payload createCollectionTxPayload) error {
-	if payload.Request.Signature == "" {
+	req := payload.Request
+	req.User = wire.NormalizeAddress(req.User)
+	if req.Signature == "" {
 		return errors.New("replay collection owner signature is required")
 	}
-	if err := s.authorizeCreateCollectionLocked(&payload.Request); err != nil {
-		return err
+	if payload.Collection.CollectionID == "" {
+		return errors.New("replay collection missing id")
 	}
-	if payload.Collection.User != wire.NormalizeAddress(payload.Request.User) {
+	if payload.Collection.User != req.User {
 		return errors.New("replay collection user mismatch")
 	}
+	if payload.Collection.Name != req.Name ||
+		payload.Collection.Description != req.Description ||
+		!reflect.DeepEqual(payload.Collection.Metadata, copyStringMap(req.Metadata)) {
+		return errors.New("replay collection payload mismatch")
+	}
+	if payload.Collection.CreatedAtUnix <= 0 || payload.Collection.UpdatedAtUnix != payload.Collection.CreatedAtUnix {
+		return errors.New("replay collection timestamp mismatch")
+	}
 	if payload.PublicKey != "" {
-		if !strings.EqualFold(payload.PublicKey, payload.Request.PublicKey) {
+		if !strings.EqualFold(payload.PublicKey, req.PublicKey) {
 			return errors.New("replay collection public key mismatch")
 		}
 	}
-	if payload.Nonce != payload.Request.Nonce {
+	if payload.Nonce != req.Nonce {
 		return errors.New("replay collection nonce mismatch")
+	}
+	if err := s.authorizeCreateCollectionLocked(&req); err != nil {
+		return err
 	}
 	s.applyDataCollectionLocked(payload.Collection)
 	return nil
@@ -268,22 +282,67 @@ func (s *Store) applyDataRecordLocked(record wire.DataRecord) {
 }
 
 func (s *Store) applyDataRecordPayloadLocked(payload appendRecordTxPayload) error {
-	if payload.Request.Signature == "" {
+	req := payload.Request
+	req.User = wire.NormalizeAddress(req.User)
+	if req.Signature == "" {
 		return errors.New("replay record owner signature is required")
 	}
-	if err := s.authorizeAppendRecordLocked(&payload.Request); err != nil {
-		return err
+	collection, ok := s.data.Collections[req.CollectionID]
+	if !ok {
+		return errors.New("replay record collection not found")
 	}
-	if payload.Record.User != wire.NormalizeAddress(payload.Request.User) {
+	if req.User == "" {
+		req.User = collection.User
+	}
+	if payload.Record.RecordID == "" {
+		return errors.New("replay record missing id")
+	}
+	if payload.Record.User != req.User || payload.Record.User != collection.User {
 		return errors.New("replay record user mismatch")
 	}
+	intent, ok := s.data.Intents[req.IntentID]
+	if !ok {
+		return errors.New("replay record intent not found")
+	}
+	if intent.User != collection.User {
+		return errors.New("replay record intent user mismatch")
+	}
+	if intent.Status != wire.StatusFinalized {
+		return errors.New("replay record intent must be finalized")
+	}
+	if req.ParentRecord != "" {
+		parent, ok := s.data.DataRecords[req.ParentRecord]
+		if !ok {
+			return errors.New("replay record parent not found")
+		}
+		if parent.CollectionID != req.CollectionID {
+			return errors.New("replay record parent collection mismatch")
+		}
+	}
+	if payload.Record.CollectionID != req.CollectionID ||
+		payload.Record.IntentID != intent.IntentID ||
+		payload.Record.DealID != intent.DealID ||
+		payload.Record.ParentRecord != req.ParentRecord ||
+		payload.Record.Kind != req.Kind ||
+		payload.Record.Key != req.Key ||
+		payload.Record.FileRoot != intent.FileRoot ||
+		payload.Record.ManifestRoot != req.ManifestRoot ||
+		!reflect.DeepEqual(payload.Record.Metadata, copyStringMap(req.Metadata)) {
+		return errors.New("replay record payload mismatch")
+	}
+	if payload.Record.CreatedAtUnix <= 0 {
+		return errors.New("replay record timestamp mismatch")
+	}
 	if payload.PublicKey != "" {
-		if !strings.EqualFold(payload.PublicKey, payload.Request.PublicKey) {
+		if !strings.EqualFold(payload.PublicKey, req.PublicKey) {
 			return errors.New("replay record public key mismatch")
 		}
 	}
-	if payload.Nonce != payload.Request.Nonce {
+	if payload.Nonce != req.Nonce {
 		return errors.New("replay record nonce mismatch")
+	}
+	if err := s.authorizeAppendRecordLocked(&req); err != nil {
+		return err
 	}
 	s.applyDataRecordLocked(payload.Record)
 	return nil

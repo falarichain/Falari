@@ -51,6 +51,10 @@ func defaultAccessStatus(intent wire.IntentView) string {
 }
 
 func normalizeIntentLifecycle(intent *Intent) {
+	normalizeIntentLifecycleAt(intent, time.Now().Unix())
+}
+
+func normalizeIntentLifecycleAt(intent *Intent, now int64) {
 	if intent == nil {
 		return
 	}
@@ -75,7 +79,7 @@ func normalizeIntentLifecycle(intent *Intent) {
 	if intent.ExpiresAtUnix == 0 && intent.Status == wire.StatusFinalized && intent.Policy.Duration > 0 && intent.UpdatedAt > 0 {
 		intent.ExpiresAtUnix = intent.UpdatedAt + intent.Policy.Duration
 	}
-	expireGovernanceAction(intent, time.Now().Unix())
+	expireGovernanceAction(intent, now)
 }
 
 func expireGovernanceAction(intent *Intent, now int64) {
@@ -126,7 +130,7 @@ func (s *Store) terminateDealLocked(req wire.TerminateDealRequest, now int64) (w
 	if !ok {
 		return wire.TerminateDealResponse{}, errors.New("intent not found")
 	}
-	normalizeIntentLifecycle(intent)
+	normalizeIntentLifecycleAt(intent, now)
 	if req.User != "" && req.User != intent.User {
 		return wire.TerminateDealResponse{}, errors.New("intent user mismatch")
 	}
@@ -201,7 +205,7 @@ func (s *Store) setAccessPolicyLocked(req wire.SetAccessPolicyRequest, now int64
 	if !ok {
 		return wire.SetAccessPolicyResponse{}, errors.New("intent not found")
 	}
-	normalizeIntentLifecycle(intent)
+	normalizeIntentLifecycleAt(intent, now)
 	if req.User != "" && req.User != intent.User {
 		return wire.SetAccessPolicyResponse{}, errors.New("intent user mismatch")
 	}
@@ -233,7 +237,7 @@ func (s *Store) governanceDealActionLocked(req wire.GovernanceDealActionRequest,
 	if !ok {
 		return wire.GovernanceDealActionResponse{}, errors.New("intent not found")
 	}
-	normalizeIntentLifecycle(intent)
+	normalizeIntentLifecycleAt(intent, now)
 	switch req.Action {
 	case "freeze":
 		if req.ExpiresAtUnix <= now {
@@ -438,11 +442,15 @@ func (s *Store) GovernanceAudit(intentID string, operator string, action string)
 
 func (s *Store) submitDeleteReceiptLocked(req wire.SubmitDeleteReceiptRequest) (wire.SubmitDeleteReceiptResponse, error) {
 	receipt := req.Receipt
+	receiptTime := receipt.DeletedAtUnix
+	if receiptTime <= 0 {
+		return wire.SubmitDeleteReceiptResponse{}, errors.New("delete receipt timestamp is required")
+	}
 	intent, ok := s.data.Intents[receipt.IntentID]
 	if !ok {
 		return wire.SubmitDeleteReceiptResponse{}, errors.New("intent not found")
 	}
-	normalizeIntentLifecycle(intent)
+	normalizeIntentLifecycleAt(intent, receiptTime)
 	if intent.StorageStatus != wire.StorageStatusTerminating && intent.StorageStatus != wire.StorageStatusDeleted {
 		return wire.SubmitDeleteReceiptResponse{}, errors.New("intent is not terminating")
 	}
@@ -477,7 +485,7 @@ func (s *Store) submitDeleteReceiptLocked(req wire.SubmitDeleteReceiptRequest) (
 		intent.StorageStatus = wire.StorageStatusDeleted
 		intent.Status = wire.StatusDeleted
 	}
-	intent.UpdatedAt = time.Now().Unix()
+	intent.UpdatedAt = receiptTime
 	return wire.SubmitDeleteReceiptResponse{
 		IntentID:           receipt.IntentID,
 		ShardHash:          receipt.ShardHash,
@@ -501,7 +509,7 @@ func (s *Store) ensureDeleteTasksLocked(intent *Intent, reason string, now int64
 		taskID := deleteTaskID(intent.IntentID, receipt.ShardHash, receipt.MinerAddress)
 		task, exists := s.data.DeleteTasks[taskID]
 		if !exists {
-			activeReferences := s.activeShardReferencesLocked(intent.IntentID, receipt.ShardHash, receipt.MinerAddress)
+			activeReferences := s.activeShardReferencesLocked(intent.IntentID, receipt.ShardHash, receipt.MinerAddress, now)
 			task = wire.DeleteTask{
 				TaskID:           taskID,
 				IntentID:         intent.IntentID,
@@ -515,7 +523,7 @@ func (s *Store) ensureDeleteTasksLocked(intent *Intent, reason string, now int64
 				CreatedAtUnix:    now,
 			}
 		} else {
-			activeReferences := s.activeShardReferencesLocked(intent.IntentID, receipt.ShardHash, receipt.MinerAddress)
+			activeReferences := s.activeShardReferencesLocked(intent.IntentID, receipt.ShardHash, receipt.MinerAddress, now)
 			task.RetainPhysical = activeReferences > 0
 			task.ActiveReferences = activeReferences
 			if task.Reason == "" {
@@ -542,7 +550,7 @@ func (s *Store) ensureDeleteTasksLocked(intent *Intent, reason string, now int64
 	return tasks
 }
 
-func (s *Store) activeShardReferencesLocked(excludingIntentID string, shardHash string, minerAddress string) int {
+func (s *Store) activeShardReferencesLocked(excludingIntentID string, shardHash string, minerAddress string, now int64) int {
 	if shardHash == "" || minerAddress == "" {
 		return 0
 	}
@@ -551,7 +559,7 @@ func (s *Store) activeShardReferencesLocked(excludingIntentID string, shardHash 
 		if candidate == nil || candidate.IntentID == excludingIntentID {
 			continue
 		}
-		normalizeIntentLifecycle(candidate)
+		normalizeIntentLifecycleAt(candidate, now)
 		if candidate.Status != wire.StatusFinalized {
 			continue
 		}

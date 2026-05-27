@@ -47,6 +47,11 @@ func (s *Store) CreateMultisigWallet(req wire.MultisigCreateRequest) (wire.Multi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return wire.MultisigWallet{}, errors.New("multisig create chain_id mismatch")
+	}
+
 	if _, exists := s.data.MultisigWallets[address]; exists {
 		return wire.MultisigWallet{}, errors.New("multisig wallet already exists at this address")
 	}
@@ -94,6 +99,11 @@ func (s *Store) MultisigExec(req wire.MultisigExecRequest) (wire.MultisigExecRes
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Verify chain_id to prevent cross-chain replay.
+	if req.ChainID != s.data.ChainID {
+		return wire.MultisigExecResponse{}, errors.New("multisig exec chain_id mismatch")
+	}
 
 	wallet, ok := s.data.MultisigWallets[req.Wallet]
 	if !ok {
@@ -246,31 +256,54 @@ func (s *Store) applyCreateMultisigLocked(payload createMultisigTxPayload) error
 
 func (s *Store) applyMultisigExecLocked(payload multisigExecTxPayload) error {
 	req := payload.Request
-	resp := payload.Response
 
 	wallet, ok := s.data.MultisigWallets[req.Wallet]
 	if !ok {
 		return errors.New("replay multisig exec wallet not found")
 	}
 
-	// Execute the inner operation based on the recorded response.
+	// Re-verify wallet nonce — do NOT trust the block payload.
+	if req.Nonce != wallet.Nonce {
+		return errors.New("replay multisig exec nonce mismatch")
+	}
+
+	// Re-verify M-of-N signatures — a malicious block producer could
+	// fabricate a multisig_exec without the required co-signers.
+	if err := wire.VerifyMultisigExecSignatures(req, *wallet); err != nil {
+		return errors.New("replay multisig exec signature verification failed: " + err.Error())
+	}
+
+	// Fee check.
+	if req.Fee < s.data.FeeMarket.BaseFee {
+		return errors.New("replay multisig exec fee below base fee")
+	}
+
+	// Re-execute the inner operation from scratch — do NOT trust payload.Response.
 	switch req.Operation {
 	case "transfer":
-		if resp.TransferResponse == nil {
-			return errors.New("replay multisig exec transfer missing response")
-		}
 		var inner wire.MultisigTransferPayload
 		if err := json.Unmarshal(req.Payload, &inner); err != nil {
 			return err
 		}
+		inner.To = wire.NormalizeAddress(inner.To)
+		if inner.To == "" {
+			return errors.New("replay multisig exec transfer missing recipient")
+		}
+		if inner.Amount == 0 {
+			return errors.New("replay multisig exec transfer amount must be positive")
+		}
+
 		fromAccount := s.accountLocked(wallet.Address)
-		toAccount := s.accountLocked(inner.To)
 		total := inner.Amount + req.Fee
+		if total < inner.Amount {
+			return errors.New("replay multisig exec transfer total overflows")
+		}
 		if fromAccount.Balance < total {
 			return errors.New("replay multisig exec insufficient balance")
 		}
-		// Only deduct the transfer amount here; the fee is charged separately by chargeTransactionFeeLocked.
-		fromAccount.Balance -= inner.Amount
+
+		toAccount := s.accountLocked(inner.To)
+		fromAccount.Balance -= inner.Amount + req.Fee
 		toAccount.Balance += inner.Amount
 		s.data.Accounts[wallet.Address] = fromAccount
 		s.data.Accounts[inner.To] = toAccount

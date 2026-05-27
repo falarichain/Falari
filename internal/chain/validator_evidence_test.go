@@ -125,7 +125,7 @@ func registeredTestValidatorWithIdentity(t *testing.T, identity *OperatorIdentit
 	if err := store.CreditBalance(identity.OwnerAddress, stake); err != nil {
 		t.Fatal(err)
 	}
-	registration, err := identity.RegistrationRequest("http://localhost:8080", stake, 0)
+	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), "http://localhost:8080", stake, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
