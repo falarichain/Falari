@@ -767,6 +767,7 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 		Action:                    "update_mining_params",
 		ReasonHash:                "tune_proof_weight",
 		TargetProofScoreWeightBPS: 4000,
+		TargetStoredBytesWeightBPS: 3500,
 		Nonce:                     store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
 		CreatedAtUnix:             time.Now().Unix(),
 	}
@@ -797,8 +798,8 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 	if updatedParams.StorageReleaseRateBPS != origParams.StorageReleaseRateBPS {
 		t.Fatalf("storage release rate should be unchanged")
 	}
-	if updatedParams.StoredBytesWeightBPS != origParams.StoredBytesWeightBPS {
-		t.Fatalf("stored bytes weight should be unchanged")
+	if updatedParams.StoredBytesWeightBPS != 3500 {
+		t.Fatalf("expected stored bytes weight 3500, got %d", updatedParams.StoredBytesWeightBPS)
 	}
 	if updatedParams.StorageProofSamples != origParams.StorageProofSamples {
 		t.Fatalf("storage proof samples should be unchanged")

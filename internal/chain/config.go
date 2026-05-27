@@ -102,7 +102,7 @@ func DefaultMiningParams() MiningParams {
 		RepairPoolTakeoverBPS:       1000,
 		RepairPoolSubsidyBPS:        8000,
 		MinerDegradeThreshold:       3,
-		StorageProofSamples:         8,
+		StorageProofSamples:         16,
 		ValidatorCommissionBPS:      1000,
 		AvailabilityWindowSize:      7200,
 		AvailabilityThresholdBPS:    6000,
@@ -128,3 +128,17 @@ func (s *Store) miningParamsLocked() *MiningParams {
 	}
 	return s.data.MiningParams
 }
+
+// Governance parameter bounds — hard safety limits that cannot be exceeded
+// even through governance proposals.
+const (
+	maxAnnualReleaseRateBPS    = 5000  // 50%/year
+	minReleaseCoefficientBPS   = 1000  // 0.1x
+	maxReleaseCoefficientBPS   = 50000 // 5.0x
+	maxWeightBPSSum            = 10000 // sum of 4 weight BPS must not exceed 100%
+	minStorageProofSamples     = 1
+	maxStorageProofSamples     = 64
+	minMinerDegradeThreshold   = 1
+	maxMinerDegradeThreshold   = 100
+	maxConsensusValidatorsLimit = 100
+)

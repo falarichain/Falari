@@ -74,8 +74,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /delete-receipts", s.submitDeleteReceipt)
 	mux.HandleFunc("POST /retrieval-receipts", s.submitRetrievalReceipt)
 	mux.HandleFunc("GET /retrieval-receipts", s.listRetrievalReceipts)
-	mux.HandleFunc("POST /epochs", s.requireOperator(s.startEpoch))
-	mux.HandleFunc("POST /epochs/finalize", s.requireOperator(s.finalizeEpoch))
+	mux.HandleFunc("POST /epochs", s.startEpoch)
+	mux.HandleFunc("POST /epochs/finalize", s.finalizeEpoch)
 	mux.HandleFunc("GET /epochs/{id}/rewards", s.epochRewards)
 	mux.HandleFunc("POST /miners", s.registerMiner)
 	mux.HandleFunc("POST /miners/deregister", s.deregisterMiner)
@@ -510,6 +510,10 @@ func (s *Server) listRetrievalReceipts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startEpoch(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.validateOperatorHeaders(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
 	var req wire.StartEpochRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -523,6 +527,10 @@ func (s *Server) startEpoch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) finalizeEpoch(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.validateOperatorHeaders(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
 	var req wire.FinalizeEpochRequest
 	if !decodeJSON(w, r, &req) {
 		return

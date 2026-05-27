@@ -11,6 +11,7 @@ type receiptSigningPayload struct {
 	IntentID         string `json:"intent_id"`
 	MinerAddress     string `json:"miner_address"`
 	MinerPublicKey   string `json:"miner_public_key"`
+	MinerSeal        string `json:"miner_seal,omitempty"`
 	SectorCommitment string `json:"sector_commitment"`
 	SegmentID        int    `json:"segment_id"`
 	SegmentRoot      string `json:"segment_root"`
@@ -39,6 +40,7 @@ func ReceiptPayload(r MinerReceipt) ([]byte, error) {
 		ShardCID:         r.ShardCID,
 		ShardSize:        r.ShardSize,
 		SectorCommitment: r.SectorCommitment,
+		MinerSeal:        r.MinerSeal,
 		ExpiresAtUnix:    r.ExpiresAtUnix,
 	}
 	return json.Marshal(payload)
@@ -60,6 +62,7 @@ func SignReceipt(r *MinerReceipt, privateKey *ecdsa.PrivateKey) error {
 		ShardCID:         r.ShardCID,
 		ShardSize:        r.ShardSize,
 		SectorCommitment: r.SectorCommitment,
+		MinerSeal:        r.MinerSeal,
 		ExpiresAtUnix:    r.ExpiresAtUnix,
 	}
 	sig, _, err := signInfraPayload(payload, privateKey)
@@ -86,6 +89,7 @@ func VerifyReceipt(r MinerReceipt) error {
 		ShardCID:         r.ShardCID,
 		ShardSize:        r.ShardSize,
 		SectorCommitment: r.SectorCommitment,
+		MinerSeal:        r.MinerSeal,
 		ExpiresAtUnix:    r.ExpiresAtUnix,
 	}
 	return verifyInfraSignature(r.MinerAddress, r.Signature, payload)

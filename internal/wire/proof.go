@@ -18,6 +18,7 @@ type proofSigningPayload struct {
 	MerklePath         []string   `json:"merkle_path"`
 	MerklePaths        [][]string `json:"merkle_paths,omitempty"`
 	MinerAddress       string     `json:"miner_address"`
+	MinerSeal          string     `json:"miner_seal,omitempty"`
 	ProofHash          string     `json:"proof_hash"`
 	ProofType          string     `json:"proof_type,omitempty"`
 	SectorCommitment   string     `json:"sector_commitment"`
@@ -31,6 +32,7 @@ func ProofPayload(p StorageProof) ([]byte, error) {
 		ProofType:          p.ProofType,
 		ChallengeHash:      p.ChallengeHash,
 		MinerAddress:       p.MinerAddress,
+		MinerSeal:          p.MinerSeal,
 		ShardHash:          p.ShardHash,
 		ShardSize:          p.ShardSize,
 		SectorCommitment:   p.SectorCommitment,
@@ -54,6 +56,7 @@ func SignProof(p *StorageProof, privateKey *ecdsa.PrivateKey) error {
 		ProofType:          p.ProofType,
 		ChallengeHash:      p.ChallengeHash,
 		MinerAddress:       p.MinerAddress,
+		MinerSeal:          p.MinerSeal,
 		ShardHash:          p.ShardHash,
 		ShardSize:          p.ShardSize,
 		SectorCommitment:   p.SectorCommitment,
@@ -85,6 +88,7 @@ func VerifyProof(p StorageProof) error {
 		ProofType:          p.ProofType,
 		ChallengeHash:      p.ChallengeHash,
 		MinerAddress:       p.MinerAddress,
+		MinerSeal:          p.MinerSeal,
 		ShardHash:          p.ShardHash,
 		ShardSize:          p.ShardSize,
 		SectorCommitment:   p.SectorCommitment,

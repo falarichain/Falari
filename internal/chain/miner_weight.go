@@ -12,7 +12,7 @@ import (
 const DHTStalenessSeconds = 900 // 15 minutes (~3 epochs at 5 min)
 
 func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 {
-	if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited {
+	if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited || stats.Status == wire.MinerStatusJailed {
 		return 0
 	}
 
@@ -60,7 +60,7 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 
 	weight := storedBytes * proofScore / 10000 * params.StoredBytesWeightBPS / 10000
 	weight += storedBytes * availabilityScore / 10000 * params.AvailabilityWeightBPS / 10000
 	weight += storedBytes * decentralizationScore / 10000 * params.DecentralizationWeightBPS / 10000
-	weight += storedBytes * params.ProofScoreWeightBPS / 10000
+	weight += storedBytes * proofScore / 10000 * params.ProofScoreWeightBPS / 10000
 
 	// Retrieval obligation penalty: miners who don't participate in
 	// retrieval+DHT lose a portion of their weight.

@@ -211,6 +211,8 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	s.adjustFeeMarketAfterBlockLocked(block)
 	s.recordProposerTurnLocked(ownerAddr, true)
 	s.releaseValidatorPerBlockLocked(block.TimeUnix, ownerAddr)
+	s.releaseEpochRewardsLocked(block.TimeUnix)
+	s.releaseVestedMiningRewardsLocked(block.TimeUnix)
 	s.removePendingTxsLocked(block.Transactions)
 	if err := s.saveLocked(); err != nil {
 		return false, err
@@ -280,6 +282,8 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	s.adjustFeeMarketAfterBlockLocked(block)
 	s.recordProposerTurnLocked(s.operatorIdentity.OwnerAddress, true)
 	s.releaseValidatorPerBlockLocked(block.TimeUnix, s.operatorIdentity.OwnerAddress)
+	s.releaseEpochRewardsLocked(block.TimeUnix)
+	s.releaseVestedMiningRewardsLocked(block.TimeUnix)
 	s.removePendingTxsLocked(appliedTxs)
 	for _, tx := range appliedTxs {
 		s.data.ConfirmedTxs[tx.TxID] = true

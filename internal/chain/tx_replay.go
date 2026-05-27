@@ -56,6 +56,7 @@ type submitProofTxPayload struct {
 }
 
 type finalizeEpochTxPayload struct {
+	Request     wire.FinalizeEpochRequest  `json:"request,omitempty"`
 	Response    wire.FinalizeEpochResponse `json:"response"`
 	RepairTasks []wire.RepairTask          `json:"repair_tasks,omitempty"`
 }
@@ -1046,7 +1047,7 @@ func (s *Store) applyGovernanceCreateProposalLocked(payload governanceCreateProp
 			return errors.New("replay governance create: " + err.Error())
 		}
 	} else if isMiningParamsAction(req.Action) {
-		if err := validateMiningParamsChangeFields(req); err != nil {
+		if err := validateMiningParamsChangeFields(req, s.miningParamsLocked()); err != nil {
 			return errors.New("replay governance create: " + err.Error())
 		}
 	} else {
@@ -1335,6 +1336,35 @@ func (s *Store) applyGenerateChallengesLocked(payload generateChallengesTxPayloa
 }
 
 func (s *Store) applyStartEpochLocked(payload startEpochTxPayload) error {
+	// Operator auth verification (soft fork: legacy txs with empty operator pass).
+	if payload.Request.OperatorAddress != "" {
+		operatorAddr := normalizeGovernanceOperator(payload.Request.OperatorAddress)
+		if operatorAddr == "" {
+			return errors.New("replay start epoch: invalid operator address")
+		}
+		if payload.Request.ChainID != s.data.ChainID {
+			return errors.New("replay start epoch: chain_id mismatch")
+		}
+		operator, ok := s.data.GovernanceOperators[operatorAddr]
+		if !ok || !operator.Enabled {
+			return errors.New("replay start epoch: operator not authorized")
+		}
+		if err := s.validateGovernanceOperatorLocked(operatorAddr, "start_epoch"); err != nil {
+			return errors.New("replay start epoch: " + err.Error())
+		}
+		expectedNonce := s.data.OperatorNonces[operatorAddr]
+		if payload.Request.Nonce != expectedNonce {
+			return errors.New("replay start epoch: operator nonce mismatch")
+		}
+		if payload.Request.CreatedAtUnix == 0 {
+			return errors.New("replay start epoch: missing created_at_unix")
+		}
+		if err := wire.VerifyStartEpochRequest(payload.Request, operatorAddr); err != nil {
+			return errors.New("replay start epoch: " + err.Error())
+		}
+		s.data.OperatorNonces[operatorAddr] = expectedNonce + 1
+	}
+
 	if payload.Epoch.EpochID == "" {
 		return errors.New("replay start epoch missing epoch id")
 	}
@@ -1410,6 +1440,35 @@ func (s *Store) applySubmitProofLocked(payload submitProofTxPayload) error {
 }
 
 func (s *Store) applyFinalizeEpochLocked(payload finalizeEpochTxPayload) error {
+	// Operator auth verification (soft fork: legacy txs with empty operator pass).
+	if payload.Request.OperatorAddress != "" {
+		operatorAddr := normalizeGovernanceOperator(payload.Request.OperatorAddress)
+		if operatorAddr == "" {
+			return errors.New("replay finalize epoch: invalid operator address")
+		}
+		if payload.Request.ChainID != s.data.ChainID {
+			return errors.New("replay finalize epoch: chain_id mismatch")
+		}
+		operator, ok := s.data.GovernanceOperators[operatorAddr]
+		if !ok || !operator.Enabled {
+			return errors.New("replay finalize epoch: operator not authorized")
+		}
+		if err := s.validateGovernanceOperatorLocked(operatorAddr, "finalize_epoch"); err != nil {
+			return errors.New("replay finalize epoch: " + err.Error())
+		}
+		expectedNonce := s.data.OperatorNonces[operatorAddr]
+		if payload.Request.Nonce != expectedNonce {
+			return errors.New("replay finalize epoch: operator nonce mismatch")
+		}
+		if payload.Request.CreatedAtUnix == 0 {
+			return errors.New("replay finalize epoch: missing created_at_unix")
+		}
+		if err := wire.VerifyFinalizeEpochRequest(payload.Request, operatorAddr); err != nil {
+			return errors.New("replay finalize epoch: " + err.Error())
+		}
+		s.data.OperatorNonces[operatorAddr] = expectedNonce + 1
+	}
+
 	epoch, ok := s.data.Epochs[payload.Response.EpochID]
 	if !ok {
 		return errors.New("replay finalize epoch not found")

@@ -116,3 +116,54 @@ func hasAdminPermission(permissions []string) bool {
 	}
 	return false
 }
+
+// validateOperatorHeaders validates operator HTTP headers without consuming the nonce.
+// Used for epoch endpoints where nonce is consumed during block replay.
+// Returns the normalized operator address on success.
+func (s *Server) validateOperatorHeaders(r *http.Request) (string, error) {
+	address := r.Header.Get("X-Operator-Address")
+	signature := r.Header.Get("X-Operator-Signature")
+	nonceRaw := r.Header.Get("X-Operator-Nonce")
+	timestampRaw := r.Header.Get("X-Operator-Timestamp")
+
+	if address == "" || signature == "" || nonceRaw == "" || timestampRaw == "" {
+		return "", errors.New("operator authentication required")
+	}
+
+	nonce, err := strconv.ParseUint(nonceRaw, 10, 64)
+	if err != nil {
+		return "", errors.New("invalid operator nonce")
+	}
+	timestampUnix, err := strconv.ParseInt(timestampRaw, 10, 64)
+	if err != nil {
+		return "", errors.New("invalid operator timestamp")
+	}
+	now := time.Now()
+	signedAt := time.Unix(timestampUnix, 0)
+	if signedAt.Before(now.Add(-operatorRequestTimeSkew)) || signedAt.After(now.Add(operatorRequestTimeSkew)) {
+		return "", errors.New("operator signature timestamp outside allowed window")
+	}
+
+	address = normalizeGovernanceOperator(address)
+	if address == "" {
+		return "", errors.New("invalid operator address")
+	}
+
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+
+	operator, ok := s.store.data.GovernanceOperators[address]
+	if !ok || !operator.Enabled {
+		return "", errors.New("governance operator is not authorized")
+	}
+	if !hasAdminPermission(operator.Permissions) {
+		return "", errors.New("governance operator lacks admin permission")
+	}
+	expectedNonce := s.store.data.OperatorNonces[address]
+	if nonce != expectedNonce {
+		return "", errors.New("invalid operator nonce")
+	}
+
+	// NOTE: We do NOT consume the nonce here. It will be consumed during block replay.
+	return address, nil
+}

@@ -2,6 +2,7 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,7 +104,7 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 		}
 	} else if isMiningParamsAction(req.Action) {
 		// Validate mining params change fields.
-		if err := validateMiningParamsChangeFields(req); err != nil {
+		if err := validateMiningParamsChangeFields(req, s.miningParamsLocked()); err != nil {
 			return wire.CreateGovernanceProposalResponse{}, err
 		}
 	} else {
@@ -580,6 +581,36 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.MaxTxBytes, proposal.TargetMaxTxBytes)
 	applyIfNonZero(&p.MaxStorageTxBytes, proposal.TargetMaxStorageTxBytes)
 
+	// Post-application bounds validation (defense-in-depth: rejects proposals
+	// created before bounds were enforced).
+	weightSum := p.StoredBytesWeightBPS + p.ProofScoreWeightBPS + p.AvailabilityWeightBPS + p.DecentralizationWeightBPS
+	if weightSum > maxWeightBPSSum {
+		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: weight BPS sum %d exceeds maximum %d", weightSum, maxWeightBPSSum)
+	}
+	for _, check := range []struct {
+		name  string
+		value uint64
+		max   uint64
+	}{
+		{"storage_annual_rate_bps", p.StorageAnnualRateBPS, maxAnnualReleaseRateBPS},
+		{"retrieval_annual_rate_bps", p.RetrievalAnnualRateBPS, maxAnnualReleaseRateBPS},
+		{"validator_annual_rate_bps", p.ValidatorAnnualRateBPS, maxAnnualReleaseRateBPS},
+		{"foundation_annual_rate_bps", p.FoundationAnnualRateBPS, maxAnnualReleaseRateBPS},
+	} {
+		if check.value > check.max {
+			return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: %s %d exceeds maximum %d", check.name, check.value, check.max)
+		}
+	}
+	if p.ReleaseCoefficientBPS != 0 && (p.ReleaseCoefficientBPS < minReleaseCoefficientBPS || p.ReleaseCoefficientBPS > maxReleaseCoefficientBPS) {
+		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: release_coefficient_bps %d out of range [%d, %d]", p.ReleaseCoefficientBPS, minReleaseCoefficientBPS, maxReleaseCoefficientBPS)
+	}
+	if p.StorageProofSamples < minStorageProofSamples || p.StorageProofSamples > maxStorageProofSamples {
+		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: storage_proof_samples %d out of range [%d, %d]", p.StorageProofSamples, minStorageProofSamples, maxStorageProofSamples)
+	}
+	if p.MinerDegradeThreshold < minMinerDegradeThreshold || p.MinerDegradeThreshold > maxMinerDegradeThreshold {
+		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: miner_degrade_threshold %d out of range [%d, %d]", p.MinerDegradeThreshold, minMinerDegradeThreshold, maxMinerDegradeThreshold)
+	}
+
 	return wire.GovernanceDealActionResponse{
 		GovernanceType: "governance_update_mining_params",
 		UpdatedAtUnix:  now,
@@ -908,8 +939,9 @@ func validateConfigChangeFields(req wire.CreateGovernanceProposalRequest) error 
 }
 
 // validateMiningParamsChangeFields validates fields specific to update_mining_params actions.
-// At least one target field must be non-zero.
-func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest) error {
+// At least one target field must be non-zero. currentParams is used for weight sum validation
+// when only some weight fields are being updated.
+func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, currentParams *MiningParams) error {
 	if req.TargetStorageReleaseRateBPS != 0 ||
 		req.TargetRetrievalReleaseRateBPS != 0 ||
 		req.TargetValidatorReleaseRateBPS != 0 ||
@@ -942,7 +974,7 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest) 
 		req.TargetMaxBlockTxs != 0 ||
 		req.TargetMaxTxBytes != 0 ||
 		req.TargetMaxStorageTxBytes != 0 {
-		return validateMiningParamSizeTargets(req)
+		return validateMiningParamBounds(req, currentParams)
 	}
 	return errors.New("update_mining_params requires at least one non-zero target field")
 }
@@ -974,6 +1006,104 @@ func validateMiningParamSizeTargets(req wire.CreateGovernanceProposalRequest) er
 	if maxTxBytes > maxBlockBytes || maxStorageTxBytes > maxBlockBytes {
 		return errors.New("transaction byte limits cannot exceed max block bytes")
 	}
+	return nil
+}
+
+// validateMiningParamBounds validates all mining parameter bounds including
+// block size limits, economic parameters, and cross-parameter invariants.
+func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, currentParams *MiningParams) error {
+	// Block size validation (existing).
+	if err := validateMiningParamSizeTargets(req); err != nil {
+		return err
+	}
+
+	// Annual release rates: each non-zero rate must be <= maxAnnualReleaseRateBPS.
+	for _, check := range []struct {
+		name  string
+		value uint64
+	}{
+		{"storage_annual_rate_bps", req.TargetStorageAnnualRateBPS},
+		{"retrieval_annual_rate_bps", req.TargetRetrievalAnnualRateBPS},
+		{"validator_annual_rate_bps", req.TargetValidatorAnnualRateBPS},
+		{"foundation_annual_rate_bps", req.TargetFoundationAnnualRateBPS},
+	} {
+		if check.value != 0 && check.value > maxAnnualReleaseRateBPS {
+			return fmt.Errorf("%s exceeds maximum %d BPS", check.name, maxAnnualReleaseRateBPS)
+		}
+	}
+
+	// Release coefficient: if non-zero, must be in [min, max].
+	if req.TargetReleaseCoefficientBPS != 0 {
+		if req.TargetReleaseCoefficientBPS < minReleaseCoefficientBPS {
+			return fmt.Errorf("release_coefficient_bps must be >= %d", minReleaseCoefficientBPS)
+		}
+		if req.TargetReleaseCoefficientBPS > maxReleaseCoefficientBPS {
+			return fmt.Errorf("release_coefficient_bps must be <= %d", maxReleaseCoefficientBPS)
+		}
+	}
+
+	// Weight BPS sum: use proposed values where non-zero, fall back to current.
+	if currentParams != nil && (req.TargetStoredBytesWeightBPS != 0 || req.TargetProofScoreWeightBPS != 0 ||
+		req.TargetAvailabilityWeightBPS != 0 || req.TargetDecentralizationWeightBPS != 0) {
+		sb := nonZeroOr(req.TargetStoredBytesWeightBPS, currentParams.StoredBytesWeightBPS)
+		ps := nonZeroOr(req.TargetProofScoreWeightBPS, currentParams.ProofScoreWeightBPS)
+		av := nonZeroOr(req.TargetAvailabilityWeightBPS, currentParams.AvailabilityWeightBPS)
+		dc := nonZeroOr(req.TargetDecentralizationWeightBPS, currentParams.DecentralizationWeightBPS)
+		if sb+ps+av+dc > maxWeightBPSSum {
+			return fmt.Errorf("weight BPS sum %d exceeds maximum %d", sb+ps+av+dc, maxWeightBPSSum)
+		}
+	}
+
+	// Individual BPS parameters.
+	for _, check := range []struct {
+		name  string
+		value uint64
+	}{
+		{"stored_bytes_weight_bps", req.TargetStoredBytesWeightBPS},
+		{"proof_score_weight_bps", req.TargetProofScoreWeightBPS},
+		{"availability_weight_bps", req.TargetAvailabilityWeightBPS},
+		{"decentralization_weight_bps", req.TargetDecentralizationWeightBPS},
+		{"validator_commission_bps", req.TargetValidatorCommissionBPS},
+		{"block_production_reward_bps", req.TargetBlockProductionRewardBPS},
+		{"availability_threshold_bps", req.TargetAvailabilityThresholdBPS},
+		{"retrieval_weight_bps", req.TargetRetrievalWeightBPS},
+		{"repair_pool_takeover_bps", req.TargetRepairPoolTakeoverBPS},
+		{"repair_pool_subsidy_bps", req.TargetRepairPoolSubsidyBPS},
+	} {
+		if check.value != 0 && check.value > maxWeightBPSSum {
+			return fmt.Errorf("%s exceeds maximum %d BPS", check.name, maxWeightBPSSum)
+		}
+	}
+
+	// Storage proof samples.
+	if req.TargetStorageProofSamples != 0 {
+		if req.TargetStorageProofSamples < minStorageProofSamples {
+			return fmt.Errorf("storage_proof_samples must be >= %d", minStorageProofSamples)
+		}
+		if req.TargetStorageProofSamples > maxStorageProofSamples {
+			return fmt.Errorf("storage_proof_samples must be <= %d", maxStorageProofSamples)
+		}
+	}
+
+	// Miner degrade threshold.
+	if req.TargetMinerDegradeThreshold != 0 {
+		if req.TargetMinerDegradeThreshold < minMinerDegradeThreshold {
+			return fmt.Errorf("miner_degrade_threshold must be >= %d", minMinerDegradeThreshold)
+		}
+		if req.TargetMinerDegradeThreshold > maxMinerDegradeThreshold {
+			return fmt.Errorf("miner_degrade_threshold must be <= %d", maxMinerDegradeThreshold)
+		}
+	}
+
+	// Consensus validator limits.
+	if req.TargetMaxConsensusValidators != 0 && req.TargetMaxConsensusValidators > maxConsensusValidatorsLimit {
+		return fmt.Errorf("max_consensus_validators exceeds limit %d", maxConsensusValidatorsLimit)
+	}
+	if req.TargetMaxConsensusValidators != 0 && req.TargetMinConsensusValidators != 0 &&
+		req.TargetMinConsensusValidators > req.TargetMaxConsensusValidators {
+		return errors.New("min_consensus_validators cannot exceed max_consensus_validators")
+	}
+
 	return nil
 }
 

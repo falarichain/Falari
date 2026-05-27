@@ -1,7 +1,9 @@
 package chain
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 
 	chaincrypto "chain/internal/crypto"
@@ -9,6 +11,14 @@ import (
 )
 
 const proofTypeMerklePORV1 = "merkle-por-v1"
+
+// computeMinerSeal binds a sector commitment to a specific miner address,
+// ensuring that storage challenges are miner-specific and cannot be answered
+// by colluding miners sharing the same underlying data.
+func computeMinerSeal(sectorCommitment, minerAddress string) string {
+	sum := sha256.Sum256([]byte(sectorCommitment + ":" + minerAddress))
+	return hex.EncodeToString(sum[:])
+}
 
 func validateStorageProof(challenge wire.StorageChallenge, proof wire.StorageProof) error {
 	if proof.ShardHash != challenge.ShardHash {
@@ -19,6 +29,15 @@ func validateStorageProof(challenge wire.StorageChallenge, proof wire.StoragePro
 	}
 	if proof.SectorCommitment != challenge.SectorCommitment {
 		return errors.New("proof sector commitment mismatch")
+	}
+	if challenge.MinerSeal != "" {
+		if proof.MinerSeal != challenge.MinerSeal {
+			return errors.New("proof miner seal mismatch")
+		}
+		expectedSeal := computeMinerSeal(challenge.SectorCommitment, challenge.MinerAddress)
+		if challenge.MinerSeal != expectedSeal {
+			return errors.New("challenge miner seal does not match commitment")
+		}
 	}
 	if proof.LeafSize != challenge.LeafSize {
 		return errors.New("proof leaf size mismatch")

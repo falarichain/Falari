@@ -350,6 +350,7 @@ type MinerReceipt struct {
 	ShardCID         string `json:"shard_cid,omitempty"`
 	ShardSize        int64  `json:"shard_size"`
 	SectorCommitment string `json:"sector_commitment"`
+	MinerSeal        string `json:"miner_seal,omitempty"`
 	ExpiresAtUnix    int64  `json:"expires_at_unix"`
 	MinerEndpoint    string `json:"miner_endpoint,omitempty"`
 	Signature        string `json:"signature"`
@@ -907,6 +908,7 @@ type StorageChallenge struct {
 	ShardHash        string      `json:"shard_hash"`
 	ShardSize        int64       `json:"shard_size"`
 	SectorCommitment string      `json:"sector_commitment"`
+	MinerSeal        string      `json:"miner_seal,omitempty"`
 	LeafSize         int         `json:"leaf_size"`
 	LeafIndex        int         `json:"leaf_index"`
 	LeafIndices      []int       `json:"leaf_indices,omitempty"`
@@ -943,6 +945,7 @@ type StorageProof struct {
 	ShardHash          string     `json:"shard_hash"`
 	ShardSize          int64      `json:"shard_size"`
 	SectorCommitment   string     `json:"sector_commitment"`
+	MinerSeal          string     `json:"miner_seal,omitempty"`
 	LeafSize           int        `json:"leaf_size"`
 	LeafIndex          int        `json:"leaf_index"`
 	LeafIndices        []int      `json:"leaf_indices,omitempty"`
@@ -973,6 +976,12 @@ type StartEpochRequest struct {
 	DurationSeconds     int64  `json:"duration_seconds"`
 	RewardPerProof      uint64 `json:"reward_per_proof"`
 	SlashPerMissedProof uint64 `json:"slash_per_missed_proof"`
+	// Operator identity fields for block replay auth.
+	OperatorAddress string `json:"operator_address,omitempty"`
+	ChainID         string `json:"chain_id,omitempty"`
+	Nonce           uint64 `json:"nonce,omitempty"`
+	Signature       string `json:"signature,omitempty"`
+	CreatedAtUnix   int64  `json:"created_at_unix,omitempty"`
 }
 
 type ProofEpoch struct {
@@ -999,6 +1008,12 @@ type StartEpochResponse struct {
 
 type FinalizeEpochRequest struct {
 	EpochID string `json:"epoch_id"`
+	// Operator identity fields for block replay auth.
+	OperatorAddress string `json:"operator_address,omitempty"`
+	ChainID         string `json:"chain_id,omitempty"`
+	Nonce           uint64 `json:"nonce,omitempty"`
+	Signature       string `json:"signature,omitempty"`
+	CreatedAtUnix   int64  `json:"created_at_unix,omitempty"`
 }
 
 type FinalizeEpochResponse struct {

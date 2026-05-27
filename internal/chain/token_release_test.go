@@ -2,6 +2,7 @@ package chain
 
 import (
 	"testing"
+	"time"
 
 	"chain/internal/wire"
 )
@@ -55,7 +56,7 @@ func TestDistributeValidatorRewardsSharesWithDelegators(t *testing.T) {
 		},
 	}
 
-	store.distributeValidatorPoolRewardsLocked(100)
+	store.distributeValidatorPoolRewardsLocked(100, time.Now().Unix())
 
 	if got := store.data.Accounts["validator_a"].Balance; got != 0 {
 		t.Fatalf("expected validator balance 0 before vesting release, got %d", got)

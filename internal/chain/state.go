@@ -1264,6 +1264,20 @@ func (s *Store) StartEpoch(req wire.StartEpochRequest) (wire.StartEpochResponse,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Auto-sign for scheduler path when operator identity is available.
+	if req.OperatorAddress == "" && s.operatorIdentity != nil {
+		operatorAddr := s.operatorIdentity.OperatorAddress
+		if _, ok := s.data.GovernanceOperators[normalizeGovernanceOperator(operatorAddr)]; ok {
+			req.OperatorAddress = operatorAddr
+			req.ChainID = s.data.ChainID
+			req.Nonce = s.data.OperatorNonces[normalizeGovernanceOperator(operatorAddr)]
+			req.CreatedAtUnix = time.Now().Unix()
+			if err := wire.SignStartEpochRequest(&req, s.operatorIdentity.OperatorPrivateKey); err != nil {
+				return wire.StartEpochResponse{}, errors.New("failed to sign start epoch: " + err.Error())
+			}
+		}
+	}
+
 	epochID, err := randomID("epoch")
 	if err != nil {
 		return wire.StartEpochResponse{}, err
@@ -1325,14 +1339,29 @@ func (s *Store) FinalizeEpoch(req wire.FinalizeEpochRequest) (wire.FinalizeEpoch
 	if epoch.Status == "finalized" {
 		return wire.FinalizeEpochResponse{}, errors.New("epoch already finalized")
 	}
-	resp := s.finalizeEpochLocked(epoch)
+
+	// Auto-sign for scheduler path when operator identity is available.
+	if req.OperatorAddress == "" && s.operatorIdentity != nil {
+		operatorAddr := s.operatorIdentity.OperatorAddress
+		if _, ok := s.data.GovernanceOperators[normalizeGovernanceOperator(operatorAddr)]; ok {
+			req.OperatorAddress = operatorAddr
+			req.ChainID = s.data.ChainID
+			req.Nonce = s.data.OperatorNonces[normalizeGovernanceOperator(operatorAddr)]
+			req.CreatedAtUnix = time.Now().Unix()
+			if err := wire.SignFinalizeEpochRequest(&req, s.operatorIdentity.OperatorPrivateKey); err != nil {
+				return wire.FinalizeEpochResponse{}, errors.New("failed to sign finalize epoch: " + err.Error())
+			}
+		}
+	}
+
+	resp := s.finalizeEpochLocked(epoch, req)
 	if err := s.saveLocked(); err != nil {
 		return wire.FinalizeEpochResponse{}, err
 	}
 	return resp, nil
 }
 
-func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch) wire.FinalizeEpochResponse {
+func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.FinalizeEpochRequest) wire.FinalizeEpochResponse {
 	accepted := 0
 	missed := 0
 	totalSlashed := uint64(0)
@@ -1404,7 +1433,7 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch) wire.FinalizeEpochRes
 		StorageSlashed:       totalSlashed,
 		RepairTasksCreated:   len(repairTasks),
 	}
-	s.recordTxLocked("finalize_epoch", "", finalizeEpochTxPayload{Response: resp, RepairTasks: repairTasks})
+	s.recordTxLocked("finalize_epoch", "", finalizeEpochTxPayload{Request: finalizeReq, Response: resp, RepairTasks: repairTasks})
 	s.rotateValidatorsLocked(epoch.EpochRound)
 	return resp
 }
@@ -1438,7 +1467,19 @@ func (s *Store) FinalizeExpiredEpochs() ([]wire.FinalizeEpochResponse, error) {
 		if epoch.Status == "finalized" || epoch.DeadlineUnix > now {
 			continue
 		}
-		resp := s.finalizeEpochLocked(epoch)
+		// Build and auto-sign request for scheduler path.
+		req := wire.FinalizeEpochRequest{EpochID: epoch.EpochID}
+		if s.operatorIdentity != nil {
+			operatorAddr := s.operatorIdentity.OperatorAddress
+			if _, ok := s.data.GovernanceOperators[normalizeGovernanceOperator(operatorAddr)]; ok {
+				req.OperatorAddress = operatorAddr
+				req.ChainID = s.data.ChainID
+				req.Nonce = s.data.OperatorNonces[normalizeGovernanceOperator(operatorAddr)]
+				req.CreatedAtUnix = now
+				_ = wire.SignFinalizeEpochRequest(&req, s.operatorIdentity.OperatorPrivateKey)
+			}
+		}
+		resp := s.finalizeEpochLocked(epoch, req)
 		responses = append(responses, resp)
 	}
 	if len(responses) > 0 {
@@ -1979,7 +2020,8 @@ func (s *Store) generateChallengesLocked(intent *Intent, epochID string, count i
 			return nil, err
 		}
 		sampleCount := storageProofSampleCount(receipt.ShardSize, chaincrypto.DefaultLeafSize, s.miningParamsLocked().StorageProofSamples)
-		leafIndices := challengeLeafIndices(nonce, receipt.ShardHash, receipt.ShardSize, chaincrypto.DefaultLeafSize, sampleCount)
+		minerSeal := computeMinerSeal(receipt.SectorCommitment, receipt.MinerAddress)
+		leafIndices := challengeLeafIndices(nonce, receipt.ShardHash, minerSeal, receipt.ShardSize, chaincrypto.DefaultLeafSize, sampleCount)
 		leafRanges := challengeLeafRanges(receipt.ShardSize, chaincrypto.DefaultLeafSize, leafIndices)
 		challengeSeed := hashString(intent.IntentID + ":" + receipt.ShardHash + ":" + nonce)
 		challenge := wire.StorageChallenge{
@@ -1994,6 +2036,7 @@ func (s *Store) generateChallengesLocked(intent *Intent, epochID string, count i
 			ShardHash:        receipt.ShardHash,
 			ShardSize:        receipt.ShardSize,
 			SectorCommitment: receipt.SectorCommitment,
+			MinerSeal:        minerSeal,
 			LeafSize:         chaincrypto.DefaultLeafSize,
 			LeafIndex:        leafIndices[0],
 			LeafIndices:      leafIndices,
@@ -2057,7 +2100,7 @@ func (s *Store) accountLocked(address string) wire.Account {
 
 func (s *Store) registeredMinerLocked(minerAddress string, publicKey string) (wire.MinerStats, error) {
 	miner, ok := s.data.Miners[minerAddress]
-	if !ok || (miner.Status != wire.MinerStatusActive && miner.Status != wire.MinerStatusDegraded && miner.Status != wire.MinerStatusJailed) {
+	if !ok || (miner.Status != wire.MinerStatusActive && miner.Status != wire.MinerStatusDegraded) {
 		return wire.MinerStats{}, errors.New("miner is not registered")
 	}
 	if miner.PublicKey != publicKey {
@@ -2070,7 +2113,11 @@ func (s *Store) registeredMinerLocked(minerAddress string, publicKey string) (wi
 }
 
 func expectedProofHash(challenge wire.StorageChallenge, proof wire.StorageProof) string {
-	return hashString(challenge.ChallengeID + ":" + challenge.Nonce + ":" + challenge.ChallengeHash + ":" + strings.Join(proofLeafHashes(proof), ",") + ":" + strings.Join(proofLeafPayloads(proof), ",") + ":" + challenge.SectorCommitment)
+	base := challenge.ChallengeID + ":" + challenge.Nonce + ":" + challenge.ChallengeHash + ":" + strings.Join(proofLeafHashes(proof), ",") + ":" + strings.Join(proofLeafPayloads(proof), ",") + ":" + challenge.SectorCommitment
+	if challenge.MinerSeal != "" {
+		base += ":" + challenge.MinerSeal
+	}
+	return hashString(base)
 }
 
 func hashString(value string) string {
@@ -2091,7 +2138,7 @@ func challengeLeafIndex(nonce string, shardSize int64, leafSize int) int {
 	return int(n % uint64(count))
 }
 
-func challengeLeafIndices(nonce string, shardHash string, shardSize int64, leafSize int, samples int) []int {
+func challengeLeafIndices(nonce string, shardHash string, minerSeal string, shardSize int64, leafSize int, samples int) []int {
 	leafCount := chaincrypto.LeafCount(shardSize, leafSize)
 	if leafCount <= 1 {
 		return []int{0}
@@ -2102,7 +2149,8 @@ func challengeLeafIndices(nonce string, shardHash string, shardSize int64, leafS
 	indices := make([]int, 0, samples)
 	seen := map[int]bool{}
 	for round := 0; len(indices) < samples; round++ {
-		sum := sha256.Sum256([]byte(nonce + ":" + shardHash + ":" + strconv.Itoa(round)))
+		seed := nonce + ":" + shardHash + ":" + minerSeal + ":" + strconv.Itoa(round)
+		sum := sha256.Sum256([]byte(seed))
 		var n uint64
 		for _, b := range sum[:8] {
 			n = (n << 8) | uint64(b)
@@ -2168,7 +2216,11 @@ func challengeLeafRange(shardSize int64, leafSize int, index int) wire.LeafRange
 
 func storageChallengeHash(challenge wire.StorageChallenge) string {
 	indices := challengeLeafIndicesForValidation(challenge)
-	return hashString(proofTypeMerklePORV1 + ":" + challenge.ChallengeID + ":" + challenge.IntentID + ":" + challenge.DealID + ":" + challenge.ShardHash + ":" + challenge.SectorCommitment + ":" + challenge.Nonce + ":" + challenge.ChallengeSeed + ":" + strings.Join(intsToStrings(indices), ","))
+	base := proofTypeMerklePORV1 + ":" + challenge.ChallengeID + ":" + challenge.IntentID + ":" + challenge.DealID + ":" + challenge.ShardHash + ":" + challenge.SectorCommitment + ":" + challenge.Nonce + ":" + challenge.ChallengeSeed + ":" + strings.Join(intsToStrings(indices), ",")
+	if challenge.MinerSeal != "" {
+		base += ":" + challenge.MinerSeal
+	}
+	return hashString(base)
 }
 
 func intsToStrings(values []int) []string {
