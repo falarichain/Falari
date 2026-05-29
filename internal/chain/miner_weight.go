@@ -73,6 +73,8 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 
 
 func (s *Store) RecomputeAllMinerWeightsLocked() {
 	for addr, stats := range s.data.Miners {
+		s.accrueStorageRewardForMinerLocked(addr)
+		stats = s.data.Miners[addr]
 		stats.EffectiveWeight = s.computeMinerEffectiveWeightLocked(stats)
 		s.data.Miners[addr] = stats
 	}
@@ -87,6 +89,8 @@ func (s *Store) checkDHTObligationsLocked() {
 			continue
 		}
 		if stats.DHTLastPublishUnix > 0 && stats.DHTLastPublishUnix < cutoff {
+			s.accrueStorageRewardForMinerLocked(addr)
+			stats = s.data.Miners[addr]
 			stats.RetrievalObligMet = false
 			s.data.Miners[addr] = stats
 		}

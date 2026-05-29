@@ -211,8 +211,8 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	s.adjustFeeMarketAfterBlockLocked(block)
 	s.recordProposerTurnLocked(ownerAddr, true)
 	s.releaseValidatorPerBlockLocked(block.TimeUnix, ownerAddr)
+	s.releaseStoragePerBlockLocked(block.TimeUnix)
 	s.releaseEpochRewardsLocked(block.TimeUnix)
-	s.releaseVestedMiningRewardsLocked(block.TimeUnix)
 	s.removePendingTxsLocked(block.Transactions)
 	if err := s.saveLocked(); err != nil {
 		return false, err
@@ -282,8 +282,8 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	s.adjustFeeMarketAfterBlockLocked(block)
 	s.recordProposerTurnLocked(s.operatorIdentity.OwnerAddress, true)
 	s.releaseValidatorPerBlockLocked(block.TimeUnix, s.operatorIdentity.OwnerAddress)
+	s.releaseStoragePerBlockLocked(block.TimeUnix)
 	s.releaseEpochRewardsLocked(block.TimeUnix)
-	s.releaseVestedMiningRewardsLocked(block.TimeUnix)
 	s.removePendingTxsLocked(appliedTxs)
 	for _, tx := range appliedTxs {
 		s.data.ConfirmedTxs[tx.TxID] = true
@@ -539,9 +539,8 @@ func transactionRequiresSignature(txType string) bool {
 		"set_access_policy", "delegate_stake", "undelegate_stake",
 		"governance_create_proposal", "governance_cast_vote", "governance_execute_proposal":
 		return true
-	// bridge_out, bridge_in_claim, bridge_set_config use their own
-	// payload-level signatures (user / relayer / governance operator)
-	// verified by applyBridge*Locked — no envelope signature needed.
+		// bridge_out, bridge_in_claim, bridge_set_config, and claim_mining_rewards
+		// use their own payload-level signatures.
 	}
 	return false
 }
@@ -600,7 +599,7 @@ func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction
 	case "transfer", "multisig_exec", "create_intent", "batch_commit", "finalize_deal",
 		"settle_intent", "permanent_fund_topup", "renew_deal", "terminate_deal",
 		"set_access_policy", "delegate_stake", "undelegate_stake",
-		"create_collection", "append_record", "create_key_envelope",
+		"deregister_miner", "create_collection", "append_record", "create_key_envelope",
 		"create_share", "revoke_share":
 		return wire.NormalizeAddress(tx.From) == normalized.From &&
 			tx.Fee == normalized.Fee &&
@@ -615,6 +614,10 @@ func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction
 			tx.NonceProtected == normalized.NonceProtected
 	case "bridge_in_claim":
 		return tx.Nonce == normalized.Nonce &&
+			tx.NonceProtected == normalized.NonceProtected
+	case "claim_mining_rewards":
+		return wire.NormalizeAddress(tx.From) == normalized.From &&
+			tx.Nonce == normalized.Nonce &&
 			tx.NonceProtected == normalized.NonceProtected
 	case "bridge_set_config":
 		return true
@@ -1173,11 +1176,27 @@ func enrichTransactionMetadata(tx *wire.Transaction) {
 		tx.Fee = req.Fee
 		tx.NonceProtected = true
 		tx.Nonce = req.Nonce
+	case "deregister_miner":
+		var payload deregisterMinerTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(payload.Request.MinerAddress)
+		tx.NonceProtected = true
+		tx.Nonce = payload.Request.Nonce
 	case "bridge_in_claim":
 		var req wire.BridgeInClaimRequest
 		if err := json.Unmarshal(tx.Payload, &req); err != nil {
 			return
 		}
+		tx.NonceProtected = true
+		tx.Nonce = req.Nonce
+	case "claim_mining_rewards":
+		var req wire.ClaimMiningRewardsRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(req.MinerAddress)
 		tx.NonceProtected = true
 		tx.Nonce = req.Nonce
 	case "bridge_set_config":

@@ -29,7 +29,6 @@ type governanceProposalSigningPayload struct {
 	TargetOperatorChangeThresholdDen  int      `json:"target_operator_change_threshold_den,omitempty"`
 	TargetStorageReleaseRateBPS       uint64   `json:"target_storage_release_rate_bps,omitempty"`
 	TargetRetrievalReleaseRateBPS     uint64   `json:"target_retrieval_release_rate_bps,omitempty"`
-	TargetValidatorReleaseRateBPS     uint64   `json:"target_validator_release_rate_bps,omitempty"`
 	TargetStoredBytesWeightBPS        uint64   `json:"target_stored_bytes_weight_bps,omitempty"`
 	TargetProofScoreWeightBPS         uint64   `json:"target_proof_score_weight_bps,omitempty"`
 	TargetAvailabilityWeightBPS       uint64   `json:"target_availability_weight_bps,omitempty"`
@@ -46,14 +45,13 @@ type governanceProposalSigningPayload struct {
 	TargetFoundationReleaseRateBPS    uint64   `json:"target_foundation_release_rate_bps,omitempty"`
 	TargetFoundationAddress           string   `json:"target_foundation_address,omitempty"`
 	TargetRetrievalAddress            string   `json:"target_retrieval_address,omitempty"`
-	TargetStorageAnnualRateBPS        uint64   `json:"target_storage_annual_rate_bps,omitempty"`
+	TargetStorageRewardPerBlock       uint64   `json:"target_storage_reward_per_block,omitempty"`
 	TargetRetrievalAnnualRateBPS      uint64   `json:"target_retrieval_annual_rate_bps,omitempty"`
-	TargetValidatorAnnualRateBPS      uint64   `json:"target_validator_annual_rate_bps,omitempty"`
 	TargetFoundationAnnualRateBPS     uint64   `json:"target_foundation_annual_rate_bps,omitempty"`
-	TargetReleaseCoefficientBPS       uint64   `json:"target_release_coefficient_bps,omitempty"`
 	TargetAvailabilityWindowSize      uint64   `json:"target_availability_window_size,omitempty"`
 	TargetAvailabilityThresholdBPS    uint64   `json:"target_availability_threshold_bps,omitempty"`
 	TargetBlockProductionRewardBPS    uint64   `json:"target_block_production_reward_bps,omitempty"`
+	TargetValidatorRewardPerBlock     uint64   `json:"target_validator_reward_per_block,omitempty"`
 	TargetMaxConsensusValidators      uint64   `json:"target_max_consensus_validators,omitempty"`
 	TargetMinConsensusValidators      uint64   `json:"target_min_consensus_validators,omitempty"`
 	TargetBlockBytes                  uint64   `json:"target_block_bytes,omitempty"`
@@ -95,7 +93,6 @@ func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, err
 		TargetOperatorChangeThresholdDen:  req.TargetOperatorChangeThresholdDen,
 		TargetStorageReleaseRateBPS:       req.TargetStorageReleaseRateBPS,
 		TargetRetrievalReleaseRateBPS:     req.TargetRetrievalReleaseRateBPS,
-		TargetValidatorReleaseRateBPS:     req.TargetValidatorReleaseRateBPS,
 		TargetStoredBytesWeightBPS:        req.TargetStoredBytesWeightBPS,
 		TargetProofScoreWeightBPS:         req.TargetProofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       req.TargetAvailabilityWeightBPS,
@@ -112,14 +109,13 @@ func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, err
 		TargetFoundationReleaseRateBPS:    req.TargetFoundationReleaseRateBPS,
 		TargetFoundationAddress:           req.TargetFoundationAddress,
 		TargetRetrievalAddress:            req.TargetRetrievalAddress,
-		TargetStorageAnnualRateBPS:        req.TargetStorageAnnualRateBPS,
+		TargetStorageRewardPerBlock:       req.TargetStorageRewardPerBlock,
 		TargetRetrievalAnnualRateBPS:      req.TargetRetrievalAnnualRateBPS,
-		TargetValidatorAnnualRateBPS:      req.TargetValidatorAnnualRateBPS,
 		TargetFoundationAnnualRateBPS:     req.TargetFoundationAnnualRateBPS,
-		TargetReleaseCoefficientBPS:       req.TargetReleaseCoefficientBPS,
 		TargetAvailabilityWindowSize:      req.TargetAvailabilityWindowSize,
 		TargetAvailabilityThresholdBPS:    req.TargetAvailabilityThresholdBPS,
 		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
+		TargetValidatorRewardPerBlock:     req.TargetValidatorRewardPerBlock,
 		TargetMaxConsensusValidators:      req.TargetMaxConsensusValidators,
 		TargetMinConsensusValidators:      req.TargetMinConsensusValidators,
 		TargetBlockBytes:                  req.TargetBlockBytes,

@@ -230,6 +230,7 @@ func multiSampleProof(t *testing.T, data []byte, challenge wire.StorageChallenge
 		ShardHash:          challenge.ShardHash,
 		ShardSize:          challenge.ShardSize,
 		SectorCommitment:   challenge.SectorCommitment,
+		MinerSeal:          challenge.MinerSeal,
 		LeafSize:           challenge.LeafSize,
 		LeafIndex:          challenge.LeafIndices[0],
 		LeafIndices:        append([]int(nil), challenge.LeafIndices...),

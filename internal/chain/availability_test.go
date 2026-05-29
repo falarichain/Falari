@@ -3,6 +3,7 @@ package chain
 import (
 	"testing"
 
+	"chain/internal/reward"
 	"chain/internal/wire"
 )
 
@@ -137,10 +138,6 @@ func TestBlockProductionRewardSplit(t *testing.T) {
 	}
 	store.data.ConsensusValidators["producer"] = true
 
-	// Pre-set last release so the first call actually computes elapsed time.
-	// Use 1 day elapsed to ensure integer math produces non-zero release.
-	store.data.LastValidatorReleaseAtUnix = 1000 - 86400
-
 	poolBefore := store.data.RewardPools.ValidatorRemaining
 
 	store.releaseValidatorPerBlockLocked(1000, "producer")
@@ -154,6 +151,16 @@ func TestBlockProductionRewardSplit(t *testing.T) {
 	released := poolBefore - poolAfter
 	if released == 0 {
 		t.Fatalf("expected validator pool to release tokens, got 0")
+	}
+
+	// New algorithm: exactly ValidatorRewardPerBlock is released per block (default 16 tokens).
+	params := store.miningParamsLocked()
+	expectedRelease := params.ValidatorRewardPerBlock
+	if expectedRelease == 0 {
+		expectedRelease = 16 * reward.TokenUnit
+	}
+	if released != expectedRelease {
+		t.Fatalf("expected released %d (ValidatorRewardPerBlock), got %d", expectedRelease, released)
 	}
 
 	expectedBlockReward := released * 3000 / 10000

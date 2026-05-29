@@ -96,6 +96,73 @@ func (s *Store) releaseVestedMiningRewardsLocked(now int64) (releasedBuckets int
 	return releasedBuckets, totalReleased
 }
 
+func (s *Store) releaseVestedMiningRewardsForAddressLocked(address string, now int64) (releasedBuckets int, totalReleased uint64) {
+	address = wire.NormalizeAddress(address)
+	if address == "" || len(s.data.MiningRewardVestings) == 0 {
+		return 0, 0
+	}
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	for bucketID, bucket := range s.data.MiningRewardVestings {
+		if bucket.Address != address {
+			continue
+		}
+		release := miningRewardBucketReleasable(bucket, now)
+		if release == 0 {
+			continue
+		}
+		account := s.accountLocked(bucket.Address)
+		if account.PendingMiningRewards < release {
+			release = account.PendingMiningRewards
+		}
+		if release == 0 {
+			continue
+		}
+		account.PendingMiningRewards -= release
+		account.Balance = saturatingAdd(account.Balance, release)
+		s.data.Accounts[account.Address] = account
+
+		bucket.Released = saturatingAdd(bucket.Released, release)
+		bucket.LastReleasedAtUnix = now
+		if bucket.Released >= bucket.Total {
+			delete(s.data.MiningRewardVestings, bucketID)
+		} else {
+			s.data.MiningRewardVestings[bucketID] = bucket
+		}
+		releasedBuckets++
+		totalReleased = saturatingAdd(totalReleased, release)
+	}
+	return releasedBuckets, totalReleased
+}
+
+func (s *Store) applyClaimMiningRewardsLocked(address string, now int64) uint64 {
+	_, totalReleased := s.releaseVestedMiningRewardsForAddressLocked(address, now)
+	return totalReleased
+}
+
+func (s *Store) miningRewardVestingSummaryLocked(address string, now int64) (pending uint64, vesting uint64, claimable uint64) {
+	address = wire.NormalizeAddress(address)
+	if address == "" {
+		return 0, 0, 0
+	}
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	pending = s.accountLocked(address).PendingMiningRewards
+	for _, bucket := range s.data.MiningRewardVestings {
+		if bucket.Address != address {
+			continue
+		}
+		claimable = saturatingAdd(claimable, miningRewardBucketReleasable(bucket, now))
+	}
+	if claimable > pending {
+		claimable = pending
+	}
+	vesting = pending - claimable
+	return pending, vesting, claimable
+}
+
 func (s *Store) ReleaseVestedMiningRewards() (int, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,4 +206,65 @@ func miningRewardVestingDayStart(unix int64) int64 {
 
 func miningRewardVestingBucketID(address string, dayUnix int64) string {
 	return address + ":" + strconv.FormatInt(dayUnix, 10)
+}
+
+// slashVestingBucketsLocked deducts amount from a miner's unreleased vesting
+// rewards (PendingMiningRewards). Buckets are slashed oldest-first. Returns
+// the actual amount slashed (may be less than requested if insufficient
+// vesting rewards exist).
+func (s *Store) slashVestingBucketsLocked(address string, amount uint64) uint64 {
+	if amount == 0 {
+		return 0
+	}
+	account := s.accountLocked(address)
+	if amount > account.PendingMiningRewards {
+		amount = account.PendingMiningRewards
+	}
+	if amount == 0 {
+		return 0
+	}
+	account.PendingMiningRewards -= amount
+	s.data.Accounts[address] = account
+
+	// Collect this address's buckets sorted by DayUnix (oldest first).
+	type bucketEntry struct {
+		id     string
+		bucket wire.MiningRewardVestingBucket
+	}
+	var entries []bucketEntry
+	for id, b := range s.data.MiningRewardVestings {
+		if b.Address == address {
+			entries = append(entries, bucketEntry{id, b})
+		}
+	}
+	// Simple insertion sort by DayUnix (small N, typically ≤ 30).
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].bucket.DayUnix < entries[j-1].bucket.DayUnix; j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
+		}
+	}
+
+	remaining := amount
+	for _, e := range entries {
+		if remaining == 0 {
+			break
+		}
+		b := e.bucket
+		unreleased := b.Total - b.Released
+		if unreleased == 0 {
+			continue
+		}
+		slash := remaining
+		if slash > unreleased {
+			slash = unreleased
+		}
+		b.Total -= slash
+		remaining -= slash
+		if b.Total <= b.Released {
+			delete(s.data.MiningRewardVestings, e.id)
+		} else {
+			s.data.MiningRewardVestings[e.id] = b
+		}
+	}
+	return amount
 }

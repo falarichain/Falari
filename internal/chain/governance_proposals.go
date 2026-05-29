@@ -157,7 +157,6 @@ func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, pro
 		TargetOperatorChangeThresholdDen:  req.TargetOperatorChangeThresholdDen,
 		TargetStorageReleaseRateBPS:       req.TargetStorageReleaseRateBPS,
 		TargetRetrievalReleaseRateBPS:     req.TargetRetrievalReleaseRateBPS,
-		TargetValidatorReleaseRateBPS:     req.TargetValidatorReleaseRateBPS,
 		TargetStoredBytesWeightBPS:        req.TargetStoredBytesWeightBPS,
 		TargetProofScoreWeightBPS:         req.TargetProofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       req.TargetAvailabilityWeightBPS,
@@ -174,14 +173,13 @@ func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, pro
 		TargetFoundationReleaseRateBPS:    req.TargetFoundationReleaseRateBPS,
 		TargetFoundationAddress:           req.TargetFoundationAddress,
 		TargetRetrievalAddress:            req.TargetRetrievalAddress,
-		TargetStorageAnnualRateBPS:        req.TargetStorageAnnualRateBPS,
+		TargetStorageRewardPerBlock:       req.TargetStorageRewardPerBlock,
 		TargetRetrievalAnnualRateBPS:      req.TargetRetrievalAnnualRateBPS,
-		TargetValidatorAnnualRateBPS:      req.TargetValidatorAnnualRateBPS,
 		TargetFoundationAnnualRateBPS:     req.TargetFoundationAnnualRateBPS,
-		TargetReleaseCoefficientBPS:       req.TargetReleaseCoefficientBPS,
 		TargetAvailabilityWindowSize:      req.TargetAvailabilityWindowSize,
 		TargetAvailabilityThresholdBPS:    req.TargetAvailabilityThresholdBPS,
 		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
+		TargetValidatorRewardPerBlock:     req.TargetValidatorRewardPerBlock,
 		TargetMaxConsensusValidators:      req.TargetMaxConsensusValidators,
 		TargetMinConsensusValidators:      req.TargetMinConsensusValidators,
 		TargetBlockBytes:                  req.TargetBlockBytes,
@@ -548,7 +546,6 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 
 	applyIfNonZero(&p.StorageReleaseRateBPS, proposal.TargetStorageReleaseRateBPS)
 	applyIfNonZero(&p.RetrievalReleaseRateBPS, proposal.TargetRetrievalReleaseRateBPS)
-	applyIfNonZero(&p.ValidatorReleaseRateBPS, proposal.TargetValidatorReleaseRateBPS)
 	applyIfNonZero(&p.FoundationReleaseRateBPS, proposal.TargetFoundationReleaseRateBPS)
 	applyIfNonZero(&p.StoredBytesWeightBPS, proposal.TargetStoredBytesWeightBPS)
 	applyIfNonZero(&p.ProofScoreWeightBPS, proposal.TargetProofScoreWeightBPS)
@@ -565,14 +562,13 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	}
 	applyIfNonZero(&p.ValidatorCommissionBPS, proposal.TargetValidatorCommissionBPS)
 	applyIfNonZero(&p.RetrievalWeightBPS, proposal.TargetRetrievalWeightBPS)
-	applyIfNonZero(&p.StorageAnnualRateBPS, proposal.TargetStorageAnnualRateBPS)
+	applyIfNonZero(&p.StorageRewardPerBlock, proposal.TargetStorageRewardPerBlock)
 	applyIfNonZero(&p.RetrievalAnnualRateBPS, proposal.TargetRetrievalAnnualRateBPS)
-	applyIfNonZero(&p.ValidatorAnnualRateBPS, proposal.TargetValidatorAnnualRateBPS)
 	applyIfNonZero(&p.FoundationAnnualRateBPS, proposal.TargetFoundationAnnualRateBPS)
-	applyIfNonZero(&p.ReleaseCoefficientBPS, proposal.TargetReleaseCoefficientBPS)
 	applyIfNonZero(&p.AvailabilityWindowSize, proposal.TargetAvailabilityWindowSize)
 	applyIfNonZero(&p.AvailabilityThresholdBPS, proposal.TargetAvailabilityThresholdBPS)
 	applyIfNonZero(&p.BlockProductionRewardBPS, proposal.TargetBlockProductionRewardBPS)
+	applyIfNonZero(&p.ValidatorRewardPerBlock, proposal.TargetValidatorRewardPerBlock)
 	applyIfNonZero(&p.MaxConsensusValidators, proposal.TargetMaxConsensusValidators)
 	applyIfNonZero(&p.MinConsensusValidators, proposal.TargetMinConsensusValidators)
 	applyIfNonZero(&p.TargetBlockBytes, proposal.TargetBlockBytes)
@@ -592,17 +588,16 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 		value uint64
 		max   uint64
 	}{
-		{"storage_annual_rate_bps", p.StorageAnnualRateBPS, maxAnnualReleaseRateBPS},
+		{"storage_reward_per_block", p.StorageRewardPerBlock, maxStorageRewardPerBlock},
 		{"retrieval_annual_rate_bps", p.RetrievalAnnualRateBPS, maxAnnualReleaseRateBPS},
-		{"validator_annual_rate_bps", p.ValidatorAnnualRateBPS, maxAnnualReleaseRateBPS},
 		{"foundation_annual_rate_bps", p.FoundationAnnualRateBPS, maxAnnualReleaseRateBPS},
 	} {
 		if check.value > check.max {
 			return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: %s %d exceeds maximum %d", check.name, check.value, check.max)
 		}
 	}
-	if p.ReleaseCoefficientBPS != 0 && (p.ReleaseCoefficientBPS < minReleaseCoefficientBPS || p.ReleaseCoefficientBPS > maxReleaseCoefficientBPS) {
-		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: release_coefficient_bps %d out of range [%d, %d]", p.ReleaseCoefficientBPS, minReleaseCoefficientBPS, maxReleaseCoefficientBPS)
+	if p.ValidatorRewardPerBlock > maxValidatorRewardPerBlock {
+		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: validator_reward_per_block %d exceeds maximum %d", p.ValidatorRewardPerBlock, maxValidatorRewardPerBlock)
 	}
 	if p.StorageProofSamples < minStorageProofSamples || p.StorageProofSamples > maxStorageProofSamples {
 		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: storage_proof_samples %d out of range [%d, %d]", p.StorageProofSamples, minStorageProofSamples, maxStorageProofSamples)
@@ -944,7 +939,6 @@ func validateConfigChangeFields(req wire.CreateGovernanceProposalRequest) error 
 func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, currentParams *MiningParams) error {
 	if req.TargetStorageReleaseRateBPS != 0 ||
 		req.TargetRetrievalReleaseRateBPS != 0 ||
-		req.TargetValidatorReleaseRateBPS != 0 ||
 		req.TargetFoundationReleaseRateBPS != 0 ||
 		req.TargetStoredBytesWeightBPS != 0 ||
 		req.TargetProofScoreWeightBPS != 0 ||
@@ -959,14 +953,13 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		req.TargetStorageProofSamples != 0 ||
 		req.TargetValidatorCommissionBPS != 0 ||
 		req.TargetRetrievalWeightBPS != 0 ||
-		req.TargetStorageAnnualRateBPS != 0 ||
+		req.TargetStorageRewardPerBlock != 0 ||
 		req.TargetRetrievalAnnualRateBPS != 0 ||
-		req.TargetValidatorAnnualRateBPS != 0 ||
 		req.TargetFoundationAnnualRateBPS != 0 ||
-		req.TargetReleaseCoefficientBPS != 0 ||
 		req.TargetAvailabilityWindowSize != 0 ||
 		req.TargetAvailabilityThresholdBPS != 0 ||
 		req.TargetBlockProductionRewardBPS != 0 ||
+		req.TargetValidatorRewardPerBlock != 0 ||
 		req.TargetMaxConsensusValidators != 0 ||
 		req.TargetMinConsensusValidators != 0 ||
 		req.TargetBlockBytes != 0 ||
@@ -1022,9 +1015,8 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 		name  string
 		value uint64
 	}{
-		{"storage_annual_rate_bps", req.TargetStorageAnnualRateBPS},
+		{"storage_reward_per_block", req.TargetStorageRewardPerBlock},
 		{"retrieval_annual_rate_bps", req.TargetRetrievalAnnualRateBPS},
-		{"validator_annual_rate_bps", req.TargetValidatorAnnualRateBPS},
 		{"foundation_annual_rate_bps", req.TargetFoundationAnnualRateBPS},
 	} {
 		if check.value != 0 && check.value > maxAnnualReleaseRateBPS {
@@ -1032,14 +1024,9 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 		}
 	}
 
-	// Release coefficient: if non-zero, must be in [min, max].
-	if req.TargetReleaseCoefficientBPS != 0 {
-		if req.TargetReleaseCoefficientBPS < minReleaseCoefficientBPS {
-			return fmt.Errorf("release_coefficient_bps must be >= %d", minReleaseCoefficientBPS)
-		}
-		if req.TargetReleaseCoefficientBPS > maxReleaseCoefficientBPS {
-			return fmt.Errorf("release_coefficient_bps must be <= %d", maxReleaseCoefficientBPS)
-		}
+	// Validator reward per block: if non-zero, must be <= max.
+	if req.TargetValidatorRewardPerBlock != 0 && req.TargetValidatorRewardPerBlock > maxValidatorRewardPerBlock {
+		return fmt.Errorf("validator_reward_per_block must be <= %d", maxValidatorRewardPerBlock)
 	}
 
 	// Weight BPS sum: use proposed values where non-zero, fall back to current.
@@ -1135,7 +1122,6 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetOperatorChangeThresholdDen:  p.TargetOperatorChangeThresholdDen,
 		TargetStorageReleaseRateBPS:       p.TargetStorageReleaseRateBPS,
 		TargetRetrievalReleaseRateBPS:     p.TargetRetrievalReleaseRateBPS,
-		TargetValidatorReleaseRateBPS:     p.TargetValidatorReleaseRateBPS,
 		TargetStoredBytesWeightBPS:        p.TargetStoredBytesWeightBPS,
 		TargetProofScoreWeightBPS:         p.TargetProofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       p.TargetAvailabilityWeightBPS,
@@ -1152,14 +1138,13 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetFoundationReleaseRateBPS:    p.TargetFoundationReleaseRateBPS,
 		TargetFoundationAddress:           p.TargetFoundationAddress,
 		TargetRetrievalAddress:            p.TargetRetrievalAddress,
-		TargetStorageAnnualRateBPS:        p.TargetStorageAnnualRateBPS,
+		TargetStorageRewardPerBlock:       p.TargetStorageRewardPerBlock,
 		TargetRetrievalAnnualRateBPS:      p.TargetRetrievalAnnualRateBPS,
-		TargetValidatorAnnualRateBPS:      p.TargetValidatorAnnualRateBPS,
 		TargetFoundationAnnualRateBPS:     p.TargetFoundationAnnualRateBPS,
-		TargetReleaseCoefficientBPS:       p.TargetReleaseCoefficientBPS,
 		TargetAvailabilityWindowSize:      p.TargetAvailabilityWindowSize,
 		TargetAvailabilityThresholdBPS:    p.TargetAvailabilityThresholdBPS,
 		TargetBlockProductionRewardBPS:    p.TargetBlockProductionRewardBPS,
+		TargetValidatorRewardPerBlock:     p.TargetValidatorRewardPerBlock,
 		TargetMaxConsensusValidators:      p.TargetMaxConsensusValidators,
 		TargetMinConsensusValidators:      p.TargetMinConsensusValidators,
 		TargetBlockBytes:                  p.TargetBlockBytes,

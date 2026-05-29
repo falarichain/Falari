@@ -2,6 +2,7 @@ package chain
 
 import (
 	"log"
+	"math/big"
 	"time"
 
 	"chain/internal/reward"
@@ -32,91 +33,78 @@ func (s *Store) releaseEpochRewardsLocked(now int64) {
 
 	const secondsPerYear int64 = 365 * 86400
 
-	// Governance-controlled release coefficient.
-	coeff := params.ReleaseCoefficientBPS
-	if coeff == 0 {
-		coeff = 10000
-	}
-
-	// Storage: exponential decay (pool_remaining × rate).
-	storageBPS := params.StorageAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
-	storageBPS = storageBPS * coeff / 10000
-	// Pass 0 for retrieval/validator/foundation — handled separately.
-	storageRelease, _, _, _ := s.data.RewardPools.ReleaseEpochRewards(
-		storageBPS, 0, 0, 0,
-	)
+	// Storage: released per-block, not per-epoch (see releaseStoragePerBlockLocked).
 
 	// Foundation: linear release (initialAmount × rate).
-	foundationBPS := params.FoundationAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
-	foundationBPS = foundationBPS * coeff / 10000
-	foundationRelease := s.data.RewardPools.ReleaseLinear(
-		&s.data.RewardPools.FoundationRemaining,
-		reward.FoundationPoolInitial,
-		foundationBPS,
-	)
+	foundationRelease := releaseProportionalLocked(&s.data.RewardPools.FoundationRemaining, reward.FoundationPoolInitial, params.FoundationAnnualRateBPS, elapsed, secondsPerYear)
 
 	// Retrieval: linear release (initialAmount × rate).
-	retrievalBPS := params.RetrievalAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
-	retrievalBPS = retrievalBPS * coeff / 10000
-	retrievalRelease := s.data.RewardPools.ReleaseLinear(
-		&s.data.RewardPools.RetrievalRemaining,
-		reward.RetrievalPoolInitial,
-		retrievalBPS,
-	)
+	retrievalRelease := releaseProportionalLocked(&s.data.RewardPools.RetrievalRemaining, reward.RetrievalPoolInitial, params.RetrievalAnnualRateBPS, elapsed, secondsPerYear)
 
 	// Validator: released per-block, not per-epoch (see releaseValidatorPerBlockLocked).
 
-	s.distributeStoragePoolRewardsLocked(storageRelease, now)
+	totalRelease := saturatingAdd(retrievalRelease, foundationRelease)
+	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, totalRelease)
 	s.distributeRetrievalPoolRewardsLocked(retrievalRelease)
 	s.distributeFoundationPoolRewardsLocked(foundationRelease)
-	if storageRelease > 0 || retrievalRelease > 0 || foundationRelease > 0 {
-		log.Printf("token release epoch=%d elapsed=%ds coeff=%d storage=%d retrieval=%d foundation=%d total=%d",
-			s.data.EpochRound, elapsed, coeff, storageRelease, retrievalRelease, foundationRelease,
-			storageRelease+retrievalRelease+foundationRelease)
+	if retrievalRelease > 0 || foundationRelease > 0 {
+		log.Printf("token release epoch=%d elapsed=%ds retrieval=%d foundation=%d total=%d",
+			s.data.EpochRound, elapsed, retrievalRelease, foundationRelease,
+			retrievalRelease+foundationRelease)
 	}
 }
 
-// releaseValidatorPerBlockLocked releases validator rewards proportional to the
-// time elapsed since the last per-block release. Uses linear release (constant
-// emission based on ValidatorPoolInitial). Called on every block production / acceptance.
-// Rewards are split: BlockProductionRewardBPS (default 30%) goes directly to the block
-// producer without vesting; the remainder (70%) is distributed to all consensus
-// validators with 90-day vesting.
+func releaseProportionalLocked(pool *uint64, baseAmount uint64, annualRateBPS uint64, elapsed int64, secondsPerYear int64) uint64 {
+	if pool == nil || *pool == 0 || baseAmount == 0 || annualRateBPS == 0 || elapsed <= 0 || secondsPerYear <= 0 {
+		return 0
+	}
+	amount := mulDivUint64(baseAmount, annualRateBPS, uint64(elapsed), uint64(secondsPerYear)*10000)
+	if amount > *pool {
+		amount = *pool
+	}
+	if amount == 0 {
+		return 0
+	}
+	*pool -= amount
+	return amount
+}
+
+func mulDivUint64(a, b, c, denominator uint64) uint64 {
+	if denominator == 0 {
+		return 0
+	}
+	n := new(big.Int).SetUint64(a)
+	n.Mul(n, new(big.Int).SetUint64(b))
+	n.Mul(n, new(big.Int).SetUint64(c))
+	n.Div(n, new(big.Int).SetUint64(denominator))
+	if !n.IsUint64() {
+		return ^uint64(0)
+	}
+	return n.Uint64()
+}
+
+// releaseValidatorPerBlockLocked releases a fixed ValidatorRewardPerBlock from
+// the ValidatorPool on every block. The reward is split: BlockProductionRewardBPS
+// (default 30%) goes directly to the block producer without vesting; the remainder
+// (70%) is distributed to all consensus validators with 90-day vesting.
 func (s *Store) releaseValidatorPerBlockLocked(now int64, producerAddress string) {
 	s.initRewardPoolsLocked()
 	params := s.miningParamsLocked()
 
-	lastRelease := s.data.LastValidatorReleaseAtUnix
-	if lastRelease == 0 {
-		s.data.LastValidatorReleaseAtUnix = now
+	perBlock := params.ValidatorRewardPerBlock
+	if perBlock == 0 {
+		perBlock = 16 * reward.TokenUnit
+	}
+	if s.data.RewardPools.ValidatorRemaining == 0 {
 		return
 	}
-	elapsed := now - lastRelease
-	if elapsed <= 0 {
-		return
+	validatorRelease := perBlock
+	if validatorRelease > s.data.RewardPools.ValidatorRemaining {
+		validatorRelease = s.data.RewardPools.ValidatorRemaining
 	}
+	s.data.RewardPools.ValidatorRemaining -= validatorRelease
+	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, validatorRelease)
 	s.data.LastValidatorReleaseAtUnix = now
-
-	const secondsPerYear int64 = 365 * 86400
-
-	// Governance-controlled release coefficient.
-	coeff := params.ReleaseCoefficientBPS
-	if coeff == 0 {
-		coeff = 10000
-	}
-
-	// Validator: linear release (initialAmount × rate).
-	validatorBPS := params.ValidatorAnnualRateBPS * uint64(elapsed) / uint64(secondsPerYear)
-	validatorBPS = validatorBPS * coeff / 10000
-	validatorRelease := s.data.RewardPools.ReleaseLinear(
-		&s.data.RewardPools.ValidatorRemaining,
-		reward.ValidatorPoolInitial,
-		validatorBPS,
-	)
-
-	if validatorRelease == 0 {
-		return
-	}
 
 	// Split: block production reward (direct to producer) + staking reward (distributed).
 	productionBPS := params.BlockProductionRewardBPS
@@ -139,8 +127,50 @@ func (s *Store) releaseValidatorPerBlockLocked(now int64, producerAddress string
 	// Distribute staking reward to all consensus validators (with vesting).
 	s.distributeValidatorPoolRewardsLocked(stakingReward, now)
 	if validatorRelease > 0 {
-		log.Printf("validator per-block release elapsed=%ds coeff=%d total=%d producer=%d staking=%d",
-			elapsed, coeff, validatorRelease, blockReward, stakingReward)
+		log.Printf("validator per-block release total=%d producer=%d staking=%d",
+			validatorRelease, blockReward, stakingReward)
+	}
+}
+
+// releaseStoragePerBlockLocked releases a fixed StorageRewardPerBlock from
+// the StoragePool on every block into a global reward index. Miners settle
+// their accrued share when they submit a valid storage proof.
+func (s *Store) releaseStoragePerBlockLocked(now int64) {
+	s.initRewardPoolsLocked()
+	params := s.miningParamsLocked()
+
+	perBlock := params.StorageRewardPerBlock
+	if perBlock == 0 {
+		perBlock = 50 * reward.TokenUnit
+	}
+	if s.data.RewardPools.StorageRemaining == 0 {
+		return
+	}
+	_, totalWeight := s.storageRewardEligibleEntriesLocked()
+	if totalWeight.Sign() == 0 {
+		return
+	}
+	storageRelease := perBlock
+	if storageRelease > s.data.RewardPools.StorageRemaining {
+		storageRelease = s.data.RewardPools.StorageRemaining
+	}
+	numerator := new(big.Int).Mul(new(big.Int).SetUint64(storageRelease), storageRewardIndexScale())
+	numerator.Add(numerator, parseStorageRewardIndex(s.data.StorageRewardRemainder))
+	indexIncrement := new(big.Int).Div(numerator, totalWeight)
+	remainder := new(big.Int).Mod(numerator, totalWeight)
+	if indexIncrement.Sign() == 0 {
+		s.data.StorageRewardRemainder = remainder.String()
+		return
+	}
+	index := parseStorageRewardIndex(s.data.StorageRewardIndex)
+	index.Add(index, indexIncrement)
+	s.data.StorageRewardIndex = index.String()
+	s.data.StorageRewardRemainder = remainder.String()
+	s.data.RewardPools.StorageRemaining -= storageRelease
+	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, storageRelease)
+
+	if storageRelease > 0 {
+		log.Printf("storage per-block release total=%d index_increment=%s time=%d", storageRelease, indexIncrement.String(), now)
 	}
 }
 

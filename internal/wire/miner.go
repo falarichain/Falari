@@ -99,3 +99,35 @@ func VerifyDeregisterMiner(req DeregisterMinerRequest) error {
 	}
 	return verifyInfraSignature(req.MinerAddress, req.Signature, payload)
 }
+
+type claimMiningRewardsPayload struct {
+	Action       string `json:"action"`
+	ChainID      string `json:"chain_id"`
+	MinerAddress string `json:"miner_address"`
+	Nonce        uint64 `json:"nonce"`
+}
+
+func SignClaimMiningRewards(req *ClaimMiningRewardsRequest, privateKey *ecdsa.PrivateKey) error {
+	payload := claimMiningRewardsPayload{
+		Action:       "claim_mining_rewards",
+		ChainID:      req.ChainID,
+		MinerAddress: req.MinerAddress,
+		Nonce:        req.Nonce,
+	}
+	sig, _, err := signInfraPayload(payload, privateKey)
+	if err != nil {
+		return err
+	}
+	req.Signature = sig
+	return nil
+}
+
+func VerifyClaimMiningRewards(req ClaimMiningRewardsRequest) error {
+	payload := claimMiningRewardsPayload{
+		Action:       "claim_mining_rewards",
+		ChainID:      req.ChainID,
+		MinerAddress: req.MinerAddress,
+		Nonce:        req.Nonce,
+	}
+	return verifyInfraSignature(req.MinerAddress, req.Signature, payload)
+}

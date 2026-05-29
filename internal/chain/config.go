@@ -1,5 +1,9 @@
 package chain
 
+import (
+	"chain/internal/reward"
+)
+
 // MiningParams holds all mining-related parameters that can be hot-reloaded
 // via the admin API without restarting the chain.
 type MiningParams struct {
@@ -7,22 +11,19 @@ type MiningParams struct {
 	// Legacy per-epoch rates (deprecated, kept for backward compatibility).
 	StorageReleaseRateBPS    uint64 `json:"storage_release_rate_bps"`
 	RetrievalReleaseRateBPS  uint64 `json:"retrieval_release_rate_bps"`
-	ValidatorReleaseRateBPS  uint64 `json:"validator_release_rate_bps"`
 	FoundationReleaseRateBPS uint64 `json:"foundation_release_rate_bps"`
 
 	// ── Annual release rates (BPS per year, time-proportional) ──
 	// effectiveBPS = annualRateBPS * elapsedSeconds / 31_536_000
-	// StoragePool: 500 BPS = 5%/year → 6B total, ~300M/year.
 	StorageAnnualRateBPS    uint64 `json:"storage_annual_rate_bps"`
 	RetrievalAnnualRateBPS  uint64 `json:"retrieval_annual_rate_bps"`
-	ValidatorAnnualRateBPS  uint64 `json:"validator_annual_rate_bps"`
 	FoundationAnnualRateBPS uint64 `json:"foundation_annual_rate_bps"`
 
-	// ── Release coefficient (governance-adjustable multiplier) ──
-	// Applied to all pools' annual release rates.
-	// effectiveAnnualBPS = annualRateBPS * ReleaseCoefficientBPS / 10000
-	// Default 10000 = 1.0x. Governance committee votes to increase or decrease.
-	ReleaseCoefficientBPS uint64 `json:"release_coefficient_bps"`
+	// ── Storage per-block reward ──
+	// StorageRewardPerBlock: fixed number of smallest-unit tokens released from
+	// the StoragePool on every block. Default 50 * TokenUnit (50 tokens).
+	// When the pool is depleted, no more storage rewards are emitted.
+	StorageRewardPerBlock uint64 `json:"storage_reward_per_block,omitempty"`
 
 	// ── Miner effective weight factors (BPS) ──
 	StoredBytesWeightBPS      uint64 `json:"stored_bytes_weight_bps"`
@@ -65,6 +66,12 @@ type MiningParams struct {
 	// The remainder (70%) is distributed to all consensus validators with vesting.
 	BlockProductionRewardBPS uint64 `json:"block_production_reward_bps,omitempty"`
 
+	// ── Validator per-block reward ──
+	// ValidatorRewardPerBlock: fixed number of smallest-unit tokens released from
+	// the ValidatorPool on every block. Default 16 * TokenUnit (16 tokens).
+	// When the pool is depleted, no more validator rewards are emitted.
+	ValidatorRewardPerBlock uint64 `json:"validator_reward_per_block,omitempty"`
+
 	// ── Consensus validator set limits ──
 	MaxConsensusValidators uint64 `json:"max_consensus_validators,omitempty"`
 	MinConsensusValidators uint64 `json:"min_consensus_validators,omitempty"`
@@ -78,6 +85,17 @@ type MiningParams struct {
 
 	// ── DHT / Retrieval obligation ──
 	RetrievalWeightBPS uint64 `json:"retrieval_weight_bps"`
+
+	// ── Registration bonus ──
+	// RegistrationBonusAmount: one-time locked bonus granted to each new miner.
+	// Default 1000 * TokenUnit (1000 tokens).
+	RegistrationBonusAmount uint64 `json:"registration_bonus_amount,omitempty"`
+	// MinBonusProofCount: minimum successful proofs required to release the bonus.
+	// Default 5000 (~57 days at 4 proofs/epoch, 1h epoch, 95% success rate).
+	MinBonusProofCount uint64 `json:"min_bonus_proof_count,omitempty"`
+	// MinBonusSuccessRateBPS: minimum proof success rate (BPS) to release the bonus.
+	// Default 9500 = 95%.
+	MinBonusSuccessRateBPS uint64 `json:"min_bonus_success_rate_bps,omitempty"`
 }
 
 // DefaultMiningParams returns the factory-default mining parameters.
@@ -85,13 +103,10 @@ func DefaultMiningParams() MiningParams {
 	return MiningParams{
 		StorageReleaseRateBPS:       3,
 		RetrievalReleaseRateBPS:     0,
-		ValidatorReleaseRateBPS:     2,
 		FoundationReleaseRateBPS:    1,
-		StorageAnnualRateBPS:        500,
 		RetrievalAnnualRateBPS:      1000,
-		ValidatorAnnualRateBPS:      1000,
 		FoundationAnnualRateBPS:     1000,
-		ReleaseCoefficientBPS:       10000,
+		StorageRewardPerBlock:       50 * reward.TokenUnit,
 		StoredBytesWeightBPS:        4000,
 		ProofScoreWeightBPS:         3500,
 		AvailabilityWeightBPS:       1500,
@@ -107,6 +122,7 @@ func DefaultMiningParams() MiningParams {
 		AvailabilityWindowSize:      7200,
 		AvailabilityThresholdBPS:    6000,
 		BlockProductionRewardBPS:    3000,
+		ValidatorRewardPerBlock:     16 * reward.TokenUnit,
 		MaxConsensusValidators:      21,
 		MinConsensusValidators:      2,
 		TargetBlockBytes:            defaultTargetBlockBytes,
@@ -115,6 +131,9 @@ func DefaultMiningParams() MiningParams {
 		MaxTxBytes:                  defaultMaxTxBytes,
 		MaxStorageTxBytes:           defaultMaxStorageTxBytes,
 		RetrievalWeightBPS:          1000,
+		RegistrationBonusAmount:     1000 * reward.TokenUnit,
+		MinBonusProofCount:          5000,
+		MinBonusSuccessRateBPS:      9500,
 	}
 }
 
@@ -132,13 +151,13 @@ func (s *Store) miningParamsLocked() *MiningParams {
 // Governance parameter bounds — hard safety limits that cannot be exceeded
 // even through governance proposals.
 const (
-	maxAnnualReleaseRateBPS    = 5000  // 50%/year
-	minReleaseCoefficientBPS   = 1000  // 0.1x
-	maxReleaseCoefficientBPS   = 50000 // 5.0x
-	maxWeightBPSSum            = 10000 // sum of 4 weight BPS must not exceed 100%
-	minStorageProofSamples     = 1
-	maxStorageProofSamples     = 64
-	minMinerDegradeThreshold   = 1
-	maxMinerDegradeThreshold   = 100
+	maxAnnualReleaseRateBPS     = 5000                    // 50%/year
+	maxValidatorRewardPerBlock  = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
+	maxStorageRewardPerBlock    = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
+	maxWeightBPSSum             = 10000                   // sum of 4 weight BPS must not exceed 100%
+	minStorageProofSamples      = 1
+	maxStorageProofSamples      = 64
+	minMinerDegradeThreshold    = 1
+	maxMinerDegradeThreshold    = 100
 	maxConsensusValidatorsLimit = 100
 )

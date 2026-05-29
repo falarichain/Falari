@@ -10,7 +10,9 @@ import (
 )
 
 const repairStatusPending = "pending"
+const repairStatusProofPending = "proof_pending"
 const repairStatusCompleted = "completed"
+const defaultRepairProofChallengeDuration = 10 * time.Minute
 
 type createRepairTasksTxPayload struct {
 	Request       wire.CreateRepairRequest `json:"request"`
@@ -219,27 +221,88 @@ func (s *Store) pendingRepairTaskForShardLocked(intentID string, segmentID int, 
 	return wire.RepairTask{}, false
 }
 
-func (s *Store) completeRepairTaskLocked(task wire.RepairTask) {
+func (s *Store) requireRepairProofLocked(task wire.RepairTask, receipt wire.MinerReceipt, now int64) (wire.StorageChallenge, error) {
 	if task.RepairID == "" {
-		return
+		return wire.StorageChallenge{}, errors.New("repair task id is required")
+	}
+	challengeID, err := randomID("repair_challenge")
+	if err != nil {
+		return wire.StorageChallenge{}, err
+	}
+	nonce, err := randomID("repair_nonce")
+	if err != nil {
+		return wire.StorageChallenge{}, err
+	}
+	challenge := s.repairProofChallengeFromReceiptLocked(task, receipt, challengeID, nonce, now)
+	return s.applyRepairProofChallengeLocked(task, receipt, challenge)
+}
+
+func (s *Store) applyRepairProofChallengeLocked(task wire.RepairTask, receipt wire.MinerReceipt, challenge wire.StorageChallenge) (wire.StorageChallenge, error) {
+	if task.RepairID == "" {
+		return wire.StorageChallenge{}, errors.New("repair task id is required")
+	}
+	if challenge.RepairID != task.RepairID {
+		return wire.StorageChallenge{}, errors.New("repair proof challenge id mismatch")
+	}
+	if challenge.ChallengeID == "" || challenge.Nonce == "" {
+		return wire.StorageChallenge{}, errors.New("repair proof challenge missing id or nonce")
+	}
+	if challenge.MinerAddress != receipt.MinerAddress || challenge.MinerPublicKey != receipt.MinerPublicKey {
+		return wire.StorageChallenge{}, errors.New("repair proof challenge miner mismatch")
+	}
+	if challenge.IntentID != task.IntentID || challenge.SegmentID != task.SegmentID || challenge.ShardIndex != task.ShardIndex {
+		return wire.StorageChallenge{}, errors.New("repair proof challenge shard mismatch")
+	}
+	if challenge.Reward != 0 {
+		return wire.StorageChallenge{}, errors.New("repair proof challenge must not pay storage proof reward")
+	}
+	if challenge.ChallengeHash != storageChallengeHash(challenge) {
+		return wire.StorageChallenge{}, errors.New("repair proof challenge hash mismatch")
 	}
 	existing, ok := s.data.RepairTasks[task.RepairID]
-	if !ok || existing.Status == repairStatusCompleted {
-		return
+	if !ok {
+		existing = task
 	}
-	existing.Status = repairStatusCompleted
+	existing.Status = repairStatusProofPending
+	existing.ProofChallengeID = challenge.ChallengeID
+	existing.ProofVerified = false
 	s.data.RepairTasks[task.RepairID] = existing
+	s.data.Challenges[challenge.ChallengeID] = challenge
+	return challenge, nil
+}
 
+func (s *Store) repairProofChallengeFromReceiptLocked(task wire.RepairTask, receipt wire.MinerReceipt, challengeID string, nonce string, now int64) wire.StorageChallenge {
+	intent := s.data.Intents[task.IntentID]
+	deadline := now + int64(defaultRepairProofChallengeDuration/time.Second)
+	return s.storageChallengeForReceiptLocked(intent, receipt, "", task.RepairID, challengeID, nonce, deadline, 0)
+}
+
+func (s *Store) completeRepairTaskAfterProofLocked(repairID string, challengeID string) uint64 {
+	if repairID == "" || challengeID == "" {
+		return 0
+	}
+	existing, ok := s.data.RepairTasks[repairID]
+	if !ok || existing.Status == repairStatusCompleted {
+		return 0
+	}
+	if existing.ProofChallengeID != challengeID {
+		return 0
+	}
 	intent, ok := s.data.Intents[existing.IntentID]
 	if !ok {
-		return
+		return 0
 	}
+	existing.Status = repairStatusCompleted
+	existing.ProofVerified = true
+	s.data.RepairTasks[repairID] = existing
+
 	reward := s.miningParamsLocked().RepairRewardPerShard
 	s.payRepairRewardLocked(intent, existing.Assignment.MinerAddress, reward)
 	stats := s.minerStatsLocked(existing.Assignment.MinerAddress)
 	stats.RepairRewards = saturatingAdd(stats.RepairRewards, reward)
 	stats.Rewards = saturatingAdd(stats.Rewards, reward)
 	s.data.Miners[existing.Assignment.MinerAddress] = stats
+	return reward
 }
 
 func repairTaskID(intentID string, segmentID int, shardIndex int, minerAddress string) string {

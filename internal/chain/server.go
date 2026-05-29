@@ -79,6 +79,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /epochs/{id}/rewards", s.epochRewards)
 	mux.HandleFunc("POST /miners", s.registerMiner)
 	mux.HandleFunc("POST /miners/deregister", s.deregisterMiner)
+	mux.HandleFunc("POST /miners/claim-rewards", s.claimMiningRewards)
 	mux.HandleFunc("GET /miners/", s.getMinerStats)
 	mux.HandleFunc("POST /validators", s.registerValidator)
 	mux.HandleFunc("GET /validators", s.listValidators)
@@ -586,6 +587,19 @@ func (s *Server) deregisterMiner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": wire.MinerStatusExiting})
+}
+
+func (s *Server) claimMiningRewards(w http.ResponseWriter, r *http.Request) {
+	var req wire.ClaimMiningRewardsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.ClaimMiningRewards(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) registerValidator(w http.ResponseWriter, r *http.Request) {

@@ -411,8 +411,25 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	fromAccount := store.accountLocked(from)
 	toAccount := store.accountLocked(to)
 	producerAccount := store.accountLocked(identity.OwnerAddress)
-	if fromAccount.Balance != gfTokens(70) || toAccount.Balance != gfTokens(25) || producerAccount.Balance != gfTokens(5) {
-		t.Fatalf("unexpected fee balances: from=%+v to=%+v producer=%+v", fromAccount, toAccount, producerAccount)
+	if fromAccount.Balance != gfTokens(70) {
+		t.Fatalf("unexpected sender balance: %d", fromAccount.Balance)
+	}
+	if toAccount.Balance != gfTokens(25) {
+		t.Fatalf("unexpected recipient balance: %d", toAccount.Balance)
+	}
+	// Producer receives the transaction fee PLUS the block production reward
+	// (BlockProductionRewardBPS% of ValidatorRewardPerBlock, no vesting).
+	params := store.miningParamsLocked()
+	perBlock := params.ValidatorRewardPerBlock
+	productionBPS := params.BlockProductionRewardBPS
+	if productionBPS == 0 {
+		productionBPS = 3000
+	}
+	blockReward := perBlock * productionBPS / 10000
+	expectedProducerBal := gfTokens(5) + blockReward
+	if producerAccount.Balance != expectedProducerBal {
+		t.Fatalf("unexpected producer balance: expected %d (fee %d + block reward %d), got %d",
+			expectedProducerBal, gfTokens(5), blockReward, producerAccount.Balance)
 	}
 }
 

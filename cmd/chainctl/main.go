@@ -27,6 +27,7 @@ import (
 	"chain/internal/client"
 	"chain/internal/consensus"
 	chaincrypto "chain/internal/crypto"
+	"chain/internal/reward"
 	"chain/internal/storage"
 	"chain/internal/wire"
 
@@ -1216,8 +1217,8 @@ func governancePropose(args []string) {
 	opChangeThresholdDen := fs.Int("op-change-threshold-den", 0, "operator change threshold denominator (for update_config)")
 	// Mining params flags.
 	storageReleaseRateBPS := fs.Uint64("storage-release-rate-bps", 0, "storage pool release rate BPS (for update_mining_params)")
+	storageRewardPerBlock := fs.Uint64("storage-reward-per-block", 0, "storage pool per-block reward in smallest units (for update_mining_params)")
 	retrievalReleaseRateBPS := fs.Uint64("retrieval-release-rate-bps", 0, "retrieval pool release rate BPS (for update_mining_params)")
-	validatorReleaseRateBPS := fs.Uint64("validator-release-rate-bps", 0, "validator pool release rate BPS (for update_mining_params)")
 	storedBytesWeightBPS := fs.Uint64("stored-bytes-weight-bps", 0, "stored bytes weight factor BPS (for update_mining_params)")
 	proofScoreWeightBPS := fs.Uint64("proof-score-weight-bps", 0, "proof score weight factor BPS (for update_mining_params)")
 	availabilityWeightBPS := fs.Uint64("availability-weight-bps", 0, "availability weight factor BPS (for update_mining_params)")
@@ -1277,8 +1278,8 @@ func governancePropose(args []string) {
 		TargetOperatorChangeThresholdNum:  *opChangeThresholdNum,
 		TargetOperatorChangeThresholdDen:  *opChangeThresholdDen,
 		TargetStorageReleaseRateBPS:       *storageReleaseRateBPS,
+		TargetStorageRewardPerBlock:       *storageRewardPerBlock,
 		TargetRetrievalReleaseRateBPS:     *retrievalReleaseRateBPS,
-		TargetValidatorReleaseRateBPS:     *validatorReleaseRateBPS,
 		TargetStoredBytesWeightBPS:        *storedBytesWeightBPS,
 		TargetProofScoreWeightBPS:         *proofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       *availabilityWeightBPS,
@@ -1924,9 +1925,9 @@ func runEpoch(args []string) {
 	fs := flag.NewFlagSet("epoch", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
 	intentID := fs.String("intent", "", "optional intent id")
-	challengesPerDeal := fs.Int("challenges", 3, "challenges per finalized deal")
+	challengesPerDeal := fs.Int("challenges", 4, "challenges per finalized deal")
 	keyPath := fs.String("key", "", "path to governance operator key file")
-	reward := fs.Uint64("reward", 1, "reward per accepted proof")
+	rewardPerProof := fs.Uint64("reward", reward.TokenUnit, "reward per accepted proof")
 	slash := fs.Uint64("slash", 1, "slash per missed proof")
 	duration := fs.Int64("duration", 600, "epoch duration in seconds")
 	storageURLs := fs.String("storage", "", "fallback comma-separated storage node URLs")
@@ -1941,7 +1942,7 @@ func runEpoch(args []string) {
 		IntentID:            *intentID,
 		ChallengesPerDeal:   *challengesPerDeal,
 		DurationSeconds:     *duration,
-		RewardPerProof:      *reward,
+		RewardPerProof:      *rewardPerProof,
 		SlashPerMissedProof: *slash,
 	}, &epochResp, *keyPath); err != nil {
 		log.Fatal(err)
@@ -2001,8 +2002,16 @@ func minerStats(args []string) {
 	if err := client.NewHTTP(*chainURL).Get("/miners/"+*miner, &stats); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("miner %s status=%s success=%d failure=%d consecutive=%d rewards=%s storage_rewards=%s retrieval_rewards=%s repair_rewards=%s slashed=%s\n",
-		stats.MinerAddress, stats.Status, stats.ProofSuccess, stats.ProofFailure, stats.ConsecutiveFailures, formatGF(stats.Rewards), formatGF(stats.StorageRewards), formatGF(stats.RetrievalRewards), formatGF(stats.RepairRewards), formatGF(stats.Slashed))
+	total := stats.ProofSuccess + stats.ProofFailure
+	successRate := "N/A"
+	if total > 0 {
+		rate := float64(stats.ProofSuccess) / float64(total) * 100
+		successRate = fmt.Sprintf("%.1f%%", rate)
+	}
+	fmt.Printf("miner %s status=%s success=%d failure=%d success_rate=%s consecutive=%d rewards=%s storage_rewards=%s retrieval_rewards=%s repair_rewards=%s slashed=%s locked_bonus=%s bonus_released=%v\n",
+		stats.MinerAddress, stats.Status, stats.ProofSuccess, stats.ProofFailure, successRate, stats.ConsecutiveFailures,
+		formatGF(stats.Rewards), formatGF(stats.StorageRewards), formatGF(stats.RetrievalRewards), formatGF(stats.RepairRewards),
+		formatGF(stats.Slashed), formatGF(stats.LockedBonus), stats.BonusReleased)
 }
 
 func balance(args []string) {
@@ -2238,8 +2247,8 @@ func evmRecordAppend(args []string) {
 }
 
 func printAccount(account wire.Account) {
-	fmt.Printf("account %s balance=%s nonce=%d locked_stake=%s locked_storage=%s pending_mining=%s\n",
-		account.Address, formatGF(account.Balance), account.Nonce, formatGF(account.LockedStake), formatGF(account.LockedStorage), formatGF(account.PendingMiningRewards))
+	fmt.Printf("account %s balance=%s nonce=%d locked_stake=%s locked_storage=%s locked_bonus=%s pending_mining=%s\n",
+		account.Address, formatGF(account.Balance), account.Nonce, formatGF(account.LockedStake), formatGF(account.LockedStorage), formatGF(account.LockedBonus), formatGF(account.PendingMiningRewards))
 }
 
 func accountNonce(chainURL string, address string) uint64 {

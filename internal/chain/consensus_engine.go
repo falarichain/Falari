@@ -162,6 +162,7 @@ func (s *Store) stateRootLocked() string {
 	for _, account := range s.data.Accounts {
 		leaves = append(leaves, hashString("account:"+account.Address+":"+u64toa(account.Balance)+":"+u64toa(account.LockedStorage)+":"+u64toa(account.LockedStake)+":"+u64toa(account.PendingMiningRewards)))
 	}
+	leaves = append(leaves, hashString("storage_reward_index:"+s.data.StorageRewardIndex+":"+s.data.StorageRewardRemainder))
 	sort.Strings(leaves)
 	return chaincryptoMerkleRoot(leaves)
 }
@@ -184,8 +185,9 @@ func (s *Store) fullStateRootLocked() string {
 		leaves = append(leaves, hashString("intent:"+intent.IntentID+":"+intent.Status+":"+intent.StorageStatus))
 	}
 	for _, miner := range s.data.Miners {
-		leaves = append(leaves, hashString("miner:"+miner.MinerAddress+":"+miner.Status+":"+u64toa(miner.ProofSuccess)+":"+u64toa(miner.ProofFailure)+":"+u64toa(miner.Stake)+":"+booltoa(miner.AccessServiceRequired)+":"+booltoa(miner.UploadServiceEnabled)+":"+booltoa(miner.DownloadServiceEnabled)))
+		leaves = append(leaves, hashString("miner:"+miner.MinerAddress+":"+miner.Status+":"+u64toa(miner.ProofSuccess)+":"+u64toa(miner.ProofFailure)+":"+u64toa(miner.Stake)+":"+u64toa(miner.EffectiveWeight)+":"+u64toa(miner.StorageRewards)+":"+u64toa(miner.StorageRewardAccrued)+":"+miner.StorageRewardIndex+":"+booltoa(miner.AccessServiceRequired)+":"+booltoa(miner.UploadServiceEnabled)+":"+booltoa(miner.DownloadServiceEnabled)))
 	}
+	leaves = append(leaves, hashString("storage_reward_index:"+s.data.StorageRewardIndex+":"+s.data.StorageRewardRemainder))
 	for _, validator := range s.data.Validators {
 		leaves = append(leaves, hashString("validator:"+validator.OwnerAddress+":"+validator.OperatorPublicKey+":"+validator.Status+":"+u64toa(validatorPower(validator))))
 	}

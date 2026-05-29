@@ -11,6 +11,8 @@ func (s *Store) Status() wire.ChainStatusResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.finalizeExitingMinersLocked()
+
 	resp := wire.ChainStatusResponse{
 		ChainID:             s.data.ChainID,
 		Status:              "ok",
@@ -75,16 +77,16 @@ func (s *Store) Status() wire.ChainStatusResponse {
 	// Compute estimated per-block validator reward.
 	if s.blockInterval > 0 {
 		params := s.miningParamsLocked()
-		blockSecs := uint64(s.blockInterval.Seconds())
-		if blockSecs == 0 {
-			blockSecs = 5
+		perBlock := params.ValidatorRewardPerBlock
+		if perBlock == 0 {
+			perBlock = 16 * reward.TokenUnit
 		}
-		coeff := params.ReleaseCoefficientBPS
-		if coeff == 0 {
-			coeff = 10000
+		resp.ValidatorRewardPerBlock = perBlock
+		storagePerBlock := params.StorageRewardPerBlock
+		if storagePerBlock == 0 {
+			storagePerBlock = 50 * reward.TokenUnit
 		}
-		const secondsPerYear uint64 = 365 * 86400
-		resp.ValidatorRewardPerBlock = reward.ValidatorPoolInitial * params.ValidatorAnnualRateBPS * blockSecs / secondsPerYear * coeff / 10000
+		resp.StorageRewardPerBlock = storagePerBlock
 		// Compute average availability and below-threshold count for consensus validators.
 		availThreshold := params.AvailabilityThresholdBPS
 		if availThreshold == 0 {

@@ -207,14 +207,17 @@ func (s *Store) refreshMiners(ctx context.Context) {
 	for _, p := range resp.Providers {
 		_, err := s.pool.Exec(ctx, `
 			INSERT INTO miners (miner_address, public_key, endpoint, capacity_bytes, used_bytes,
-				status, last_seen_unix)
-			VALUES ($1,$2,$3,$4,$5,'active',$6)
+				proof_success, proof_failure, status, last_seen_unix)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8)
 			ON CONFLICT (miner_address) DO UPDATE SET
 				endpoint = EXCLUDED.endpoint,
 				capacity_bytes = EXCLUDED.capacity_bytes,
 				used_bytes = EXCLUDED.used_bytes,
+				proof_success = EXCLUDED.proof_success,
+				proof_failure = EXCLUDED.proof_failure,
 				last_seen_unix = EXCLUDED.last_seen_unix
-		`, p.MinerAddress, p.PublicKey, p.Endpoint, p.CapacityBytes, p.StoredBytes, time.Now().Unix())
+		`, p.MinerAddress, p.PublicKey, p.Endpoint, p.CapacityBytes, p.StoredBytes,
+			p.ProofSuccess, p.ProofFailure, time.Now().Unix())
 		if err != nil {
 			log.Printf("explorer: insert miner %s error: %v", p.MinerAddress, err)
 		}

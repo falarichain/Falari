@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"chain/internal/reward"
 	"chain/internal/wire"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -831,5 +832,57 @@ func TestUpdateMiningParamsUsesOperatorChangeThreshold(t *testing.T) {
 	threshold := store.governanceThresholdLocked("update_mining_params")
 	if threshold != 2 {
 		t.Fatalf("expected threshold 2 for update_mining_params with 3 operators, got %d", threshold)
+	}
+}
+
+func TestUpdateMiningParamsValidatorRewardPerBlock(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	origParams := store.GetMiningParams()
+	newRewardPerBlock := 32 * reward.TokenUnit
+
+	req := wire.CreateGovernanceProposalRequest{
+		Proposer:                      addresses[0],
+		ChainID:                       store.data.ChainID,
+		Action:                        "update_mining_params",
+		ReasonHash:                    "adjust_validator_reward",
+		TargetValidatorRewardPerBlock: newRewardPerBlock,
+		Nonce:                         store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
+		CreatedAtUnix:                 time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
+		t.Fatal(err)
+	}
+	propResp, err := store.CreateGovernanceProposal(req)
+	if err != nil {
+		t.Fatalf("update_mining_params proposal failed: %v", err)
+	}
+	proposalID := propResp.Proposal.ProposalID
+
+	// Vote with enough operators to reach threshold (2 of 3).
+	for i := 0; i < 2; i++ {
+		voteReq := testGovernanceVoteReq(t, store, proposalID, addresses[i], true, privKeys[i])
+		voteResp, err := store.CastGovernanceVote(voteReq)
+		if err != nil {
+			t.Fatalf("vote %d failed: %v", i, err)
+		}
+		if voteResp.Executed {
+			break
+		}
+	}
+
+	updatedParams := store.GetMiningParams()
+	if updatedParams.ValidatorRewardPerBlock != newRewardPerBlock {
+		t.Fatalf("expected validator_reward_per_block %d, got %d",
+			newRewardPerBlock, updatedParams.ValidatorRewardPerBlock)
+	}
+	// Unrelated fields must remain unchanged.
+	if updatedParams.StorageReleaseRateBPS != origParams.StorageReleaseRateBPS {
+		t.Fatalf("storage release rate should be unchanged: expected %d, got %d",
+			origParams.StorageReleaseRateBPS, updatedParams.StorageReleaseRateBPS)
+	}
+	if updatedParams.ValidatorCommissionBPS != origParams.ValidatorCommissionBPS {
+		t.Fatalf("validator commission should be unchanged: expected %d, got %d",
+			origParams.ValidatorCommissionBPS, updatedParams.ValidatorCommissionBPS)
 	}
 }

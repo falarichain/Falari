@@ -14,6 +14,7 @@ import (
 	"chain/internal/chain"
 	"chain/internal/config"
 	"chain/internal/middleware"
+	"chain/internal/reward"
 )
 
 func main() {
@@ -23,8 +24,8 @@ func main() {
 	genesis := flag.String("genesis", "", "genesis file path (applied only on first start)")
 	epochInterval := flag.Duration("epoch-interval", 0, "automatic proof epoch interval, disabled when 0")
 	epochDuration := flag.Duration("epoch-duration", 10*time.Minute, "automatic proof epoch duration")
-	epochChallenges := flag.Int("epoch-challenges", 3, "automatic challenges per finalized deal")
-	epochReward := flag.Uint64("epoch-reward", 1, "automatic reward per accepted proof")
+	epochChallenges := flag.Int("epoch-challenges", 4, "automatic challenges per finalized deal")
+	epochReward := flag.Uint64("epoch-reward", reward.TokenUnit, "automatic reward per accepted proof")
 	epochSlash := flag.Uint64("epoch-slash", 1, "automatic slash per missed proof")
 	settleInterval := flag.Duration("settle-interval", 1*time.Minute, "automatic storage intent settlement interval, disabled when 0")
 	renewInterval := flag.Duration("renew-interval", 1*time.Minute, "automatic renewable deal renewal interval, disabled when 0")

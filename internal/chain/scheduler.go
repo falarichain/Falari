@@ -4,6 +4,7 @@ import (
 	"log"
 	"time"
 
+	"chain/internal/reward"
 	"chain/internal/wire"
 )
 
@@ -30,7 +31,7 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 		config.ChallengesPerDeal = 1
 	}
 	if config.RewardPerProof == 0 {
-		config.RewardPerProof = 1
+		config.RewardPerProof = reward.TokenUnit
 	}
 
 	go func() {
@@ -42,9 +43,9 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 
 			s.mu.Lock()
 			s.finalizeExitingValidatorsLocked()
-			// NOTE: releaseVestedMiningRewardsLocked and releaseEpochRewardsLocked
-			// are now called deterministically from block production/acceptance
-			// using block time (see produceBlockLocked and AcceptBlock in block.go).
+			s.finalizeExitingMinersLocked()
+			// NOTE: token release is deterministic from block production/acceptance.
+			// Vested mining rewards move to balance only when miners claim them.
 			s.mu.Unlock()
 
 			finalized, err := s.FinalizeExpiredEpochs()

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	chaincrypto "chain/internal/crypto"
 	"chain/internal/wire"
 )
 
@@ -77,14 +78,114 @@ func TestRepairCommitCompletesTaskAndMovesUsedBytes(t *testing.T) {
 	if newMinerAfter.ReservedBytes != newMinerBefore.ReservedBytes-uint64(task.Assignment.ShardSize) {
 		t.Fatalf("expected new miner reservation released, before=%+v after=%+v", newMinerBefore, newMinerAfter)
 	}
-	completed := store.data.RepairTasks[task.RepairID]
-	if completed.Status != repairStatusCompleted {
-		t.Fatalf("expected repair task completed, got %+v", completed)
+	pendingProof := store.data.RepairTasks[task.RepairID]
+	if pendingProof.Status != repairStatusProofPending || pendingProof.ProofChallengeID == "" {
+		t.Fatalf("expected repair task waiting for proof, got %+v", pendingProof)
+	}
+	if _, ok := store.data.Challenges[pendingProof.ProofChallengeID]; !ok {
+		t.Fatalf("expected forced repair proof challenge %q", pendingProof.ProofChallengeID)
 	}
 	intent := store.data.Intents[resp.IntentID]
 	updated, ok := assignmentForShard(intent.Assignments, task.SegmentID, task.ShardIndex)
 	if !ok || updated.MinerAddress != task.Assignment.MinerAddress {
 		t.Fatalf("expected intent assignment updated, got %+v", intent.Assignments)
+	}
+	if got := newMinerAfter.RepairRewards; got != 0 {
+		t.Fatalf("repair reward should wait for proof, got %d", got)
+	}
+}
+
+func TestRepairRewardRequiresForcedProof(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	miner := registerTestMiner(t, store, "repair_miner", "http://repair-miner", 10)
+	user := newTestUser(t)
+	data := []byte("repair proof data")
+	shardHash := chaincrypto.HashBytes(data)
+	sectorRoot := chaincrypto.DataMerkleRoot(data, chaincrypto.DefaultLeafSize)
+	intent := &Intent{IntentView: wire.IntentView{
+		IntentID:      "intent_repair_proof",
+		User:          user.Addr,
+		FileSize:      int64(len(data)),
+		Status:        wire.StatusFinalized,
+		StorageStatus: wire.StorageStatusActive,
+		LockedFee:     gfTokens(2),
+		Policy:        wire.StoragePolicy{Duration: 10},
+	}}
+	store.data.Intents[intent.IntentID] = intent
+	store.data.Accounts[user.Addr] = wire.Account{Address: user.Addr, LockedStorage: gfTokens(2)}
+	receipt := wire.MinerReceipt{
+		MinerAddress:     miner.Address,
+		MinerPublicKey:   miner.PublicKey,
+		User:             user.Addr,
+		IntentID:         intent.IntentID,
+		FileRoot:         "file-root",
+		SegmentID:        0,
+		SegmentRoot:      "segment-root",
+		ShardIndex:       0,
+		ShardHash:        shardHash,
+		ShardSize:        int64(len(data)),
+		SectorCommitment: sectorRoot,
+		ExpiresAtUnix:    time.Now().Add(time.Hour).Unix(),
+	}
+	task := wire.RepairTask{
+		IntentID:   intent.IntentID,
+		RepairID:   "repair_requires_proof",
+		SegmentID:  0,
+		ShardIndex: 0,
+		Status:     repairStatusProofPending,
+		Assignment: wire.StorageAssignment{
+			SegmentID:    0,
+			ShardIndex:   0,
+			MinerAddress: miner.Address,
+			ShardHash:    shardHash,
+			ShardSize:    int64(len(data)),
+		},
+	}
+	challenge := store.storageChallengeForReceiptLocked(intent, receipt, "", task.RepairID, "challenge_repair_proof", "nonce_repair_proof", time.Now().Add(time.Minute).Unix(), 0)
+	task.ProofChallengeID = challenge.ChallengeID
+	store.data.RepairTasks[task.RepairID] = task
+	store.data.Challenges[challenge.ChallengeID] = challenge
+
+	proof := multiSampleProof(t, data, challenge, miner.PublicKey, miner.Address, miner.PrivateKey)
+	resp, err := store.SubmitProof(wire.SubmitProofRequest{Proof: proof})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Reward != 0 {
+		t.Fatalf("forced repair proof should not pay storage proof reward, got %d", resp.Reward)
+	}
+	completed := store.data.RepairTasks[task.RepairID]
+	if completed.Status != repairStatusCompleted || !completed.ProofVerified {
+		t.Fatalf("expected repair completed after proof, got %+v", completed)
+	}
+	stats := store.data.Miners[miner.Address]
+	if stats.RepairRewards != store.miningParamsLocked().RepairRewardPerShard {
+		t.Fatalf("expected repair reward after proof, got %+v", stats)
+	}
+}
+
+func TestStartEpochDefaultRewardPerProofIsOneGF(t *testing.T) {
+	store, _, resp, _ := setupCommittedAssignedIntent(t)
+	intent := store.data.Intents[resp.IntentID]
+	intent.Status = wire.StatusFinalized
+	intent.StorageStatus = wire.StorageStatusActive
+
+	epoch, err := store.StartEpoch(wire.StartEpochRequest{
+		IntentID:          resp.IntentID,
+		ChallengesPerDeal: 1,
+		DurationSeconds:   600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epoch.Epoch.RewardPerProof != wire.TokenUnit {
+		t.Fatalf("expected default proof reward 1 GF (%d), got %d", wire.TokenUnit, epoch.Epoch.RewardPerProof)
+	}
+	if len(epoch.Challenges) != 1 || epoch.Challenges[0].Reward != wire.TokenUnit {
+		t.Fatalf("expected challenge reward 1 GF, got %+v", epoch.Challenges)
 	}
 }
 

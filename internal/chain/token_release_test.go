@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"chain/internal/reward"
 	"chain/internal/wire"
 )
 
@@ -114,5 +115,46 @@ func TestFoundationPoolReturnsWhenNoAddress(t *testing.T) {
 	}
 	if store.data.RewardPools.TokensReleased != 0 {
 		t.Fatalf("expected tokens released reset to 0, got %d", store.data.RewardPools.TokensReleased)
+	}
+}
+
+func TestStoragePerBlockReleaseAccruesEstimatedRewards(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.initRewardPoolsLocked()
+	store.data.Miners["miner_a"] = wire.MinerStats{
+		MinerAddress:       "miner_a",
+		Status:             wire.MinerStatusActive,
+		UsedBytes:          1,
+		EffectiveWeight:    1,
+		StorageRewardIndex: store.data.StorageRewardIndex,
+	}
+	now := int64(1_700_000_000)
+	store.releaseStoragePerBlockLocked(now)
+
+	expected := uint64(50) * reward.TokenUnit // default StorageRewardPerBlock
+	if got := store.data.Accounts["miner_a"].PendingMiningRewards; got != 0 {
+		t.Fatalf("expected no direct pending mining rewards before proof settlement, got %d", got)
+	}
+	stats, err := store.MinerStats("miner_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats.UnsettledStorageRewards; got != expected {
+		t.Fatalf("expected unsettled storage reward %d, got %d", expected, got)
+	}
+	if store.data.RewardPools.StorageRemaining != reward.StoragePoolInitial-expected {
+		t.Fatalf("expected storage pool remaining %d, got %d",
+			reward.StoragePoolInitial-expected, store.data.RewardPools.StorageRemaining)
+	}
+
+	settled := store.settleStorageRewardForMinerLocked("miner_a", now+60)
+	if settled != expected {
+		t.Fatalf("expected settled storage reward %d, got %d", expected, settled)
+	}
+	if got := store.data.Accounts["miner_a"].PendingMiningRewards; got != expected {
+		t.Fatalf("expected settled pending mining rewards %d, got %d", expected, got)
 	}
 }

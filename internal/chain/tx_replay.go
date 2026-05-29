@@ -20,6 +20,7 @@ type batchCommitTxPayload struct {
 	CommittedSegments int                     `json:"committed_segments"`
 	UploadedSize      int64                   `json:"uploaded_size"`
 	CommittedAtUnix   int64                   `json:"committed_at_unix,omitempty"`
+	RepairChallenges  []wire.StorageChallenge `json:"repair_challenges,omitempty"`
 }
 
 type finalizeDealTxPayload struct {
@@ -49,10 +50,17 @@ type startEpochTxPayload struct {
 }
 
 type submitProofTxPayload struct {
-	Request         wire.SubmitProofRequest `json:"request"`
-	Reward          uint64                  `json:"reward"`
-	AlreadyRewarded bool                    `json:"already_rewarded"`
-	SubmittedAtUnix int64                   `json:"submitted_at_unix"`
+	Request                  wire.SubmitProofRequest `json:"request"`
+	Reward                   uint64                  `json:"reward"`
+	SettledStoragePoolReward uint64                  `json:"settled_storage_pool_reward,omitempty"`
+	AlreadyRewarded          bool                    `json:"already_rewarded"`
+	BonusReleased            bool                    `json:"bonus_released,omitempty"`
+	SubmittedAtUnix          int64                   `json:"submitted_at_unix"`
+}
+
+type deregisterMinerTxPayload struct {
+	Request      wire.DeregisterMinerRequest `json:"request"`
+	ExitedAtUnix int64                       `json:"exited_at_unix"`
 }
 
 type finalizeEpochTxPayload struct {
@@ -191,6 +199,18 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyMinerRegistrationLocked(req, tx.CreatedAtUnix)
+	case "deregister_miner":
+		var payload deregisterMinerTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyMinerDeregistrationLocked(payload)
+	case "claim_mining_rewards":
+		var req wire.ClaimMiningRewardsRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return err
+		}
+		return s.applyClaimMiningRewardsRequestLocked(req, tx.CreatedAtUnix)
 	case "create_intent":
 		var payload createIntentTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -564,6 +584,10 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 	}
 
 	existing := s.minerStatsLocked(req.MinerAddress)
+	if existing.MinerAddress != "" {
+		s.accrueStorageRewardForMinerLocked(req.MinerAddress)
+		existing = s.minerStatsLocked(req.MinerAddress)
+	}
 
 	// State guard: reject re-registration in terminal/penalty states.
 	switch existing.Status {
@@ -584,6 +608,10 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 		account.Balance -= additionalStake
 		account.LockedStake += additionalStake
 	}
+	// One-time registration bonus.
+	if !existing.BonusReleased {
+		account.LockedBonus += s.miningParamsLocked().RegistrationBonusAmount
+	}
 	existing.MinerAddress = req.MinerAddress
 	existing.PublicKey = req.PublicKey
 	existing.Endpoint = req.Endpoint
@@ -593,12 +621,61 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 	existing.DownloadServiceEnabled = true
 	existing.Stake = req.Stake
 	existing.Status = "active"
+	if existing.StorageRewardIndex == "" {
+		existing.StorageRewardIndex = s.data.StorageRewardIndex
+	}
 	if existing.RegisteredAtUnix == 0 {
 		existing.RegisteredAtUnix = registeredAt
 	}
 	s.consumeAccountNonceLocked(req.MinerAddress)
 	s.data.Accounts[req.MinerAddress] = account
 	s.data.Miners[req.MinerAddress] = existing
+	return nil
+}
+
+func (s *Store) applyMinerDeregistrationLocked(payload deregisterMinerTxPayload) error {
+	req := payload.Request
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
+	if req.MinerAddress == "" {
+		return errors.New("replay miner deregistration missing miner address")
+	}
+	if payload.ExitedAtUnix <= 0 {
+		return errors.New("replay miner deregistration missing exit time")
+	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyDeregisterMiner(req)
+	}); err != nil {
+		return err
+	}
+	stats := s.minerStatsLocked(req.MinerAddress)
+	if stats.MinerAddress != "" {
+		s.accrueStorageRewardForMinerLocked(req.MinerAddress)
+		stats = s.minerStatsLocked(req.MinerAddress)
+	}
+	if stats.Status == wire.MinerStatusExited {
+		return errors.New("replay miner deregistration: miner already exited")
+	}
+	if stats.Status != wire.MinerStatusExiting {
+		stats.Status = wire.MinerStatusExiting
+		stats.ExitedAtUnix = payload.ExitedAtUnix
+	}
+	s.consumeAccountNonceLocked(req.MinerAddress)
+	s.data.Miners[req.MinerAddress] = stats
+	return nil
+}
+
+func (s *Store) applyClaimMiningRewardsRequestLocked(req wire.ClaimMiningRewardsRequest, claimedAt int64) error {
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
+	if req.MinerAddress == "" {
+		return errors.New("replay claim mining rewards missing miner address")
+	}
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyClaimMiningRewards(req)
+	}); err != nil {
+		return err
+	}
+	s.applyClaimMiningRewardsLocked(req.MinerAddress, claimedAt)
+	s.consumeAccountNonceLocked(req.MinerAddress)
 	return nil
 }
 
@@ -758,7 +835,15 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 			return err
 		}
 	}
+	repairChallengesByID := map[string]wire.StorageChallenge{}
+	for _, challenge := range payload.RepairChallenges {
+		if challenge.RepairID == "" {
+			return errors.New("replay repair proof challenge missing repair id")
+		}
+		repairChallengesByID[challenge.RepairID] = challenge
+	}
 	for _, receipt := range req.Receipts {
+		s.accrueStorageRewardForMinerLocked(receipt.MinerAddress)
 		miner := s.minerStatsLocked(receipt.MinerAddress)
 		if intent.Receipts[receipt.SegmentID] == nil {
 			intent.Receipts[receipt.SegmentID] = map[int]wire.MinerReceipt{}
@@ -777,7 +862,13 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 			if hasRepairTask {
 				s.releaseStorageReservationLocked(repairTask.Assignment)
 				intent.Assignments = setAssignmentForShard(intent.Assignments, repairTask.Assignment)
-				s.completeRepairTaskLocked(repairTask)
+				challenge, ok := repairChallengesByID[repairTask.RepairID]
+				if !ok {
+					return errors.New("replay repair commit missing proof challenge")
+				}
+				if _, err := s.applyRepairProofChallengeLocked(repairTask, receipt, challenge); err != nil {
+					return err
+				}
 				miner = s.minerStatsLocked(receipt.MinerAddress)
 			}
 			miner.UsedBytes += uint64(receipt.ShardSize)
@@ -789,7 +880,13 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 			if hasRepairTask {
 				s.releaseStorageReservationLocked(repairTask.Assignment)
 				intent.Assignments = setAssignmentForShard(intent.Assignments, repairTask.Assignment)
-				s.completeRepairTaskLocked(repairTask)
+				challenge, ok := repairChallengesByID[repairTask.RepairID]
+				if !ok {
+					return errors.New("replay repair commit missing proof challenge")
+				}
+				if _, err := s.applyRepairProofChallengeLocked(repairTask, receipt, challenge); err != nil {
+					return err
+				}
 				miner = s.minerStatsLocked(receipt.MinerAddress)
 			}
 			miner.UsedBytes += uint64(receipt.ShardSize)
@@ -1426,15 +1523,42 @@ func (s *Store) applySubmitProofLocked(payload submitProofTxPayload) error {
 	}
 	s.data.Proofs[proof.ChallengeID] = proof
 	if !alreadyRewarded {
+		settled := s.settleStorageRewardForMinerLocked(proof.MinerAddress, payload.SubmittedAtUnix)
+		if settled != payload.SettledStoragePoolReward {
+			return errors.New("replay proof storage pool settlement mismatch")
+		}
 		reward := s.payableStorageRewardLocked(challenge)
 		if reward != payload.Reward {
 			return errors.New("replay proof reward mismatch")
 		}
 		stats := s.minerStatsLocked(proof.MinerAddress)
 		stats.ProofSuccess++
-		stats.Rewards += reward
+		stats.ConsecutiveFailures = 0
+		stats.Rewards = saturatingAdd(stats.Rewards, reward)
+		stats.StorageRewards = saturatingAdd(stats.StorageRewards, reward)
+		if stats.Status == wire.MinerStatusDegraded {
+			stats.Status = wire.MinerStatusActive
+		}
 		s.data.Miners[proof.MinerAddress] = stats
+
+		// Replay bonus release if recorded.
+		if payload.BonusReleased && !stats.BonusReleased {
+			account := s.accountLocked(proof.MinerAddress)
+			account.Balance += account.LockedBonus
+			s.initRewardPoolsLocked()
+			if s.data.RewardPools.StorageRemaining >= account.LockedBonus {
+				s.data.RewardPools.StorageRemaining -= account.LockedBonus
+			}
+			account.LockedBonus = 0
+			s.data.Accounts[proof.MinerAddress] = account
+			stats.BonusReleased = true
+			s.data.Miners[proof.MinerAddress] = stats
+		}
+
 		s.payStorageRewardLocked(challenge, proof.MinerAddress, reward)
+	}
+	if challenge.RepairID != "" {
+		s.completeRepairTaskAfterProofLocked(challenge.RepairID, challenge.ChallengeID)
 	}
 	return nil
 }
@@ -1516,15 +1640,29 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 		}
 		slash := epoch.SlashPerMissedProof
 		account := s.accountLocked(challenge.MinerAddress)
-		if account.LockedStake < slash {
-			slash = account.LockedStake
+
+		// 1. Slash from LockedBonus first (system-incentive layer).
+		fromBonus := slash
+		if fromBonus > account.LockedBonus {
+			fromBonus = account.LockedBonus
 		}
-		account.LockedStake -= slash
+		account.LockedBonus -= fromBonus
+
+		// 2. Then from LockedStake (personal commitment layer).
+		fromStake := slash - fromBonus
+		if fromStake > account.LockedStake {
+			fromStake = account.LockedStake
+		}
+		account.LockedStake -= fromStake
+
+		actualSlash := fromBonus + fromStake
 		stats.Stake = account.LockedStake
-		stats.Slashed += slash
-		totalSlashed += slash
-		s.addSlashedToRepairPoolLocked(slash)
-		if stats.Status == wire.MinerStatusJailed && stats.Stake == 0 {
+		stats.Slashed += actualSlash
+		totalSlashed += actualSlash
+		s.addSlashedToRepairPoolLocked(actualSlash)
+
+		// Auto-exit: bonus and stake both depleted.
+		if account.LockedBonus == 0 && account.LockedStake == 0 && actualSlash > 0 {
 			stats.Status = wire.MinerStatusExiting
 			exitBase := epoch.DeadlineUnix
 			if exitBase == 0 {
