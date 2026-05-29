@@ -2,7 +2,7 @@ package dht
 
 import (
 	"context"
-	"errors"
+	"encoding/hex"
 	"log"
 	"sync"
 	"time"
@@ -17,17 +17,19 @@ import (
 )
 
 const (
-	DefaultProtocolPrefix  = "/falari"
-	DefaultRepublishInterval = 60 * time.Second
-	DefaultProviderTTL       = 5 * time.Minute
-	DefaultLookupTimeout     = 10 * time.Second
-	DefaultCacheTTL          = 30 * time.Second
-	DefaultBootstrapInterval = 60 * time.Second
+	DefaultProtocolPrefix      = "/falari/kad/1.0.0"
+	DefaultRepublishInterval   = 60 * time.Second
+	DefaultProviderTTL         = 5 * time.Minute
+	DefaultLookupTimeout       = 10 * time.Second
+	DefaultCacheTTL            = 30 * time.Second
+	DefaultCacheCleanupInterval = 2 * time.Minute
+	DefaultBootstrapInterval   = 60 * time.Second
+	DefaultBlacklistSyncInterval = 30 * time.Second
 )
 
 // Config holds DHT service configuration.
 type Config struct {
-	// ProtocolPrefix is the DHT protocol namespace (default: /falari).
+	// ProtocolPrefix is the DHT protocol namespace (default: /falari/kad/1.0.0).
 	ProtocolPrefix string
 	// RepublishInterval is how often to re-publish all shard records.
 	RepublishInterval time.Duration
@@ -41,16 +43,19 @@ type Config struct {
 	BootstrapPeers []string
 	// ChainURL is the chain node URL for fetching bootstrap peers and blacklist.
 	ChainURL string
+	// BlacklistSyncInterval is how often to sync the blacklist from the chain.
+	BlacklistSyncInterval time.Duration
 }
 
 // DefaultConfig returns sensible defaults for the DHT service.
 func DefaultConfig() Config {
 	return Config{
-		ProtocolPrefix:    DefaultProtocolPrefix,
-		RepublishInterval: DefaultRepublishInterval,
-		ProviderTTL:       DefaultProviderTTL,
-		LookupTimeout:     DefaultLookupTimeout,
-		CacheTTL:          DefaultCacheTTL,
+		ProtocolPrefix:        DefaultProtocolPrefix,
+		RepublishInterval:     DefaultRepublishInterval,
+		ProviderTTL:           DefaultProviderTTL,
+		LookupTimeout:         DefaultLookupTimeout,
+		CacheTTL:              DefaultCacheTTL,
+		BlacklistSyncInterval: DefaultBlacklistSyncInterval,
 	}
 }
 
@@ -65,14 +70,8 @@ type Service struct {
 	blacklist *BlacklistCache
 	cache     *ProviderCache
 
-	mu          sync.RWMutex
-	shardIndex  map[string]struct{} // set of shard hashes this node holds
-	chainMiners map[string]peerInfo // cached chain-registered miners for bootstrap
-}
-
-type peerInfo struct {
-	peerID    string
-	peerAddrs []string
+	mu         sync.RWMutex
+	shardIndex map[string]struct{} // set of shard hashes this node holds
 }
 
 // New creates a new DHT service attached to the given libp2p host.
@@ -91,6 +90,9 @@ func New(h host.Host, cfg Config) (*Service, error) {
 	}
 	if cfg.CacheTTL == 0 {
 		cfg.CacheTTL = DefaultCacheTTL
+	}
+	if cfg.BlacklistSyncInterval == 0 {
+		cfg.BlacklistSyncInterval = DefaultBlacklistSyncInterval
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -130,15 +132,14 @@ func New(h host.Host, cfg Config) (*Service, error) {
 	}
 
 	return &Service{
-		host:        h,
-		dht:         d,
-		cfg:         cfg,
-		ctx:         ctx,
-		cancel:      cancel,
-		blacklist:   NewBlacklistCache(),
-		cache:       NewProviderCache(cfg.CacheTTL),
-		shardIndex:  make(map[string]struct{}),
-		chainMiners: make(map[string]peerInfo),
+		host:       h,
+		dht:        d,
+		cfg:        cfg,
+		ctx:        ctx,
+		cancel:     cancel,
+		blacklist:  NewBlacklistCache(),
+		cache:      NewProviderCache(cfg.CacheTTL),
+		shardIndex: make(map[string]struct{}),
 	}, nil
 }
 
@@ -152,11 +153,12 @@ func (s *Service) Start() error {
 		log.Printf("dht: initial bootstrap failed: %v", err)
 	}
 	go s.bootstrapLoop()
-	go s.blacklist.SyncLoop(s.ctx, s.cfg.ChainURL, 30*time.Second)
+	s.cache.StartCleanupLoop(s.ctx, DefaultCacheCleanupInterval)
+	go s.blacklist.SyncLoop(s.ctx, s.cfg.ChainURL, s.cfg.BlacklistSyncInterval)
 	return nil
 }
 
-// bootstrapLoop periodically re-bootstraps from chain-registered miners.
+// bootstrapLoop periodically refreshes the DHT routing table.
 func (s *Service) bootstrapLoop() {
 	ticker := time.NewTicker(DefaultBootstrapInterval)
 	defer ticker.Stop()
@@ -242,48 +244,17 @@ func (s *Service) ShardCount() int {
 }
 
 // shardHashToCID converts a hex-encoded shard hash to a CID for DHT provider records.
-// Uses SHA2-256 multihash code with raw codec.
+// The input is always treated as plain hex (raw bytes), then encoded as a SHA2-256
+// multihash with raw CID codec. This avoids ambiguity between multihash-prefixed
+// and plain hex formats.
 func shardHashToCID(shardHash string) (cid.Cid, error) {
-	decoded, err := multihash.FromHexString(shardHash)
+	raw, err := hex.DecodeString(shardHash)
 	if err != nil {
-		// Try as plain hex (without multihash prefix).
-		raw, hexErr := decodeHex(shardHash)
-		if hexErr != nil {
-			return cid.Cid{}, err
-		}
-		mh, mhErr := multihash.Encode(raw, multihash.SHA2_256)
-		if mhErr != nil {
-			return cid.Cid{}, mhErr
-		}
-		decoded = mh
+		return cid.Cid{}, err
 	}
-	return cid.NewCidV1(cid.Raw, decoded), nil
-}
-
-func decodeHex(s string) ([]byte, error) {
-	if len(s)%2 != 0 {
-		return nil, errors.New("odd-length hex string")
+	mh, err := multihash.Encode(raw, multihash.SHA2_256)
+	if err != nil {
+		return cid.Cid{}, err
 	}
-	b := make([]byte, len(s)/2)
-	for i := 0; i < len(b); i++ {
-		hi := unhex(s[2*i])
-		lo := unhex(s[2*i+1])
-		if hi == 0xFF || lo == 0xFF {
-			return nil, errors.New("invalid hex character")
-		}
-		b[i] = hi<<4 | lo
-	}
-	return b, nil
-}
-
-func unhex(c byte) byte {
-	switch {
-	case '0' <= c && c <= '9':
-		return c - '0'
-	case 'a' <= c && c <= 'f':
-		return c - 'a' + 10
-	case 'A' <= c && c <= 'F':
-		return c - 'A' + 10
-	}
-	return 0xFF
+	return cid.NewCidV1(cid.Raw, mh), nil
 }

@@ -55,6 +55,7 @@ type submitProofTxPayload struct {
 	SettledStoragePoolReward uint64                  `json:"settled_storage_pool_reward,omitempty"`
 	AlreadyRewarded          bool                    `json:"already_rewarded"`
 	BonusReleased            bool                    `json:"bonus_released,omitempty"`
+	BonusExpired             bool                    `json:"bonus_expired,omitempty"`
 	SubmittedAtUnix          int64                   `json:"submitted_at_unix"`
 }
 
@@ -259,6 +260,18 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyRevokeAgentKeyLocked(payload)
+	case "extend_agent_key":
+		var payload extendAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyExtendAgentKeyLocked(payload)
+	case "topup_agent_key":
+		var payload topupAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyTopupAgentKeyLocked(payload)
 	case "batch_commit":
 		var payload batchCommitTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -319,6 +332,18 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyGovernanceBlockDealLocked(payload)
+	case "direct_governance_action":
+		var payload directGovernanceActionTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyDirectGovernanceActionLocked(payload)
+	case "direct_action_review_vote":
+		var payload directActionReviewVoteTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyDirectActionReviewVoteLocked(payload)
 	case "governance_create_proposal":
 		var payload governanceCreateProposalTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -608,9 +633,20 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 		account.Balance -= additionalStake
 		account.LockedStake += additionalStake
 	}
-	// One-time registration bonus.
-	if !existing.BonusReleased {
-		account.LockedBonus += s.miningParamsLocked().RegistrationBonusAmount
+	// One-time registration bonus (with cap + pool accounting).
+	if !existing.BonusReleased && !existing.BonusExpired {
+		params := s.miningParamsLocked()
+		if params.RegistrationBonusAmount > 0 {
+			capOK := params.MaxBonusAddresses == 0 || s.data.BonusGrantedCount < params.MaxBonusAddresses
+			if capOK {
+				s.initRewardPoolsLocked()
+				if s.data.RewardPools.StorageRemaining >= params.RegistrationBonusAmount {
+					account.LockedBonus += params.RegistrationBonusAmount
+					s.data.RewardPools.StorageRemaining -= params.RegistrationBonusAmount
+					s.data.BonusGrantedCount++
+				}
+			}
+		}
 	}
 	existing.MinerAddress = req.MinerAddress
 	existing.PublicKey = req.PublicKey
@@ -983,19 +1019,34 @@ func (s *Store) applySettleIntentLocked(payload settleIntentTxPayload) error {
 }
 
 func (s *Store) applyTerminateDealLocked(payload terminateDealTxPayload) error {
-	if err := s.verifyAccountRequestLocked(payload.Request.ChainID, payload.Request.User, payload.Request.Nonce, func() error {
-		return wire.VerifyTerminateDeal(payload.Request)
-	}); err != nil {
-		return err
+	req := payload.Request
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "terminate_deal", 0, func(agentPub string) error {
+			return wire.VerifyTerminateDealAgent(req, agentPub)
+		}); err != nil {
+			return err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyTerminateDeal(req)
+		}); err != nil {
+			return err
+		}
 	}
-	resp, err := s.terminateDealLocked(payload.Request, payload.Response.TerminatedAtUnix)
+	resp, err := s.terminateDealLocked(req, payload.Response.TerminatedAtUnix)
 	if err != nil {
 		return err
 	}
 	if resp.StorageStatus != payload.Response.StorageStatus || resp.AccessStatus != payload.Response.AccessStatus {
 		return errors.New("replay terminate deal response mismatch")
 	}
-	s.consumeAccountNonceLocked(payload.Request.User)
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return err
+		}
+	} else {
+		s.consumeAccountNonceLocked(req.User)
+	}
 	return nil
 }
 
@@ -1541,14 +1592,24 @@ func (s *Store) applySubmitProofLocked(payload submitProofTxPayload) error {
 		}
 		s.data.Miners[proof.MinerAddress] = stats
 
-		// Replay bonus release if recorded.
-		if payload.BonusReleased && !stats.BonusReleased {
+		// Replay bonus expiry if recorded (release slot for new registrations).
+		if payload.BonusExpired && !stats.BonusExpired && !stats.BonusReleased {
+			account := s.accountLocked(proof.MinerAddress)
+			stats.BonusExpired = true
+			s.initRewardPoolsLocked()
+			s.data.RewardPools.StorageRemaining = saturatingAdd(s.data.RewardPools.StorageRemaining, account.LockedBonus)
+			account.LockedBonus = 0
+			if s.data.BonusGrantedCount > 0 {
+				s.data.BonusGrantedCount--
+			}
+			s.data.Accounts[proof.MinerAddress] = account
+			s.data.Miners[proof.MinerAddress] = stats
+		}
+
+		// Replay bonus release if recorded (no pool deduction — reserved at grant time).
+		if payload.BonusReleased && !stats.BonusReleased && !stats.BonusExpired {
 			account := s.accountLocked(proof.MinerAddress)
 			account.Balance += account.LockedBonus
-			s.initRewardPoolsLocked()
-			if s.data.RewardPools.StorageRemaining >= account.LockedBonus {
-				s.data.RewardPools.StorageRemaining -= account.LockedBonus
-			}
 			account.LockedBonus = 0
 			s.data.Accounts[proof.MinerAddress] = account
 			stats.BonusReleased = true
@@ -1711,6 +1772,31 @@ func validateReceiptForReplay(intent *Intent, receipt wire.MinerReceipt) error {
 		if err.Error() != "receipt expired" {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s *Store) applyDirectGovernanceActionLocked(payload directGovernanceActionTxPayload) error {
+	resp, err := s.DirectGovernanceAction(payload.Request)
+	if err != nil {
+		return err
+	}
+	if resp.Record.ActionID != payload.Response.Record.ActionID {
+		return errors.New("replay direct governance action: action_id mismatch")
+	}
+	if resp.GovernanceResult.ModerationStatus != payload.Response.GovernanceResult.ModerationStatus {
+		return errors.New("replay direct governance action: moderation_status mismatch")
+	}
+	return nil
+}
+
+func (s *Store) applyDirectActionReviewVoteLocked(payload directActionReviewVoteTxPayload) error {
+	resp, err := s.CastDirectActionReviewVote(payload.Request)
+	if err != nil {
+		return err
+	}
+	if resp.Rejected != payload.Response.Rejected {
+		return errors.New("replay direct action review vote: rejected mismatch")
 	}
 	return nil
 }

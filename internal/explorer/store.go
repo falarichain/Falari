@@ -197,6 +197,7 @@ func (s *Store) refreshIntents(ctx context.Context) {
 }
 
 func (s *Store) refreshMiners(ctx context.Context) {
+	// Step 1: Sync basic provider records from /storage/providers.
 	var resp struct {
 		Providers []wire.StorageProviderRecord `json:"providers"`
 	}
@@ -220,6 +221,46 @@ func (s *Store) refreshMiners(ctx context.Context) {
 			p.ProofSuccess, p.ProofFailure, time.Now().Unix())
 		if err != nil {
 			log.Printf("explorer: insert miner %s error: %v", p.MinerAddress, err)
+		}
+	}
+
+	// Step 2: Fetch individual MinerStats for richer fields (bonus, stake, rewards, …).
+	for _, p := range resp.Providers {
+		var stats wire.MinerStats
+		if err := client.NewHTTP(s.chainURL).Get("/miners/"+p.MinerAddress, &stats); err != nil {
+			continue // non-critical: next refresh will retry
+		}
+		_, err := s.pool.Exec(ctx, `
+			UPDATE miners SET
+				stake = $2,
+				rewards = $3,
+				storage_rewards = $4,
+				retrieval_success = $5,
+				retrieval_bytes = $6,
+				retrieval_rewards = $7,
+				repair_rewards = $8,
+				slashed = $9,
+				effective_weight = $10,
+				speed_score = $11,
+				anti_spam_score = $12,
+				registered_at_unix = $13,
+				exited_at_unix = $14,
+				consecutive_failures = $15,
+				status = $16,
+				locked_bonus = $17,
+				bonus_released = $18,
+				bonus_expired = $19,
+				updated_at = NOW()
+			WHERE miner_address = $1
+		`, p.MinerAddress,
+			stats.Stake, stats.Rewards, stats.StorageRewards,
+			stats.RetrievalSuccess, stats.RetrievalBytes, stats.RetrievalRewards,
+			stats.RepairRewards, stats.Slashed, stats.EffectiveWeight,
+			stats.SpeedScore, stats.AntiSpamScore, stats.RegisteredAtUnix,
+			stats.ExitedAtUnix, stats.ConsecutiveFailures, stats.Status,
+			stats.LockedBonus, stats.BonusReleased, stats.BonusExpired)
+		if err != nil {
+			log.Printf("explorer: update miner stats %s error: %v", p.MinerAddress, err)
 		}
 	}
 }

@@ -10,8 +10,6 @@ import (
 const (
 	miningRewardSourceStorageProof      = "storage_proof"
 	miningRewardSourceStoragePool       = "storage_pool"
-	miningRewardSourceRetrievalReceipt  = "retrieval_receipt"
-	miningRewardSourceRetrievalPool     = "retrieval_pool"
 	miningRewardSourceRepair            = "repair"
 	miningRewardSourceRepairPoolSubsidy = "repair_pool_subsidy"
 	miningRewardSourceValidatorPool     = "validator_pool"

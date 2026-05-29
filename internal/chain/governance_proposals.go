@@ -187,6 +187,12 @@ func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, pro
 		TargetMaxBlockTxs:                 req.TargetMaxBlockTxs,
 		TargetMaxTxBytes:                  req.TargetMaxTxBytes,
 		TargetMaxStorageTxBytes:           req.TargetMaxStorageTxBytes,
+		TargetRegistrationBonusAmount:     req.TargetRegistrationBonusAmount,
+		TargetMinBonusProofCount:          req.TargetMinBonusProofCount,
+		TargetMinBonusSuccessRateBPS:      req.TargetMinBonusSuccessRateBPS,
+		TargetMinBonusRetrievalCount:      req.TargetMinBonusRetrievalCount,
+		TargetMaxBonusAddresses:           req.TargetMaxBonusAddresses,
+		TargetBonusDeadlineSeconds:        req.TargetBonusDeadlineSeconds,
 		ChainID:                           req.ChainID,
 		ProposerNonce:                     req.Nonce,
 		Status:                            wire.GovProposalPending,
@@ -576,6 +582,12 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.MaxBlockTxs, proposal.TargetMaxBlockTxs)
 	applyIfNonZero(&p.MaxTxBytes, proposal.TargetMaxTxBytes)
 	applyIfNonZero(&p.MaxStorageTxBytes, proposal.TargetMaxStorageTxBytes)
+	applyIfNonZero(&p.RegistrationBonusAmount, proposal.TargetRegistrationBonusAmount)
+	applyIfNonZero(&p.MinBonusProofCount, proposal.TargetMinBonusProofCount)
+	applyIfNonZero(&p.MinBonusSuccessRateBPS, proposal.TargetMinBonusSuccessRateBPS)
+	applyIfNonZero(&p.MinBonusRetrievalCount, proposal.TargetMinBonusRetrievalCount)
+	applyIfNonZero(&p.MaxBonusAddresses, proposal.TargetMaxBonusAddresses)
+	applyIfNonZero(&p.BonusDeadlineSeconds, proposal.TargetBonusDeadlineSeconds)
 
 	// Post-application bounds validation (defense-in-depth: rejects proposals
 	// created before bounds were enforced).
@@ -966,7 +978,13 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		req.TargetMaxBlockBytes != 0 ||
 		req.TargetMaxBlockTxs != 0 ||
 		req.TargetMaxTxBytes != 0 ||
-		req.TargetMaxStorageTxBytes != 0 {
+		req.TargetMaxStorageTxBytes != 0 ||
+		req.TargetRegistrationBonusAmount != 0 ||
+		req.TargetMinBonusProofCount != 0 ||
+		req.TargetMinBonusSuccessRateBPS != 0 ||
+		req.TargetMinBonusRetrievalCount != 0 ||
+		req.TargetMaxBonusAddresses != 0 ||
+		req.TargetBonusDeadlineSeconds != 0 {
 		return validateMiningParamBounds(req, currentParams)
 	}
 	return errors.New("update_mining_params requires at least one non-zero target field")
@@ -1152,6 +1170,12 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetMaxBlockTxs:                 p.TargetMaxBlockTxs,
 		TargetMaxTxBytes:                  p.TargetMaxTxBytes,
 		TargetMaxStorageTxBytes:           p.TargetMaxStorageTxBytes,
+		TargetRegistrationBonusAmount:     p.TargetRegistrationBonusAmount,
+		TargetMinBonusProofCount:          p.TargetMinBonusProofCount,
+		TargetMinBonusSuccessRateBPS:      p.TargetMinBonusSuccessRateBPS,
+		TargetMinBonusRetrievalCount:      p.TargetMinBonusRetrievalCount,
+		TargetMaxBonusAddresses:           p.TargetMaxBonusAddresses,
+		TargetBonusDeadlineSeconds:        p.TargetBonusDeadlineSeconds,
 		Signature:                         p.ProposerSignature,
 		Nonce:                             p.ProposerNonce,
 		CreatedAtUnix:                     p.CreatedAtUnix,

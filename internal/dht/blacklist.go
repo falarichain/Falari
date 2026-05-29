@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -91,7 +92,7 @@ func (b *BlacklistCache) SyncFromChain(chainURL string) {
 	var resp wire.BlacklistResponse
 	path := "/governance/blacklist"
 	if currentHeight > 0 {
-		path += "?since_height=" + u64toa(currentHeight)
+		path += "?since_height=" + strconv.FormatUint(currentHeight, 10)
 	}
 	if err := httpClient.Get(path, &resp); err != nil {
 		// Silently ignore - chain may not have this endpoint yet.
@@ -162,16 +163,4 @@ func ServeBlacklistHandler(getBlacklist func() wire.BlacklistResponse) http.Hand
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	}
-}
-
-func u64toa(v uint64) string {
-	if v == 0 {
-		return "0"
-	}
-	buf := make([]byte, 0, 20)
-	for v > 0 {
-		buf = append([]byte{byte('0' + v%10)}, buf...)
-		v /= 10
-	}
-	return string(buf)
 }

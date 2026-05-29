@@ -16,7 +16,7 @@ func TestMiningRewardVestingAggregatesByDayAndReleasesLinearly(t *testing.T) {
 	day := miningRewardVestingDayStart(now)
 
 	store.vestMiningRewardLocked("miner_a", 90, miningRewardSourceStorageProof, now)
-	store.vestMiningRewardLocked("miner_a", 180, miningRewardSourceRetrievalPool, now+3600)
+	store.vestMiningRewardLocked("miner_a", 180, miningRewardSourceStoragePool, now+3600)
 
 	if len(store.data.MiningRewardVestings) != 1 {
 		t.Fatalf("expected one daily bucket, got %d", len(store.data.MiningRewardVestings))

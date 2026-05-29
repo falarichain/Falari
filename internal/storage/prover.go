@@ -14,6 +14,7 @@ import (
 
 	"chain/internal/client"
 	chaincrypto "chain/internal/crypto"
+	falaridht "chain/internal/dht"
 	"chain/internal/wire"
 )
 
@@ -286,11 +287,19 @@ func (n *Node) repairTask(chainURL string, task wire.RepairTask) (wire.MinerRece
 }
 
 func downloadSourceShard(node *Node, chainURL string, receipt wire.MinerReceipt) ([]byte, error) {
+	// Phase 1: Try routes from chain API.
 	if routes := discoverRepairRoutes(chainURL, receipt.ShardHash, receipt.ShardCID); len(routes) > 0 {
 		if data, err := downloadSourceShardViaRoutes(node, receipt, routes); err == nil {
 			return data, nil
 		}
 	}
+	// Phase 2: DHT discovery fallback.
+	if dhtSvc := node.DHTService(); dhtSvc != nil {
+		if data, err := fetchShardViaDHT(node, dhtSvc, receipt); err == nil {
+			return data, nil
+		}
+	}
+	// Phase 3: Chain API providers.
 	providers := RankProvidersForBlockFetch(discoverRepairProviders(chainURL, receipt.ShardHash, receipt.ShardCID))
 	var lastErr error
 	if receipt.ShardCID != "" {
@@ -341,6 +350,69 @@ func downloadSourceShard(node *Node, chainURL string, receipt wire.MinerReceipt)
 	}
 	if lastErr == nil {
 		lastErr = errors.New("source receipt has no reachable provider endpoint")
+	}
+	return nil, lastErr
+}
+
+// fetchShardViaDHT attempts to download a shard using DHT-discovered providers.
+func fetchShardViaDHT(node *Node, dhtSvc *falaridht.Service, receipt wire.MinerReceipt) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	dhtRecords, err := dhtSvc.FindProviders(ctx, receipt.ShardHash)
+	cancel()
+	if err != nil || len(dhtRecords) == 0 {
+		return nil, errors.New("dht: no providers found")
+	}
+	dhtProviders := falaridht.ToStorageProviderRecords(dhtRecords)
+	dhtProviders = RankProvidersForBlockFetch(dhtProviders)
+	// Try libp2p first.
+	if receipt.ShardCID != "" {
+		for _, provider := range dhtProviders {
+			if !providerSupportsP2P(provider) {
+				continue
+			}
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+			data, err := FetchBlockViaLibP2P(ctx2, receipt.ShardCID, provider.PeerID, provider.PeerAddrs)
+			cancel2()
+			if err == nil {
+				node.recordLibP2PFetchSuccess()
+				RememberProviderFetchSuccess(provider, "libp2p")
+				log.Printf("repair source fetch dht+libp2p miner=%s cid=%s", provider.MinerAddress, receipt.ShardCID)
+				return data, nil
+			}
+			node.recordLibP2PFetchError()
+			node.recordHTTPFallback()
+			RememberProviderFetchFailure(provider, "libp2p", err)
+		}
+	}
+	// Fall back to HTTP endpoints from DHT-discovered providers.
+	endpoints := PreferredProviderEndpoints(receipt.MinerEndpoint, dhtProviders)
+	var lastErr error
+	for _, endpoint := range endpoints {
+		provider := ResolveProviderRecordForEndpoint(endpoint, receipt.MinerAddress, dhtProviders)
+		httpClient := client.NewHTTP(endpoint)
+		if receipt.ShardCID != "" {
+			data, err := httpClient.GetBytes("/blocks/" + receipt.ShardCID)
+			if err == nil {
+				node.recordHTTPBlockFetchHit()
+				RememberProviderFetchSuccess(provider, "http-block")
+				log.Printf("repair source fetch dht+http-block endpoint=%s cid=%s", endpoint, receipt.ShardCID)
+				return data, nil
+			}
+			RememberProviderFetchFailure(provider, "http-block", err)
+			lastErr = err
+		}
+		data, err := httpClient.GetBytes("/shards/" + receipt.ShardHash + ".bin")
+		if err == nil {
+			node.recordHTTPShardFetchHit()
+			RememberProviderFetchSuccess(provider, "http-shard")
+			log.Printf("repair source fetch dht+http-shard endpoint=%s hash=%s", endpoint, receipt.ShardHash)
+			return data, nil
+		}
+		RememberProviderFetchFailure(provider, "http-shard", err)
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("dht: no reachable provider endpoint")
 	}
 	return nil, lastErr
 }

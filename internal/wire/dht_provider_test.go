@@ -43,19 +43,44 @@ func TestVerifyDHTProviderTampered(t *testing.T) {
 	}
 
 	record := DHTProviderRecord{
-		MinerAddress:  AccountAddress(&key.PublicKey),
-		PublicKey:     EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey)),
-		ShardHash:     "original_hash",
-		ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
+		MinerAddress:   AccountAddress(&key.PublicKey),
+		PublicKey:      EncodeHex(ethcrypto.CompressPubkey(&key.PublicKey)),
+		Endpoint:       "http://legitimate:9090",
+		PeerID:         "QmTest123",
+		HealthScoreBPS: 9500,
+		ShardHash:      "original_hash",
+		ExpiresAtUnix:  time.Now().Add(5 * time.Minute).Unix(),
 	}
 	if err := SignDHTProvider(&record, key); err != nil {
 		t.Fatal(err)
 	}
 
 	// Tamper with the shard hash.
-	record.ShardHash = "tampered_hash"
-	if err := VerifyDHTProvider(record); err == nil {
-		t.Fatal("expected verification to fail on tampered record")
+	tampered := record
+	tampered.ShardHash = "tampered_hash"
+	if err := VerifyDHTProvider(tampered); err == nil {
+		t.Fatal("expected verification to fail on tampered shard hash")
+	}
+
+	// Tamper with the endpoint.
+	tampered = record
+	tampered.Endpoint = "http://malicious:9090"
+	if err := VerifyDHTProvider(tampered); err == nil {
+		t.Fatal("expected verification to fail on tampered endpoint")
+	}
+
+	// Tamper with the health score.
+	tampered = record
+	tampered.HealthScoreBPS = 10000
+	if err := VerifyDHTProvider(tampered); err == nil {
+		t.Fatal("expected verification to fail on tampered health score")
+	}
+
+	// Tamper with the peer ID.
+	tampered = record
+	tampered.PeerID = "QmEvil456"
+	if err := VerifyDHTProvider(tampered); err == nil {
+		t.Fatal("expected verification to fail on tampered peer ID")
 	}
 }
 

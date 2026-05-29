@@ -35,11 +35,24 @@ func (s *Store) RenewDeal(req wire.RenewDealRequest) (wire.RenewDealResponse, er
 	if intent.User != req.User {
 		return wire.RenewDealResponse{}, errors.New("user mismatch")
 	}
-	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
-		return wire.VerifyRenewDeal(req)
-	}); err != nil {
-		return wire.RenewDealResponse{}, err
+
+	// Estimate price before verification so agent limit check can use it.
+	price := s.estimateRenewalPriceLocked(intent, req.Duration)
+
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "renew", price, func(agentPub string) error {
+			return wire.VerifyRenewDealAgent(req, agentPub)
+		}); err != nil {
+			return wire.RenewDealResponse{}, err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyRenewDeal(req)
+		}); err != nil {
+			return wire.RenewDealResponse{}, err
+		}
 	}
+
 	if !intent.Policy.Renewable {
 		return wire.RenewDealResponse{}, errors.New("deal is not renewable")
 	}
@@ -77,12 +90,19 @@ func (s *Store) RenewDeal(req wire.RenewDealRequest) (wire.RenewDealResponse, er
 		return wire.RenewDealResponse{}, errors.New("renewal duration exceeds policy duration")
 	}
 
-	price := s.estimateRenewalPriceLocked(intent, req.Duration)
 	account := s.accountLocked(req.User)
 	if account.Balance < price {
 		return wire.RenewDealResponse{}, errors.New("insufficient balance for renewal")
 	}
-	s.consumeAccountNonceLocked(req.User)
+
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, price); err != nil {
+			return wire.RenewDealResponse{}, err
+		}
+	} else {
+		s.consumeAccountNonceLocked(req.User)
+	}
+
 	account = s.accountLocked(req.User)
 	account.Balance -= price
 	account.LockedStorage += price
@@ -154,11 +174,7 @@ func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 	if intent.User != req.User {
 		return errors.New("user mismatch")
 	}
-	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
-		return wire.VerifyRenewDeal(req)
-	}); err != nil {
-		return err
-	}
+
 	intentView := *intent
 	if !intentView.Policy.Renewable {
 		return errors.New("deal is not renewable")
@@ -191,6 +207,21 @@ func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 		return errors.New("renewal duration exceeds policy duration")
 	}
 	price := s.estimateRenewalPriceLocked(&intentView, req.Duration)
+
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "renew", price, func(agentPub string) error {
+			return wire.VerifyRenewDealAgent(req, agentPub)
+		}); err != nil {
+			return err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyRenewDeal(req)
+		}); err != nil {
+			return err
+		}
+	}
+
 	expectedResp := wire.RenewDealResponse{
 		IntentID:      intentView.IntentID,
 		Status:        intentView.Status,
@@ -206,7 +237,15 @@ func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 	if account.Balance < price {
 		return errors.New("replay renew deal has insufficient balance")
 	}
-	s.consumeAccountNonceLocked(req.User)
+
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, price); err != nil {
+			return err
+		}
+	} else {
+		s.consumeAccountNonceLocked(req.User)
+	}
+
 	account = s.accountLocked(req.User)
 	account.Balance -= price
 	account.LockedStorage = saturatingAdd(account.LockedStorage, price)

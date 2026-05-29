@@ -40,6 +40,16 @@ type submitDeleteReceiptTxPayload struct {
 	Response wire.SubmitDeleteReceiptResponse `json:"response"`
 }
 
+type directGovernanceActionTxPayload struct {
+	Request  wire.DirectGovernanceActionRequest  `json:"request"`
+	Response wire.DirectGovernanceActionResponse `json:"response"`
+}
+
+type directActionReviewVoteTxPayload struct {
+	Request  wire.DirectActionReviewVoteRequest  `json:"request"`
+	Response wire.DirectActionReviewVoteResponse `json:"response"`
+}
+
 func defaultAccessStatus(intent wire.IntentView) string {
 	if intent.AccessStatus != "" {
 		return intent.AccessStatus
@@ -105,16 +115,34 @@ func expireGovernanceAction(intent *Intent, now int64) {
 func (s *Store) TerminateDeal(req wire.TerminateDealRequest) (wire.TerminateDealResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
-		return wire.VerifyTerminateDeal(req)
-	}); err != nil {
-		return wire.TerminateDealResponse{}, err
+
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, req.User, "terminate_deal", 0, func(agentPub string) error {
+			return wire.VerifyTerminateDealAgent(req, agentPub)
+		}); err != nil {
+			return wire.TerminateDealResponse{}, err
+		}
+	} else {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyTerminateDeal(req)
+		}); err != nil {
+			return wire.TerminateDealResponse{}, err
+		}
 	}
+
 	resp, err := s.terminateDealLocked(req, time.Now().Unix())
 	if err != nil {
 		return wire.TerminateDealResponse{}, err
 	}
-	s.consumeAccountNonceLocked(req.User)
+
+	if requestUsesAgent(req.AgentKeyID) {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return wire.TerminateDealResponse{}, err
+		}
+	} else {
+		s.consumeAccountNonceLocked(req.User)
+	}
+
 	s.recordTxLocked("terminate_deal", req.User, terminateDealTxPayload{Request: req, Response: resp})
 	if err := s.saveLocked(); err != nil {
 		return wire.TerminateDealResponse{}, err
@@ -726,4 +754,430 @@ func intentAllowsStorageProof(intent *Intent) bool {
 		return false
 	}
 	return intent.StorageStatus == wire.StorageStatusActive
+}
+
+// ── Direct Governance Actions (Execute First, Review Later) ──
+
+// DirectGovernanceAction allows an enabled operator to directly execute a data moderation
+// action (freeze/block/legal_hold) without going through the full proposal→vote→execute cycle.
+// The action takes effect immediately but is subject to a post-execution committee review window.
+// During the review window, data is NOT deleted and permanent fund is NOT closed —
+// these irreversible actions only happen upon ratification.
+func (s *Store) DirectGovernanceAction(req wire.DirectGovernanceActionRequest) (wire.DirectGovernanceActionResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	operator := normalizeGovernanceOperator(req.Operator)
+	if operator == "" {
+		return wire.DirectGovernanceActionResponse{}, errors.New("operator is required")
+	}
+	if req.ChainID != s.data.ChainID {
+		return wire.DirectGovernanceActionResponse{}, errors.New("direct action chain_id mismatch")
+	}
+
+	// Verify operator identity and permissions.
+	op, ok := s.data.GovernanceOperators[operator]
+	if !ok || !op.Enabled {
+		return wire.DirectGovernanceActionResponse{}, errors.New("operator is not an enabled governance operator")
+	}
+	if op.PublicKey == "" {
+		return wire.DirectGovernanceActionResponse{}, errors.New("operator has no public key registered")
+	}
+	if err := s.validateGovernanceOperatorLocked(operator, req.Action); err != nil {
+		return wire.DirectGovernanceActionResponse{}, err
+	}
+
+	// Verify signature.
+	if err := wire.VerifyDirectGovernanceAction(req, operator); err != nil {
+		return wire.DirectGovernanceActionResponse{}, err
+	}
+
+	// Verify nonce.
+	expectedNonce := s.data.OperatorNonces[operator]
+	if req.Nonce != expectedNonce {
+		return wire.DirectGovernanceActionResponse{}, errors.New("invalid operator nonce")
+	}
+
+	// Validate clock skew.
+	now := time.Now().Unix()
+	if abs64(req.CreatedAtUnix-now) > governanceClockSkewSeconds {
+		return wire.DirectGovernanceActionResponse{}, errors.New("direct action timestamp outside acceptable clock skew")
+	}
+
+	// Only allow data moderation actions for direct execution.
+	switch req.Action {
+	case "freeze", "block", "legal_hold":
+		// allowed
+	default:
+		return wire.DirectGovernanceActionResponse{}, errors.New("direct action only supports freeze, block, legal_hold")
+	}
+
+	// Validate action-specific fields.
+	if req.Action == "freeze" && req.ExpiresAtUnix <= now {
+		return wire.DirectGovernanceActionResponse{}, errors.New("freeze action requires a future expires_at_unix")
+	}
+	if req.Action == "block" && req.AppealDeadlineUnix > 0 && req.AppealDeadlineUnix <= now {
+		return wire.DirectGovernanceActionResponse{}, errors.New("block action requires appeal_deadline_unix to be in the future")
+	}
+	if req.IntentID == "" {
+		return wire.DirectGovernanceActionResponse{}, errors.New("intent_id is required")
+	}
+	if req.ReasonHash == "" {
+		return wire.DirectGovernanceActionResponse{}, errors.New("reason_hash is required")
+	}
+
+	intent, ok := s.data.Intents[req.IntentID]
+	if !ok {
+		return wire.DirectGovernanceActionResponse{}, errors.New("intent not found")
+	}
+	normalizeIntentLifecycleAt(intent, now)
+
+	// Snapshot pre-action state for rollback on rejection.
+	preAccess := intent.AccessStatus
+	preModeration := intent.ModerationStatus
+	preStorage := intent.StorageStatus
+	preExpires := intent.ModerationExpiresAtUnix
+	preAppealDeadline := intent.AppealDeadlineUnix
+
+	// Apply the governance action (this modifies intent status and adds blacklist entries).
+	govReq := wire.GovernanceDealActionRequest{
+		IntentID:           req.IntentID,
+		Operator:           operator,
+		Action:             req.Action,
+		ReasonHash:         req.ReasonHash,
+		ExpiresAtUnix:      req.ExpiresAtUnix,
+		PreserveStorage:    true, // always preserve during review — deletion happens on ratify
+		AppealDeadlineUnix: req.AppealDeadlineUnix,
+	}
+	govResp, err := s.governanceDealActionLocked(govReq, now)
+	if err != nil {
+		return wire.DirectGovernanceActionResponse{}, err
+	}
+
+	// Generate action ID.
+	actionID, err := randomID("direct_action")
+	if err != nil {
+		return wire.DirectGovernanceActionResponse{}, errors.New("failed to generate direct action id")
+	}
+
+	reviewDeadline := now + s.data.DirectActionReviewWindowSeconds
+
+	// Tag blacklist entries with review status.
+	for _, hash := range intentShardHashes(intent) {
+		entry := s.data.BlacklistedShards[hash]
+		entry.ReviewStatus = wire.DirectActionPendingReview
+		entry.ActionID = actionID
+		s.data.BlacklistedShards[hash] = entry
+	}
+
+	// Create the direct action record.
+	record := wire.DirectActionRecord{
+		ActionID:              actionID,
+		IntentID:              req.IntentID,
+		Operator:              operator,
+		Action:                req.Action,
+		ReasonHash:            req.ReasonHash,
+		ExpiresAtUnix:         req.ExpiresAtUnix,
+		PreserveStorage:       req.PreserveStorage,
+		AppealDeadlineUnix:    req.AppealDeadlineUnix,
+		ReviewStatus:          wire.DirectActionPendingReview,
+		ReviewDeadlineUnix:    reviewDeadline,
+		CreatedAtUnix:         now,
+		PreAccessStatus:       preAccess,
+		PreModerationStatus:   preModeration,
+		PreStorageStatus:      preStorage,
+		PreExpiresAtUnix:      preExpires,
+		PreAppealDeadlineUnix: preAppealDeadline,
+	}
+	s.data.DirectActionRecords[actionID] = record
+	if s.data.DirectActionReviewVotes[actionID] == nil {
+		s.data.DirectActionReviewVotes[actionID] = []wire.DirectActionReviewVote{}
+	}
+
+	// Advance operator nonce.
+	s.data.OperatorNonces[operator] = expectedNonce + 1
+
+	resp := wire.DirectGovernanceActionResponse{
+		Record:             record,
+		GovernanceResult:   govResp,
+		ReviewDeadlineUnix: reviewDeadline,
+	}
+	s.recordTxLocked("direct_governance_action", operator, directGovernanceActionTxPayload{Request: req, Response: resp})
+	if err := s.saveLocked(); err != nil {
+		return wire.DirectGovernanceActionResponse{}, err
+	}
+	return resp, nil
+}
+
+// CastDirectActionReviewVote allows an enabled operator to vote to reject a pending direct action.
+// If rejection votes reach the threshold (same as data moderation threshold), the action is rolled back.
+func (s *Store) CastDirectActionReviewVote(req wire.DirectActionReviewVoteRequest) (wire.DirectActionReviewVoteResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	voter := normalizeGovernanceOperator(req.Voter)
+	if voter == "" {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("voter is required")
+	}
+	if req.ChainID != s.data.ChainID {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("review vote chain_id mismatch")
+	}
+
+	// Verify voter is an enabled governance operator.
+	op, ok := s.data.GovernanceOperators[voter]
+	if !ok || !op.Enabled {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("voter is not an enabled governance operator")
+	}
+	if op.PublicKey == "" {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("voter has no public key registered")
+	}
+
+	// Verify signature.
+	if err := wire.VerifyDirectActionReviewVote(req, voter); err != nil {
+		return wire.DirectActionReviewVoteResponse{}, err
+	}
+
+	// Verify nonce.
+	expectedNonce := s.data.OperatorNonces[voter]
+	if req.Nonce != expectedNonce {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("invalid voter nonce")
+	}
+
+	// Validate clock skew.
+	now := time.Now().Unix()
+	if abs64(req.CreatedAtUnix-now) > governanceClockSkewSeconds {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("review vote timestamp outside acceptable clock skew")
+	}
+
+	// Look up the direct action record.
+	record, ok := s.data.DirectActionRecords[req.ActionID]
+	if !ok {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("direct action record not found")
+	}
+	if record.ReviewStatus != wire.DirectActionPendingReview {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("direct action is not pending review")
+	}
+
+	// Check review window has not expired.
+	if now > record.ReviewDeadlineUnix {
+		// Auto-ratify since window expired.
+		s.autoRatifyDirectActionLocked(record, now)
+		return wire.DirectActionReviewVoteResponse{}, errors.New("review window expired; action auto-ratified")
+	}
+
+	// Only reject votes are meaningful (approve is the default via inaction).
+	if !req.Reject {
+		return wire.DirectActionReviewVoteResponse{}, errors.New("only reject votes are accepted for direct action review")
+	}
+
+	// Record the vote.
+	vote := wire.DirectActionReviewVote{
+		ActionID:       req.ActionID,
+		Voter:          voter,
+		VoterSignature: req.Signature,
+		Reject:         true,
+		CreatedAtUnix:  req.CreatedAtUnix,
+	}
+	s.data.DirectActionReviewVotes[req.ActionID] = append(s.data.DirectActionReviewVotes[req.ActionID], vote)
+
+	// Count reject votes from currently enabled operators.
+	rejectCount := 0
+	for _, v := range s.data.DirectActionReviewVotes[req.ActionID] {
+		if !v.Reject {
+			continue
+		}
+		voterAddr := normalizeGovernanceOperator(v.Voter)
+		voterOp, ok := s.data.GovernanceOperators[voterAddr]
+		if !ok || !voterOp.Enabled {
+			continue
+		}
+		rejectCount++
+	}
+
+	threshold := s.governanceThresholdLocked(record.Action)
+	rejected := rejectCount >= threshold
+
+	if rejected {
+		s.rejectDirectActionLocked(record, now)
+	}
+
+	s.data.OperatorNonces[voter] = expectedNonce + 1
+
+	resp := wire.DirectActionReviewVoteResponse{
+		Vote:        vote,
+		RejectCount: rejectCount,
+		Threshold:   threshold,
+		Rejected:    rejected,
+	}
+	s.recordTxLocked("direct_action_review_vote", voter, directActionReviewVoteTxPayload{Request: req, Response: resp})
+	if err := s.saveLocked(); err != nil {
+		return wire.DirectActionReviewVoteResponse{}, err
+	}
+	return resp, nil
+}
+
+// RatifyDirectAction explicitly ratifies a pending direct action.
+// Can be called after the review window or by a governance proposal.
+func (s *Store) RatifyDirectAction(actionID string, now int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record, ok := s.data.DirectActionRecords[actionID]
+	if !ok {
+		return errors.New("direct action record not found")
+	}
+	if record.ReviewStatus != wire.DirectActionPendingReview {
+		return errors.New("direct action is not pending review")
+	}
+	s.ratifyDirectActionLocked(record, now)
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ExpireDirectActionReviews checks all pending direct actions and auto-ratifies
+// those whose review window has expired. Should be called periodically.
+func (s *Store) ExpireDirectActionReviews() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().Unix()
+	count := 0
+	for id, record := range s.data.DirectActionRecords {
+		if record.ReviewStatus != wire.DirectActionPendingReview {
+			continue
+		}
+		if now <= record.ReviewDeadlineUnix {
+			continue
+		}
+		s.autoRatifyDirectActionLocked(record, now)
+		_ = id
+		count++
+	}
+	if count > 0 {
+		_ = s.saveLocked()
+	}
+	return count
+}
+
+// ListDirectActions returns all direct action records and their review votes.
+func (s *Store) ListDirectActions(intentID string, status string) wire.DirectActionListResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	records := make([]wire.DirectActionRecord, 0)
+	votes := make(map[string][]wire.DirectActionReviewVote)
+	for _, record := range s.data.DirectActionRecords {
+		if intentID != "" && record.IntentID != intentID {
+			continue
+		}
+		if status != "" && record.ReviewStatus != status {
+			continue
+		}
+		records = append(records, record)
+		votes[record.ActionID] = s.data.DirectActionReviewVotes[record.ActionID]
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].CreatedAtUnix > records[j].CreatedAtUnix
+	})
+	return wire.DirectActionListResponse{Records: records, Votes: votes}
+}
+
+// ── Internal helpers for direct action ratification and rejection ──
+
+func (s *Store) ratifyDirectActionLocked(record wire.DirectActionRecord, now int64) {
+	record.ReviewStatus = wire.DirectActionRatified
+	record.RatifiedAtUnix = now
+	s.data.DirectActionRecords[record.ActionID] = record
+
+	// Clear review status from blacklist entries.
+	s.clearBlacklistReviewStatusLocked(record.ActionID)
+
+	// Now perform irreversible actions that were deferred during direct execution.
+	intent, ok := s.data.Intents[record.IntentID]
+	if !ok {
+		return
+	}
+
+	if record.Action == "block" && !record.PreserveStorage {
+		intent.StorageStatus = wire.StorageStatusTerminating
+		intent.TerminatedAtUnix = now
+		s.closePermanentFundLocked(intent, "governance_block_ratified", now)
+		s.ensureDeleteTasksLocked(intent, "governance_block", now)
+	}
+}
+
+func (s *Store) autoRatifyDirectActionLocked(record wire.DirectActionRecord, now int64) {
+	record.ReviewStatus = wire.DirectActionAutoRatified
+	record.RatifiedAtUnix = now
+	s.data.DirectActionRecords[record.ActionID] = record
+
+	// Clear review status from blacklist entries.
+	s.clearBlacklistReviewStatusLocked(record.ActionID)
+
+	// Perform deferred irreversible actions.
+	intent, ok := s.data.Intents[record.IntentID]
+	if !ok {
+		return
+	}
+
+	if record.Action == "block" && !record.PreserveStorage {
+		intent.StorageStatus = wire.StorageStatusTerminating
+		intent.TerminatedAtUnix = now
+		s.closePermanentFundLocked(intent, "governance_block_auto_ratified", now)
+		s.ensureDeleteTasksLocked(intent, "governance_block", now)
+	}
+}
+
+func (s *Store) rejectDirectActionLocked(record wire.DirectActionRecord, now int64) {
+	record.ReviewStatus = wire.DirectActionRejected
+	record.RejectedAtUnix = now
+	s.data.DirectActionRecords[record.ActionID] = record
+
+	// Remove blacklist entries that were added by this direct action.
+	s.removeBlacklistByActionIDLocked(record.ActionID)
+
+	// Cancel any pending_review delete tasks for this action.
+	s.cancelDeleteTasksByActionIDLocked(record.ActionID)
+
+	// Rollback intent state.
+	intent, ok := s.data.Intents[record.IntentID]
+	if !ok {
+		return
+	}
+	intent.AccessStatus = record.PreAccessStatus
+	intent.ModerationStatus = record.PreModerationStatus
+	intent.StorageStatus = record.PreStorageStatus
+	intent.ModerationExpiresAtUnix = record.PreExpiresAtUnix
+	intent.AppealDeadlineUnix = record.PreAppealDeadlineUnix
+	intent.BlockedReasonHash = ""
+	intent.AccessUpdatedAtUnix = now
+	intent.UpdatedAt = now
+}
+
+func (s *Store) clearBlacklistReviewStatusLocked(actionID string) {
+	for hash, entry := range s.data.BlacklistedShards {
+		if entry.ActionID == actionID {
+			entry.ReviewStatus = ""
+			entry.ActionID = ""
+			s.data.BlacklistedShards[hash] = entry
+		}
+	}
+}
+
+func (s *Store) removeBlacklistByActionIDLocked(actionID string) {
+	for hash, entry := range s.data.BlacklistedShards {
+		if entry.ActionID == actionID {
+			delete(s.data.BlacklistedShards, hash)
+		}
+	}
+}
+
+func (s *Store) cancelDeleteTasksByActionIDLocked(actionID string) {
+	for id, task := range s.data.DeleteTasks {
+		if task.ActionID == actionID && task.ReviewStatus == wire.DirectActionPendingReview {
+			delete(s.data.DeleteTasks, id)
+		}
+	}
 }

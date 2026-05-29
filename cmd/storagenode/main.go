@@ -215,6 +215,10 @@ func main() {
 		}
 		defer providerNetwork.Close()
 		log.Printf("provider discovery enabled peer_id=%s addrs=%v topic=%s dht=%v", providerNetwork.PeerID(), providerNetwork.Addrs(), *p2pTopic, *dhtEnabled)
+		if providerNetwork.DHTService() != nil {
+			node.SetDHTService(providerNetwork.DHTService())
+			log.Printf("DHT service wired into storage node for repair discovery")
+		}
 	}
 	if *chainURL != "" {
 		node.StartProviderReporter(*chainURL, registeredEndpoint, *capacity, 30*time.Second, func() (string, []string) {

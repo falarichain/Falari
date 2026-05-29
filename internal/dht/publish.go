@@ -3,6 +3,7 @@ package dht
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -25,15 +26,14 @@ func (s *Service) PublishShard(record wire.DHTProviderRecord) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := contextWithTimeout(s.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
 	if err := s.dht.PutValue(ctx, "/falari/shard/"+record.ShardHash, data); err != nil {
-		log.Printf("dht: put value for shard %s failed: %v", record.ShardHash, err)
+		return fmt.Errorf("dht: put value for shard %s: %w", record.ShardHash, err)
 	}
 	// Also register as a provider for the shard CID (standard DHT provider mechanism).
 	if err := s.dht.Provide(ctx, c, true); err != nil {
-		log.Printf("dht: provide shard %s failed: %v", record.ShardHash, err)
-		return err
+		return fmt.Errorf("dht: provide shard %s: %w", record.ShardHash, err)
 	}
 	s.AddShard(record.ShardHash)
 	return nil
@@ -81,8 +81,4 @@ func (s *Service) StartPublishLoop(builder func(shardHash string) (wire.DHTProvi
 			}
 		}
 	}()
-}
-
-func contextWithTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, timeout)
 }

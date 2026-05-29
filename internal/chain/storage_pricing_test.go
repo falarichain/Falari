@@ -22,7 +22,7 @@ func TestStorageQuoteUsesErasureDurationAndUtilization(t *testing.T) {
 	// 1 GiB file, 2+1 erasure → 1536 MiB redundant, 30 days (year 1, full price)
 	// With basePrice=10^8 the scaled arithmetic (big.Int, no intermediate ceil):
 	// tieredFee = 1536 * 10^8 * 30 * 10000 / (300 * 10000) = 15_360_000_000
-	// utilization 90% → multiplier 2x → fee = 15_360_000_000 * 20000 / 10000 = 30_720_000_000
+	// utilization 90% → multiplier 1.5x → fee = 15_360_000_000 * 15000 / 10000 = 23_040_000_000
 	quote, err := store.StorageQuote(wire.StorageQuoteRequest{
 		FileSize: 1 << 30,
 		Erasure:  wire.ErasurePolicy{DataShards: 2, ParityShards: 1},
@@ -37,11 +37,11 @@ func TestStorageQuoteUsesErasureDurationAndUtilization(t *testing.T) {
 	if quote.TotalMiBDays != 1536*30 {
 		t.Fatalf("expected %d total MiB-days, got %d", 1536*30, quote.TotalMiBDays)
 	}
-	if quote.UtilizationBPS != 9000 || quote.UtilizationMultiplier != 20000 {
+	if quote.UtilizationBPS != 9000 || quote.UtilizationMultiplier != 15000 {
 		t.Fatalf("unexpected utilization quote: %+v", quote)
 	}
-	if quote.RequiredFee != 30_720_000_000 {
-		t.Fatalf("expected fee 30_720_000_000, got %d", quote.RequiredFee)
+	if quote.RequiredFee != 23_040_000_000 {
+		t.Fatalf("expected fee 23_040_000_000, got %d", quote.RequiredFee)
 	}
 }
 
@@ -120,13 +120,13 @@ func TestCreateIntentAutoLocksRequiredStorageFee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Minimum fee = 1 GF (10^8). No retrieval/foundation addresses → burn = 9%.
-	// burn = 9_000_000, miner portion = 91_000_000.
-	if resp.RequiredFee != gfTokens(1) || resp.LockedFee != gfTokens(1) {
-		t.Fatalf("expected required and locked fee 1 GF, got %+v", resp)
+	// Calculated fee = 10_000_000 (above minimum 0.01 GF). No retrieval/foundation → burn = 9%.
+	// burn = 900_000, miner portion = 9_100_000.
+	if resp.RequiredFee != 10_000_000 || resp.LockedFee != 10_000_000 {
+		t.Fatalf("expected required and locked fee 10_000_000, got %+v", resp)
 	}
 	account := store.accountLocked(alice.Addr)
-	if account.Balance != gfTokens(9) || account.LockedStorage != 91_000_000 {
+	if account.Balance != gfTokens(10)-10_000_000 || account.LockedStorage != 9_100_000 {
 		t.Fatalf("unexpected account after intent: %+v", account)
 	}
 }
@@ -315,16 +315,16 @@ func TestCreateIntentSmallFeeNoBurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Minimum fee = 1 GF (10^8). No retrieval/foundation → burn = 9%.
-	// burn = 9_000_000, miner portion = 91_000_000.
-	if resp.BurnedFee != 9_000_000 {
-		t.Fatalf("expected burn 9_000_000 for minimum fee, got %d", resp.BurnedFee)
+	// Calculated fee = 10_000_000 (above minimum 0.01 GF). No retrieval/foundation → burn = 9%.
+	// burn = 900_000, miner portion = 9_100_000.
+	if resp.BurnedFee != 900_000 {
+		t.Fatalf("expected burn 900_000 for calculated fee, got %d", resp.BurnedFee)
 	}
 	account := store.accountLocked(alice.Addr)
-	if account.Balance != gfTokens(9) || account.LockedStorage != 91_000_000 {
+	if account.Balance != gfTokens(10)-10_000_000 || account.LockedStorage != 9_100_000 {
 		t.Fatalf("unexpected account: %+v", account)
 	}
-	if store.data.StorageFeePool.TotalBurned != 9_000_000 {
-		t.Fatalf("expected pool total burned 9_000_000, got %d", store.data.StorageFeePool.TotalBurned)
+	if store.data.StorageFeePool.TotalBurned != 900_000 {
+		t.Fatalf("expected pool total burned 900_000, got %d", store.data.StorageFeePool.TotalBurned)
 	}
 }

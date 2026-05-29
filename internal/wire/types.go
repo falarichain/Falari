@@ -451,13 +451,17 @@ type SettleIntentResponse struct {
 }
 
 type RenewDealRequest struct {
-	ChainID   string `json:"chain_id,omitempty"`
-	IntentID  string `json:"intent_id"`
-	User      string `json:"user"`
-	Duration  int64  `json:"duration"`
-	Nonce     uint64 `json:"nonce,omitempty"`
-	Signature string `json:"signature,omitempty"`
-	PublicKey string `json:"public_key,omitempty"`
+	ChainID        string `json:"chain_id,omitempty"`
+	IntentID       string `json:"intent_id"`
+	User           string `json:"user"`
+	Duration       int64  `json:"duration"`
+	Nonce          uint64 `json:"nonce,omitempty"`
+	Signature      string `json:"signature,omitempty"`
+	PublicKey      string `json:"public_key,omitempty"`
+	AgentKeyID     string `json:"agent_key_id,omitempty"`
+	AgentNonce     uint64 `json:"agent_nonce,omitempty"`
+	AgentPublicKey string `json:"agent_public_key,omitempty"`
+	AgentSignature string `json:"agent_signature,omitempty"`
 }
 
 type RenewDealResponse struct {
@@ -470,13 +474,17 @@ type RenewDealResponse struct {
 }
 
 type TerminateDealRequest struct {
-	ChainID   string `json:"chain_id,omitempty"`
-	IntentID  string `json:"intent_id"`
-	User      string `json:"user"`
-	Reason    string `json:"reason,omitempty"`
-	Nonce     uint64 `json:"nonce,omitempty"`
-	Signature string `json:"signature,omitempty"`
-	PublicKey string `json:"public_key,omitempty"`
+	ChainID        string `json:"chain_id,omitempty"`
+	IntentID       string `json:"intent_id"`
+	User           string `json:"user"`
+	Reason         string `json:"reason,omitempty"`
+	Nonce          uint64 `json:"nonce,omitempty"`
+	Signature      string `json:"signature,omitempty"`
+	PublicKey      string `json:"public_key,omitempty"`
+	AgentKeyID     string `json:"agent_key_id,omitempty"`
+	AgentNonce     uint64 `json:"agent_nonce,omitempty"`
+	AgentPublicKey string `json:"agent_public_key,omitempty"`
+	AgentSignature string `json:"agent_signature,omitempty"`
 }
 
 type TerminateDealResponse struct {
@@ -542,6 +550,8 @@ type DeleteTask struct {
 	ActiveReferences int    `json:"active_references,omitempty"`
 	CreatedAtUnix    int64  `json:"created_at_unix"`
 	CompletedAtUnix  int64  `json:"completed_at_unix,omitempty"`
+	ReviewStatus     string `json:"review_status,omitempty"` // "pending_review" for direct actions
+	ActionID         string `json:"action_id,omitempty"`     // Links to DirectActionRecord
 }
 
 type DeleteTaskResponse struct {
@@ -659,9 +669,10 @@ type UploadPlan struct {
 	Encryption        *EncryptionMetadata `json:"encryption,omitempty"`
 	Policy            StoragePolicy       `json:"policy"`
 	LockedFee         uint64              `json:"locked_fee"`
-	Receipts          []MinerReceipt      `json:"receipts"`
-	CommittedSegments []int               `json:"committed_segments"`
-	CommittedShards   []ShardRef          `json:"committed_shards,omitempty"`
+	Receipts          []MinerReceipt          `json:"receipts"`
+	CommittedSegments []int                   `json:"committed_segments"`
+	CommittedShards   []ShardRef              `json:"committed_shards,omitempty"`
+	ProviderCache     []StorageProviderRecord  `json:"provider_cache,omitempty"`
 }
 
 type StorageManifestResponse struct {
@@ -759,6 +770,11 @@ type CollectionRecordsResponse struct {
 	Collection DataCollection         `json:"collection"`
 	Filter     CollectionRecordFilter `json:"filter,omitempty"`
 	Records    []DataRecord           `json:"records"`
+}
+
+type UserCollectionsResponse struct {
+	User        string           `json:"user"`
+	Collections []DataCollection `json:"collections"`
 }
 
 type ShardRef struct {
@@ -1169,6 +1185,7 @@ type MinerStats struct {
 	DHTLastPublishUnix      int64  `json:"dht_last_publish_unix,omitempty"`
 	RetrievalObligMet       bool   `json:"retrieval_oblig_met,omitempty"`
 	BonusReleased           bool   `json:"bonus_released,omitempty"`
+	BonusExpired            bool   `json:"bonus_expired,omitempty"`
 	LockedBonus             uint64 `json:"locked_bonus,omitempty"`
 }
 
@@ -1704,6 +1721,32 @@ type ListAgentKeysResponse struct {
 	Keys []AgentKey `json:"keys"`
 }
 
+type ExtendAgentKeyRequest struct {
+	ChainID   string `json:"chain_id,omitempty"`
+	KeyID     string `json:"key_id"`
+	Master    string `json:"master"`
+	ExpiresAt int64  `json:"expires_at"`
+	Nonce     uint64 `json:"nonce"`
+	Signature string `json:"signature"`
+}
+
+type ExtendAgentKeyResponse struct {
+	Key AgentKey `json:"key"`
+}
+
+type TopupAgentKeyRequest struct {
+	ChainID    string `json:"chain_id,omitempty"`
+	KeyID      string `json:"key_id"`
+	Master     string `json:"master"`
+	TotalLimit uint64 `json:"total_limit"`
+	Nonce      uint64 `json:"nonce"`
+	Signature  string `json:"signature"`
+}
+
+type TopupAgentKeyResponse struct {
+	Key AgentKey `json:"key"`
+}
+
 // ── DHT & Governance Blacklist ──
 
 // BlacklistEntry represents a governance-blocked shard.
@@ -1715,6 +1758,8 @@ type BlacklistEntry struct {
 	Operator      string `json:"operator"`
 	BlockedAtUnix int64  `json:"blocked_at_unix"`
 	ExpiresAtUnix int64  `json:"expires_at_unix,omitempty"`
+	ReviewStatus  string `json:"review_status,omitempty"`  // "pending_review" for direct actions
+	ActionID      string `json:"action_id,omitempty"`      // Links to DirectActionRecord
 }
 
 // BlacklistResponse is the chain API response for blacklist queries.
@@ -1777,6 +1822,12 @@ type GovernanceProposal struct {
 	TargetMaxBlockTxs                 uint64 `json:"target_max_block_txs,omitempty"`
 	TargetMaxTxBytes                  uint64 `json:"target_max_tx_bytes,omitempty"`
 	TargetMaxStorageTxBytes           uint64 `json:"target_max_storage_tx_bytes,omitempty"`
+	TargetRegistrationBonusAmount     uint64 `json:"target_registration_bonus_amount,omitempty"`
+	TargetMinBonusProofCount          uint64 `json:"target_min_bonus_proof_count,omitempty"`
+	TargetMinBonusSuccessRateBPS      uint64 `json:"target_min_bonus_success_rate_bps,omitempty"`
+	TargetMinBonusRetrievalCount      uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
+	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
+	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
 	ChainID                           string `json:"chain_id"`
 	ProposerNonce                     uint64 `json:"proposer_nonce"`
 	Status                            string `json:"status"`
@@ -1842,6 +1893,12 @@ type CreateGovernanceProposalRequest struct {
 	TargetMaxBlockTxs                 uint64 `json:"target_max_block_txs,omitempty"`
 	TargetMaxTxBytes                  uint64 `json:"target_max_tx_bytes,omitempty"`
 	TargetMaxStorageTxBytes           uint64 `json:"target_max_storage_tx_bytes,omitempty"`
+	TargetRegistrationBonusAmount     uint64 `json:"target_registration_bonus_amount,omitempty"`
+	TargetMinBonusProofCount          uint64 `json:"target_min_bonus_proof_count,omitempty"`
+	TargetMinBonusSuccessRateBPS      uint64 `json:"target_min_bonus_success_rate_bps,omitempty"`
+	TargetMinBonusRetrievalCount      uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
+	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
+	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
 	Signature                         string `json:"signature"`
 	Nonce                             uint64 `json:"nonce"`
 	CreatedAtUnix                     int64  `json:"created_at_unix"`
@@ -2054,4 +2111,101 @@ type BridgeSetConfigRequest struct {
 type BridgePendingResponse struct {
 	Outbounds []*BridgeOutbound `json:"outbounds"`
 	Inbounds  []*BridgeInbound  `json:"inbounds"`
+}
+
+// ── Direct Governance Actions (Execute First, Review Later) ──
+
+const (
+	// DirectActionPendingReview indicates the action is active but pending committee review.
+	DirectActionPendingReview = "pending_review"
+	// DirectActionRatified indicates the committee has ratified the action.
+	DirectActionRatified = "ratified"
+	// DirectActionRejected indicates the committee has rejected the action; it was rolled back.
+	DirectActionRejected = "rejected"
+	// DirectActionAutoRatified indicates the review window expired without rejection.
+	DirectActionAutoRatified = "auto_ratified"
+)
+
+// DirectActionReviewWindowSeconds is the default review window (72 hours).
+const DirectActionReviewWindowSeconds int64 = 72 * 60 * 60
+
+// DirectActionRecord tracks a governance action that was executed directly by an operator
+// and is subject to post-execution committee review.
+type DirectActionRecord struct {
+	ActionID               string `json:"action_id"`
+	IntentID               string `json:"intent_id"`
+	Operator               string `json:"operator"`
+	Action                 string `json:"action"` // "freeze"|"block"|"legal_hold"
+	ReasonHash             string `json:"reason_hash"`
+	ExpiresAtUnix          int64  `json:"expires_at_unix,omitempty"`          // for freeze
+	PreserveStorage        bool   `json:"preserve_storage,omitempty"`         // for block
+	AppealDeadlineUnix     int64  `json:"appeal_deadline_unix,omitempty"`     // for block
+	ReviewStatus           string `json:"review_status"`                      // pending_review|ratified|rejected|auto_ratiated
+	ReviewDeadlineUnix     int64  `json:"review_deadline_unix"`               // when the review window closes
+	CreatedAtUnix          int64  `json:"created_at_unix"`
+	RatifiedAtUnix         int64  `json:"ratified_at_unix,omitempty"`
+	RejectedAtUnix         int64  `json:"rejected_at_unix,omitempty"`
+	// Snapshot of intent state before action, for rollback on rejection.
+	PreAccessStatus        string `json:"pre_access_status,omitempty"`
+	PreModerationStatus    string `json:"pre_moderation_status,omitempty"`
+	PreStorageStatus       string `json:"pre_storage_status,omitempty"`
+	PreExpiresAtUnix       int64  `json:"pre_expires_at_unix,omitempty"`
+	PreAppealDeadlineUnix  int64  `json:"pre_appeal_deadline_unix,omitempty"`
+}
+
+// DirectActionReviewVote is a signed vote on a direct action review.
+type DirectActionReviewVote struct {
+	ActionID       string `json:"action_id"`
+	Voter          string `json:"voter"`
+	VoterSignature string `json:"voter_signature"`
+	Reject         bool   `json:"reject"` // true = reject the action
+	CreatedAtUnix  int64  `json:"created_at_unix"`
+}
+
+// DirectGovernanceActionRequest is the HTTP request for an operator to directly execute
+// a governance data moderation action (freeze/block/legal_hold) without a proposal.
+type DirectGovernanceActionRequest struct {
+	Operator           string `json:"operator"`
+	ChainID            string `json:"chain_id"`
+	IntentID           string `json:"intent_id"`
+	Action             string `json:"action"` // "freeze"|"block"|"legal_hold"
+	ReasonHash         string `json:"reason_hash"`
+	ExpiresAtUnix      int64  `json:"expires_at_unix,omitempty"`      // for freeze
+	PreserveStorage    bool   `json:"preserve_storage,omitempty"`     // for block
+	AppealDeadlineUnix int64  `json:"appeal_deadline_unix,omitempty"` // for block
+	Nonce              uint64 `json:"nonce"`
+	Signature          string `json:"signature"`
+	CreatedAtUnix      int64  `json:"created_at_unix"`
+}
+
+// DirectGovernanceActionResponse is the response for a direct governance action.
+type DirectGovernanceActionResponse struct {
+	Record             DirectActionRecord               `json:"record"`
+	GovernanceResult   GovernanceDealActionResponse     `json:"governance_result"`
+	ReviewDeadlineUnix int64                            `json:"review_deadline_unix"`
+}
+
+// DirectActionReviewVoteRequest is the HTTP request for an operator to cast a review vote.
+type DirectActionReviewVoteRequest struct {
+	ActionID      string `json:"action_id"`
+	Voter         string `json:"voter"`
+	Reject        bool   `json:"reject"`
+	ChainID       string `json:"chain_id"`
+	Nonce         uint64 `json:"nonce"`
+	Signature     string `json:"signature"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+}
+
+// DirectActionReviewVoteResponse is the response after casting a review vote.
+type DirectActionReviewVoteResponse struct {
+	Vote         DirectActionReviewVote `json:"vote"`
+	RejectCount  int                    `json:"reject_count"`
+	Threshold    int                    `json:"threshold"`
+	Rejected     bool                   `json:"rejected"`
+}
+
+// DirectActionListResponse is the response for listing direct action records.
+type DirectActionListResponse struct {
+	Records []DirectActionRecord                `json:"records"`
+	Votes   map[string][]DirectActionReviewVote `json:"votes"`
 }

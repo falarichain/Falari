@@ -218,14 +218,14 @@ func utilizationBPS(used uint64, capacity uint64) uint64 {
 
 func storageUtilizationMultiplier(utilization uint64) uint64 {
 	switch {
-	case utilization >= 9_000:
-		return 20_000
-	case utilization >= 8_000:
-		return 15_000
+	case utilization >= 7_000:
+		return 15_000 // ≥ 70% → 1.5x
 	case utilization >= 5_000:
-		return 10_000
+		return 10_000 // 50%~70% → 1.0x
+	case utilization >= 3_000:
+		return 7_000 // 30%~50% → 0.7x
 	case utilization > 0:
-		return 9_000
+		return 5_000 // < 30% → 0.5x
 	default:
 		return 10_000
 	}

@@ -20,16 +20,22 @@ type DHTProviderRecord struct {
 }
 
 type dhtProviderSigningPayload struct {
-	ExpiresAtUnix string `json:"expires_at_unix"`
-	MinerAddress  string `json:"miner_address"`
-	ShardHash     string `json:"shard_hash"`
+	Endpoint       string `json:"endpoint"`
+	ExpiresAtUnix  string `json:"expires_at_unix"`
+	HealthScoreBPS string `json:"health_score_bps"`
+	MinerAddress   string `json:"miner_address"`
+	PeerID         string `json:"peer_id"`
+	ShardHash      string `json:"shard_hash"`
 }
 
 func dhtProviderPayload(record DHTProviderRecord) dhtProviderSigningPayload {
 	return dhtProviderSigningPayload{
-		MinerAddress:  record.MinerAddress,
-		ShardHash:     record.ShardHash,
-		ExpiresAtUnix: strconv.FormatInt(record.ExpiresAtUnix, 10),
+		Endpoint:       record.Endpoint,
+		ExpiresAtUnix:  strconv.FormatInt(record.ExpiresAtUnix, 10),
+		HealthScoreBPS: strconv.FormatUint(record.HealthScoreBPS, 10),
+		MinerAddress:   record.MinerAddress,
+		PeerID:         record.PeerID,
+		ShardHash:      record.ShardHash,
 	}
 }
 

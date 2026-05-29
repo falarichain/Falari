@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"chain/internal/consensus"
 	"chain/internal/wire"
@@ -51,7 +52,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /intents/delete-tasks", s.listDeleteTasks)
 	mux.HandleFunc("GET /intents/governance/audit", s.listGovernanceAudit)
 	mux.HandleFunc("GET /governance/blacklist", s.getBlacklist)
+	mux.HandleFunc("POST /governance/direct-action", s.directGovernanceAction)
+	mux.HandleFunc("POST /governance/direct-action/review", s.castDirectActionReviewVote)
+	mux.HandleFunc("POST /governance/direct-action/ratify", s.ratifyDirectAction)
+	mux.HandleFunc("GET /governance/direct-actions", s.listDirectActions)
 	mux.HandleFunc("GET /manifests/", s.getManifest)
+	mux.HandleFunc("GET /user-collections", s.listUserCollections)
 	mux.HandleFunc("POST /collections", s.createCollection)
 	mux.HandleFunc("GET /collections/", s.getCollection)
 	mux.HandleFunc("GET /collections/{id}/records", s.getCollectionRecords)
@@ -105,6 +111,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /agent-keys", s.registerAgentKey)
 	mux.HandleFunc("GET /agent-keys", s.listAgentKeys)
 	mux.HandleFunc("POST /agent-keys/revoke", s.revokeAgentKey)
+	mux.HandleFunc("POST /agent-keys/extend", s.extendAgentKey)
+	mux.HandleFunc("POST /agent-keys/topup", s.topupAgentKey)
 	mux.HandleFunc("POST /multisig", s.createMultisig)
 	mux.HandleFunc("GET /multisig", s.listMultisigWallets)
 	mux.HandleFunc("GET /multisig/{address}", s.getMultisigWallet)
@@ -406,6 +414,55 @@ func (s *Server) listDeleteTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listGovernanceAudit(w http.ResponseWriter, r *http.Request) {
 	resp := s.store.GovernanceAudit(r.URL.Query().Get("intent"), r.URL.Query().Get("operator"), r.URL.Query().Get("action"))
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) directGovernanceAction(w http.ResponseWriter, r *http.Request) {
+	var req wire.DirectGovernanceActionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.DirectGovernanceAction(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) castDirectActionReviewVote(w http.ResponseWriter, r *http.Request) {
+	var req wire.DirectActionReviewVoteRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.CastDirectActionReviewVote(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) ratifyDirectAction(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ActionID string `json:"action_id"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.ActionID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("action_id is required"))
+		return
+	}
+	if err := s.store.RatifyDirectAction(req.ActionID, time.Now().Unix()); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ratified"})
+}
+
+func (s *Server) listDirectActions(w http.ResponseWriter, r *http.Request) {
+	resp := s.store.ListDirectActions(r.URL.Query().Get("intent"), r.URL.Query().Get("status"))
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -747,6 +804,20 @@ func (s *Server) getManifest(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.store.Manifest(intentID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) listUserCollections(w http.ResponseWriter, r *http.Request) {
+	user := r.URL.Query().Get("user")
+	if user == "" {
+		writeError(w, http.StatusBadRequest, errors.New("user query parameter is required"))
+		return
+	}
+	resp, err := s.store.ListCollectionsByUser(user)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1116,6 +1187,32 @@ func (s *Server) revokeAgentKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked", "key_id": req.KeyID})
+}
+
+func (s *Server) extendAgentKey(w http.ResponseWriter, r *http.Request) {
+	var req wire.ExtendAgentKeyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.ExtendAgentKey(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) topupAgentKey(w http.ResponseWriter, r *http.Request) {
+	var req wire.TopupAgentKeyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.TopupAgentKey(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ── Multisig handlers ──

@@ -88,7 +88,7 @@ type MiningParams struct {
 
 	// ── Registration bonus ──
 	// RegistrationBonusAmount: one-time locked bonus granted to each new miner.
-	// Default 1000 * TokenUnit (1000 tokens).
+	// Default 5000 * TokenUnit (5000 tokens).
 	RegistrationBonusAmount uint64 `json:"registration_bonus_amount,omitempty"`
 	// MinBonusProofCount: minimum successful proofs required to release the bonus.
 	// Default 5000 (~57 days at 4 proofs/epoch, 1h epoch, 95% success rate).
@@ -96,6 +96,15 @@ type MiningParams struct {
 	// MinBonusSuccessRateBPS: minimum proof success rate (BPS) to release the bonus.
 	// Default 9500 = 95%.
 	MinBonusSuccessRateBPS uint64 `json:"min_bonus_success_rate_bps,omitempty"`
+	// MinBonusRetrievalCount: minimum successful retrievals required to release the bonus.
+	// Default 100. Set to 0 to disable retrieval count check.
+	MinBonusRetrievalCount uint64 `json:"min_bonus_retrieval_count,omitempty"`
+	// MaxBonusAddresses: maximum number of miners who can receive the registration bonus.
+	// Default 200_000. Set to 0 for unlimited.
+	MaxBonusAddresses uint64 `json:"max_bonus_addresses,omitempty"`
+	// BonusDeadlineSeconds: maximum time after registration to meet release conditions.
+	// Default 7_776_000 (90 days). Set to 0 to disable deadline.
+	BonusDeadlineSeconds uint64 `json:"bonus_deadline_seconds,omitempty"`
 }
 
 // DefaultMiningParams returns the factory-default mining parameters.
@@ -131,9 +140,12 @@ func DefaultMiningParams() MiningParams {
 		MaxTxBytes:                  defaultMaxTxBytes,
 		MaxStorageTxBytes:           defaultMaxStorageTxBytes,
 		RetrievalWeightBPS:          1000,
-		RegistrationBonusAmount:     1000 * reward.TokenUnit,
+		RegistrationBonusAmount:     5000 * reward.TokenUnit,
 		MinBonusProofCount:          5000,
 		MinBonusSuccessRateBPS:      9500,
+		MinBonusRetrievalCount:      100,
+		MaxBonusAddresses:           200_000,
+		BonusDeadlineSeconds:        90 * 24 * 60 * 60,
 	}
 }
 

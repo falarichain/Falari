@@ -364,22 +364,26 @@ func VerifySettleIntent(req SettleIntentRequest) error {
 // --- RenewDeal ---
 
 type renewDealSigningPayload struct {
-	ChainID  string `json:"chain_id"`
-	Action   string `json:"action"`
-	IntentID string `json:"intent_id"`
-	User     string `json:"user"`
-	Duration int64  `json:"duration"`
-	Nonce    uint64 `json:"nonce"`
+	ChainID    string `json:"chain_id"`
+	Action     string `json:"action"`
+	IntentID   string `json:"intent_id"`
+	User       string `json:"user"`
+	Duration   int64  `json:"duration"`
+	Nonce      uint64 `json:"nonce"`
+	AgentKeyID string `json:"agent_key_id,omitempty"`
+	AgentNonce uint64 `json:"agent_nonce,omitempty"`
 }
 
 func RenewDealHash(req RenewDealRequest) ([]byte, error) {
 	p, err := json.Marshal(renewDealSigningPayload{
-		ChainID:  req.ChainID,
-		Action:   "renew_deal",
-		IntentID: req.IntentID,
-		User:     NormalizeAddress(req.User),
-		Duration: req.Duration,
-		Nonce:    req.Nonce,
+		ChainID:    req.ChainID,
+		Action:     "renew_deal",
+		IntentID:   req.IntentID,
+		User:       NormalizeAddress(req.User),
+		Duration:   req.Duration,
+		Nonce:      req.Nonce,
+		AgentKeyID: req.AgentKeyID,
+		AgentNonce: req.AgentNonce,
 	})
 	if err != nil {
 		return nil, err
@@ -404,25 +408,43 @@ func VerifyRenewDeal(req RenewDealRequest) error {
 	return verifyRequestSig(req.User, req.Signature, func() ([]byte, error) { return RenewDealHash(req) })
 }
 
+func SignRenewDealAgent(req *RenewDealRequest, priv *ecdsa.PrivateKey) error {
+	sig, pub, err := signRequest(func() ([]byte, error) { return RenewDealHash(*req) }, priv)
+	if err != nil {
+		return err
+	}
+	req.AgentSignature = sig
+	req.AgentPublicKey = pub
+	return nil
+}
+
+func VerifyRenewDealAgent(req RenewDealRequest, agentPub string) error {
+	return verifyAgentRequestSig(agentPub, req.AgentSignature, func() ([]byte, error) { return RenewDealHash(req) })
+}
+
 // --- TerminateDeal ---
 
 type terminateDealSigningPayload struct {
-	ChainID  string `json:"chain_id"`
-	Action   string `json:"action"`
-	IntentID string `json:"intent_id"`
-	User     string `json:"user"`
-	Reason   string `json:"reason,omitempty"`
-	Nonce    uint64 `json:"nonce"`
+	ChainID    string `json:"chain_id"`
+	Action     string `json:"action"`
+	IntentID   string `json:"intent_id"`
+	User       string `json:"user"`
+	Reason     string `json:"reason,omitempty"`
+	Nonce      uint64 `json:"nonce"`
+	AgentKeyID string `json:"agent_key_id,omitempty"`
+	AgentNonce uint64 `json:"agent_nonce,omitempty"`
 }
 
 func TerminateDealHash(req TerminateDealRequest) ([]byte, error) {
 	p, err := json.Marshal(terminateDealSigningPayload{
-		ChainID:  req.ChainID,
-		Action:   "terminate_deal",
-		IntentID: req.IntentID,
-		User:     NormalizeAddress(req.User),
-		Reason:   req.Reason,
-		Nonce:    req.Nonce,
+		ChainID:    req.ChainID,
+		Action:     "terminate_deal",
+		IntentID:   req.IntentID,
+		User:       NormalizeAddress(req.User),
+		Reason:     req.Reason,
+		Nonce:      req.Nonce,
+		AgentKeyID: req.AgentKeyID,
+		AgentNonce: req.AgentNonce,
 	})
 	if err != nil {
 		return nil, err
@@ -445,6 +467,20 @@ func SignTerminateDeal(req *TerminateDealRequest, priv *ecdsa.PrivateKey) error 
 
 func VerifyTerminateDeal(req TerminateDealRequest) error {
 	return verifyRequestSig(req.User, req.Signature, func() ([]byte, error) { return TerminateDealHash(req) })
+}
+
+func SignTerminateDealAgent(req *TerminateDealRequest, priv *ecdsa.PrivateKey) error {
+	sig, pub, err := signRequest(func() ([]byte, error) { return TerminateDealHash(*req) }, priv)
+	if err != nil {
+		return err
+	}
+	req.AgentSignature = sig
+	req.AgentPublicKey = pub
+	return nil
+}
+
+func VerifyTerminateDealAgent(req TerminateDealRequest, agentPub string) error {
+	return verifyAgentRequestSig(agentPub, req.AgentSignature, func() ([]byte, error) { return TerminateDealHash(req) })
 }
 
 // --- SetAccessPolicy ---

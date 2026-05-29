@@ -98,6 +98,7 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /upload", h.handleUpload)
 	mux.HandleFunc("GET /download/{intent_id}", h.handleDownload)
+	mux.HandleFunc("GET /collection/{collection_id}/files", h.handleCollectionFiles)
 	mux.HandleFunc("GET /status/{intent_id}", h.handleStatus)
 	mux.HandleFunc("GET /gateway/health", h.handleHealth)
 	return mux
@@ -230,8 +231,9 @@ func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize
 			ShardSize:    int(h.cfg.SegmentSize) / h.cfg.DataShards,
 		},
 		Policy: wire.StoragePolicy{
-			Class:    "permanent",
-			Duration: 86400 * 365,
+			Class:     "permanent",
+			Duration:  86400 * 365,
+			Renewable: true,
 		},
 		DeadlineUnix: time.Now().Add(24 * time.Hour).Unix(),
 		AgentKeyID:   auth.KeyID,
@@ -572,6 +574,67 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 			f.Flush()
 		}
 	}
+}
+
+type collectionFileInfo struct {
+	IntentID  string `json:"intent_id"`
+	RecordID  string `json:"record_id"`
+	FileName  string `json:"file_name"`
+	FileSize  int64  `json:"file_size"`
+	Encrypted bool   `json:"encrypted"`
+	Kind      string `json:"kind,omitempty"`
+	Key       string `json:"key,omitempty"`
+}
+
+type collectionFilesResponse struct {
+	CollectionID string               `json:"collection_id"`
+	Name         string               `json:"name"`
+	Files        []collectionFileInfo `json:"files"`
+}
+
+func (h *Handler) handleCollectionFiles(w http.ResponseWriter, r *http.Request) {
+	collectionID := r.PathValue("collection_id")
+	if collectionID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("collection_id is required"))
+		return
+	}
+
+	chainClient := client.NewHTTP(h.cfg.ChainURL)
+
+	var recordsResp wire.CollectionRecordsResponse
+	if err := chainClient.Get("/collections/"+collectionID+"/records", &recordsResp); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("get collection records: %w", err))
+		return
+	}
+
+	files := make([]collectionFileInfo, 0, len(recordsResp.Records))
+	for _, rec := range recordsResp.Records {
+		var manifest wire.StorageManifestResponse
+		if err := chainClient.Get("/manifests/"+rec.IntentID, &manifest); err != nil {
+			continue
+		}
+		fileName := manifest.Plan.FileName
+		if fileName == "" {
+			fileName = rec.IntentID + ".bin"
+		}
+		files = append(files, collectionFileInfo{
+			IntentID:  rec.IntentID,
+			RecordID:  rec.RecordID,
+			FileName:  fileName,
+			FileSize:  manifest.Plan.FileSize,
+			Encrypted: manifest.Plan.Encryption != nil,
+			Kind:      rec.Kind,
+			Key:       rec.Key,
+		})
+	}
+
+	resp := collectionFilesResponse{
+		CollectionID: collectionID,
+		Name:         recordsResp.Collection.Name,
+		Files:        files,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) fetchShard(shardHash, shardCID string) ([]byte, error) {

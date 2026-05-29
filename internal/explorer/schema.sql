@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS miners (
     last_seen_unix          BIGINT NOT NULL DEFAULT 0,
     locked_bonus            BIGINT NOT NULL DEFAULT 0,
     bonus_released          BOOLEAN NOT NULL DEFAULT FALSE,
+    bonus_expired           BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_miners_status ON miners(status);

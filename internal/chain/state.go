@@ -27,15 +27,12 @@ var levelDBStateKey = []byte("state:snapshot")
 const defaultBaseFee uint64 = 100_000_000
 const defaultTargetBlockTxs = 10
 const defaultStorageBasePrice uint64 = 100_000_000
-const defaultStorageMinimumFee uint64 = 100_000_000
+const defaultStorageMinimumFee uint64 = 1_000_000 // 0.01 Token
 const defaultStorageBurnBPS uint64 = 300
 const defaultStorageRetrievalBPS uint64 = 300
 const defaultStorageFoundationBPS uint64 = 300
 const defaultPermanentStorageDuration = int64(100 * 365 * 24 * 60 * 60)
-const defaultRetrievalRateWindow = int64(3600)
-const defaultRetrievalRateDecayDivisor uint64 = 2
-const defaultRetrievalRewardHoldDuration = int64(3600)
-const defaultRetrievalSpeedSampleWindow = int64(60)
+
 const defaultRetrievalAbuseSpeedMultiplier uint64 = 10
 const miningRewardVestingDays = int64(30)
 const miningRewardVestingDaySeconds = int64(24 * 60 * 60)
@@ -93,6 +90,7 @@ type State struct {
 	AppliedTxs                 map[string]bool                           `json:"applied_txs"`
 	ConfirmedTxs               map[string]bool                           `json:"confirmed_txs"`
 	EpochRound                 uint64                                    `json:"epoch_round"`
+	BonusGrantedCount          uint64                                    `json:"bonus_granted_count,omitempty"`
 	ConsensusHeight            uint64                                    `json:"consensus_height"`
 	ConsensusRound             uint64                                    `json:"consensus_round"`
 	ConsensusPhase             string                                    `json:"consensus_phase"`
@@ -103,6 +101,9 @@ type State struct {
 	GovernanceProposals        map[string]wire.GovernanceProposal        `json:"governance_proposals"`
 	GovernanceVotes            map[string][]wire.GovernanceVote          `json:"governance_votes"`
 	MultisigWallets            map[string]*wire.MultisigWallet           `json:"multisig_wallets"`
+	DirectActionRecords        map[string]wire.DirectActionRecord        `json:"direct_action_records,omitempty"`
+	DirectActionReviewVotes    map[string][]wire.DirectActionReviewVote  `json:"direct_action_review_votes,omitempty"`
+	DirectActionReviewWindowSeconds int64                                `json:"direct_action_review_window_seconds,omitempty"`
 	FoundationAddress          string                                    `json:"foundation_address,omitempty"`
 	RetrievalAddress           string                                    `json:"retrieval_address,omitempty"`
 	LastReleaseAtUnix          int64                                     `json:"last_release_at_unix,omitempty"`
@@ -394,6 +395,8 @@ func newState() State {
 		GovernanceProposals:    map[string]wire.GovernanceProposal{},
 		GovernanceVotes:        map[string][]wire.GovernanceVote{},
 		MultisigWallets:        map[string]*wire.MultisigWallet{},
+		DirectActionRecords:    map[string]wire.DirectActionRecord{},
+		DirectActionReviewVotes: map[string][]wire.DirectActionReviewVote{},
 		OperatorMap:            map[string]string{},
 		UnbondingEntries:       map[string]wire.UnbondingEntry{},
 		BridgeOutbounds:        map[uint64]*wire.BridgeOutbound{},
@@ -406,6 +409,8 @@ func newState() State {
 		DataModerationThresholdDen: 3,
 		OperatorChangeThresholdNum: 2,
 		OperatorChangeThresholdDen: 3,
+		// Direct action review window default: 72 hours.
+		DirectActionReviewWindowSeconds: wire.DirectActionReviewWindowSeconds,
 	}
 }
 
@@ -550,6 +555,15 @@ func normalizeState(state *State) {
 	}
 	if state.MultisigWallets == nil {
 		state.MultisigWallets = map[string]*wire.MultisigWallet{}
+	}
+	if state.DirectActionRecords == nil {
+		state.DirectActionRecords = map[string]wire.DirectActionRecord{}
+	}
+	if state.DirectActionReviewVotes == nil {
+		state.DirectActionReviewVotes = map[string][]wire.DirectActionReviewVote{}
+	}
+	if state.DirectActionReviewWindowSeconds == 0 {
+		state.DirectActionReviewWindowSeconds = wire.DirectActionReviewWindowSeconds
 	}
 	// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 	if state.DataModerationThresholdNum == 0 || state.DataModerationThresholdDen == 0 {
@@ -1559,6 +1573,7 @@ func (s *Store) MinerStats(minerAddress string) (wire.MinerStats, error) {
 	minerAddress = wire.NormalizeAddress(minerAddress)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireMinerBonusesLocked()
 	s.finalizeExitingMinersLocked()
 	stats, ok := s.data.Miners[minerAddress]
 	if !ok {
@@ -1679,9 +1694,20 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 		account.Balance -= additionalStake
 		account.LockedStake += additionalStake
 	}
-	// One-time registration bonus.
-	if !existing.BonusReleased {
-		account.LockedBonus += s.miningParamsLocked().RegistrationBonusAmount
+	// One-time registration bonus (with cap + pool accounting).
+	if !existing.BonusReleased && !existing.BonusExpired {
+		params := s.miningParamsLocked()
+		if params.RegistrationBonusAmount > 0 {
+			capOK := params.MaxBonusAddresses == 0 || s.data.BonusGrantedCount < params.MaxBonusAddresses
+			if capOK {
+				s.initRewardPoolsLocked()
+				if s.data.RewardPools.StorageRemaining >= params.RegistrationBonusAmount {
+					account.LockedBonus += params.RegistrationBonusAmount
+					s.data.RewardPools.StorageRemaining -= params.RegistrationBonusAmount
+					s.data.BonusGrantedCount++
+				}
+			}
+		}
 	}
 	existing.MinerAddress = req.MinerAddress
 	existing.PublicKey = req.PublicKey
@@ -1992,13 +2018,53 @@ func (s *Store) finalizeExitingMinersLocked() {
 				s.data.Miners[address] = stats
 			}
 
-			// Return remaining LockedBonus directly to Balance (no unbonding).
+			// Return remaining LockedBonus to Storage Pool (was reserved at grant time)
+			// and release the bonus slot for new registrations.
 			account := s.accountLocked(address)
 			if account.LockedBonus > 0 {
-				account.Balance += account.LockedBonus
+				s.initRewardPoolsLocked()
+				s.data.RewardPools.StorageRemaining = saturatingAdd(s.data.RewardPools.StorageRemaining, account.LockedBonus)
 				account.LockedBonus = 0
+				if s.data.BonusGrantedCount > 0 {
+					s.data.BonusGrantedCount--
+				}
 				s.data.Accounts[address] = account
 			}
+		}
+	}
+}
+
+// expireMinerBonusesLocked batch-expires registration bonuses for miners whose
+// 90-day deadline has passed. This catches miners who stopped submitting proofs
+// before meeting the release conditions. Called from the scheduler, Status, and
+// MinerStats alongside finalizeExitingMinersLocked.
+func (s *Store) expireMinerBonusesLocked() {
+	params := s.miningParamsLocked()
+	if params.BonusDeadlineSeconds == 0 {
+		return
+	}
+	now := time.Now().Unix()
+	for address, stats := range s.data.Miners {
+		if stats.BonusReleased || stats.BonusExpired {
+			continue
+		}
+		if stats.RegisteredAtUnix <= 0 {
+			continue
+		}
+		account := s.accountLocked(address)
+		if account.LockedBonus == 0 {
+			continue
+		}
+		if (now - stats.RegisteredAtUnix) > int64(params.BonusDeadlineSeconds) {
+			stats.BonusExpired = true
+			s.initRewardPoolsLocked()
+			s.data.RewardPools.StorageRemaining = saturatingAdd(s.data.RewardPools.StorageRemaining, account.LockedBonus)
+			account.LockedBonus = 0
+			if s.data.BonusGrantedCount > 0 {
+				s.data.BonusGrantedCount--
+			}
+			s.data.Accounts[address] = account
+			s.data.Miners[address] = stats
 		}
 	}
 }
@@ -2057,6 +2123,7 @@ func (s *Store) SubmitProof(req wire.SubmitProofRequest) (wire.SubmitProofRespon
 	reward := uint64(0)
 	settledStoragePoolReward := uint64(0)
 	bonusReleased := false
+	bonusExpired := false
 	if !alreadyRewarded {
 		settledStoragePoolReward = s.settleStorageRewardForMinerLocked(req.Proof.MinerAddress, time.Now().Unix())
 		stats = s.minerStatsLocked(req.Proof.MinerAddress)
@@ -2070,22 +2137,36 @@ func (s *Store) SubmitProof(req wire.SubmitProofRequest) (wire.SubmitProofRespon
 		}
 		s.data.Miners[req.Proof.MinerAddress] = stats
 
-		// Check bonus release condition.
+		// Check bonus expiry and release.
 		account := s.accountLocked(req.Proof.MinerAddress)
-		if !stats.BonusReleased && account.LockedBonus > 0 {
+		if !stats.BonusReleased && !stats.BonusExpired && account.LockedBonus > 0 {
 			params := s.miningParamsLocked()
-			if params.MinBonusProofCount > 0 {
+
+			// ① Check deadline first — expire if past 90 days.
+			if params.BonusDeadlineSeconds > 0 && stats.RegisteredAtUnix > 0 &&
+				(time.Now().Unix()-stats.RegisteredAtUnix) > int64(params.BonusDeadlineSeconds) {
+				stats.BonusExpired = true
+				bonusExpired = true
+				s.initRewardPoolsLocked()
+				s.data.RewardPools.StorageRemaining = saturatingAdd(s.data.RewardPools.StorageRemaining, account.LockedBonus)
+				account.LockedBonus = 0
+				if s.data.BonusGrantedCount > 0 {
+					s.data.BonusGrantedCount--
+				}
+				s.data.Accounts[req.Proof.MinerAddress] = account
+				s.data.Miners[req.Proof.MinerAddress] = stats
+			} else if params.MinBonusProofCount > 0 {
+				// ② Check release conditions.
 				total := stats.ProofSuccess + stats.ProofFailure
 				if stats.ProofSuccess >= params.MinBonusProofCount &&
 					total > 0 &&
-					stats.ProofSuccess*10000/total >= params.MinBonusSuccessRateBPS {
+					stats.ProofSuccess*10000/total >= params.MinBonusSuccessRateBPS &&
+					stats.RetrievalObligMet &&
+					(params.MinBonusRetrievalCount == 0 || stats.RetrievalSuccess >= params.MinBonusRetrievalCount) {
 					stats.BonusReleased = true
 					bonusReleased = true
 					account.Balance += account.LockedBonus
-					s.initRewardPoolsLocked()
-					if s.data.RewardPools.StorageRemaining >= account.LockedBonus {
-						s.data.RewardPools.StorageRemaining -= account.LockedBonus
-					}
+					// No pool deduction — already reserved at grant time.
 					account.LockedBonus = 0
 					s.data.Accounts[req.Proof.MinerAddress] = account
 					s.data.Miners[req.Proof.MinerAddress] = stats
@@ -2110,6 +2191,7 @@ func (s *Store) SubmitProof(req wire.SubmitProofRequest) (wire.SubmitProofRespon
 		SettledStoragePoolReward: settledStoragePoolReward,
 		AlreadyRewarded:          alreadyRewarded,
 		BonusReleased:            bonusReleased,
+		BonusExpired:             bonusExpired,
 		SubmittedAtUnix:          time.Now().Unix(),
 	})
 	if err := s.saveLocked(); err != nil {

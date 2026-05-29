@@ -159,6 +159,32 @@ func (s *Store) Collection(collectionID string) (wire.CollectionResponse, error)
 	return wire.CollectionResponse{Collection: collection}, nil
 }
 
+func (s *Store) ListCollectionsByUser(user string) (wire.UserCollectionsResponse, error) {
+	user = wire.NormalizeAddress(user)
+	if strings.TrimSpace(user) == "" {
+		return wire.UserCollectionsResponse{}, errors.New("user is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var collections []wire.DataCollection
+	for _, c := range s.data.Collections {
+		if sameAddress(c.User, user) {
+			collections = append(collections, c)
+		}
+	}
+	sort.Slice(collections, func(i, j int) bool {
+		if collections[i].CreatedAtUnix != collections[j].CreatedAtUnix {
+			return collections[i].CreatedAtUnix > collections[j].CreatedAtUnix
+		}
+		return collections[i].CollectionID < collections[j].CollectionID
+	})
+	if collections == nil {
+		collections = []wire.DataCollection{}
+	}
+	return wire.UserCollectionsResponse{User: user, Collections: collections}, nil
+}
+
 func (s *Store) CollectionRecords(collectionID string) (wire.CollectionRecordsResponse, error) {
 	return s.CollectionRecordsFiltered(collectionID, wire.CollectionRecordFilter{})
 }

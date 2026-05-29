@@ -18,6 +18,7 @@ import (
 
 	"chain/internal/client"
 	chaincrypto "chain/internal/crypto"
+	falaridht "chain/internal/dht"
 	"chain/internal/wire"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -34,6 +35,17 @@ type Node struct {
 	chainURL                  string
 	endpoint                  string
 	requireChainAuthorization bool
+	dhtService                atomic.Pointer[falaridht.Service]
+}
+
+// SetDHTService injects a DHT service for decentralized shard discovery during repair.
+func (n *Node) SetDHTService(svc *falaridht.Service) {
+	n.dhtService.Store(svc)
+}
+
+// DHTService returns the DHT service, or nil if not configured.
+func (n *Node) DHTService() *falaridht.Service {
+	return n.dhtService.Load()
 }
 
 type transportCounters struct {
@@ -174,6 +186,22 @@ func (n *Node) transportStats() wire.StorageTransportStats {
 		HTTPBlockServeHits: atomic.LoadUint64(&n.transport.httpBlockServeHits),
 		HTTPShardServeHits: atomic.LoadUint64(&n.transport.httpShardServeHits),
 	}
+}
+
+// HealthScoreBPS computes a health score in basis points (0-10000) based on
+// the ratio of successful libp2p fetches to total fetch attempts.
+// Returns 10000 (perfect) when no fetches have been recorded yet.
+func (n *Node) HealthScoreBPS() uint64 {
+	if n == nil {
+		return 10000
+	}
+	success := atomic.LoadUint64(&n.transport.libp2pFetchSuccess)
+	errors := atomic.LoadUint64(&n.transport.libp2pFetchErrors)
+	total := success + errors
+	if total == 0 {
+		return 10000
+	}
+	return success * 10000 / total
 }
 
 func (n *Node) recordLibP2PFetchSuccess() {

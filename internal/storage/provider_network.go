@@ -208,16 +208,15 @@ func (p *ProviderNetwork) AnnounceOnce() {
 	}
 	// Also publish to DHT if available.
 	if p.dhtService != nil {
+		// Collect unique shard hashes from both sources to avoid duplicate publishes.
+		seen := make(map[string]struct{})
 		for _, shard := range record.Shards {
-			dhtRecord, buildErr := p.buildDHTRecord(shard.ShardHash)
-			if buildErr != nil {
-				continue
-			}
-			if pubErr := p.dhtService.PublishShard(dhtRecord); pubErr != nil {
-				log.Printf("provider: DHT publish shard %s failed: %v", shard.ShardHash, pubErr)
-			}
+			seen[shard.ShardHash] = struct{}{}
 		}
 		for _, hash := range record.ShardHashes {
+			seen[hash] = struct{}{}
+		}
+		for hash := range seen {
 			dhtRecord, buildErr := p.buildDHTRecord(hash)
 			if buildErr != nil {
 				continue
@@ -297,7 +296,7 @@ func (p *ProviderNetwork) buildDHTRecord(shardHash string) (wire.DHTProviderReco
 		PeerID:         p.PeerID(),
 		PeerAddrs:      p.Addrs(),
 		ShardHash:      shardHash,
-		HealthScoreBPS: 10000,
+		HealthScoreBPS: p.node.HealthScoreBPS(),
 		ExpiresAtUnix:  time.Now().Add(falaridht.DefaultProviderTTL).Unix(),
 	}
 	if err := wire.SignDHTProvider(&record, p.node.PrivateKey()); err != nil {

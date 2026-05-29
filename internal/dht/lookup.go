@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"log"
 	"sort"
+	"sync"
 	"time"
 
 	"chain/internal/wire"
 )
+
+const negativeCacheTTL = 10 * time.Second
 
 // FindProviders discovers providers for a given shard hash using the DHT.
 // It first checks the local cache, then queries the DHT, and falls back
@@ -25,19 +28,34 @@ func (s *Service) FindProviders(ctx context.Context, shardHash string) ([]wire.D
 	if cached, ok := s.cache.Get(shardHash); ok {
 		return cached, nil
 	}
-	// Query DHT for provider records stored via PutValue.
-	records, err := s.lookupViaValue(ctx, shardHash)
-	if err != nil {
-		log.Printf("dht: value lookup for %s failed: %v", shardHash, err)
-	}
-	// Also query DHT provider mechanism for additional peers.
-	providerRecords, err := s.lookupViaProviders(ctx, shardHash)
-	if err != nil {
-		log.Printf("dht: provider lookup for %s failed: %v", shardHash, err)
-	}
-	// Merge results, deduplicating by miner address.
-	records = mergeRecords(records, providerRecords)
-	// Filter expired records.
+	// Run both lookups in parallel.
+	var (
+		valueRecords    []wire.DHTProviderRecord
+		providerRecords []wire.DHTProviderRecord
+		wg              sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var err error
+		valueRecords, err = s.lookupViaValue(ctx, shardHash)
+		if err != nil {
+			log.Printf("dht: value lookup for %s failed: %v", shardHash, err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		var err error
+		providerRecords, err = s.lookupViaProviders(ctx, shardHash)
+		if err != nil {
+			log.Printf("dht: provider lookup for %s failed: %v", shardHash, err)
+		}
+	}()
+	wg.Wait()
+
+	// Merge results, deduplicating by composite key (miner address + peer ID).
+	records := mergeRecords(valueRecords, providerRecords)
+	// Filter expired and unsigned records.
 	now := time.Now().Unix()
 	filtered := make([]wire.DHTProviderRecord, 0, len(records))
 	for _, r := range records {
@@ -55,9 +73,11 @@ func (s *Service) FindProviders(ctx context.Context, shardHash string) ([]wire.D
 	sort.Slice(filtered, func(i, j int) bool {
 		return filtered[i].HealthScoreBPS > filtered[j].HealthScoreBPS
 	})
-	// Cache the result.
+	// Cache the result (including empty results with a shorter TTL).
 	if len(filtered) > 0 {
 		s.cache.Set(shardHash, filtered)
+	} else {
+		s.cache.SetWithTTL(shardHash, nil, negativeCacheTTL)
 	}
 	return filtered, nil
 }
@@ -113,17 +133,14 @@ func (s *Service) lookupViaProviders(ctx context.Context, shardHash string) ([]w
 	return records, nil
 }
 
-// mergeRecords deduplicates provider records by miner address, preferring
-// records with richer information (non-empty signature > with endpoint > peer only).
+// mergeRecords deduplicates provider records using a composite key of
+// MinerAddress and PeerID, preferring records with richer information.
 func mergeRecords(a, b []wire.DHTProviderRecord) []wire.DHTProviderRecord {
 	seen := make(map[string]int)
 	result := make([]wire.DHTProviderRecord, 0, len(a)+len(b))
 
 	for _, r := range a {
-		key := r.MinerAddress
-		if key == "" {
-			key = r.PeerID
-		}
+		key := recordKey(r)
 		if key == "" {
 			continue
 		}
@@ -137,10 +154,7 @@ func mergeRecords(a, b []wire.DHTProviderRecord) []wire.DHTProviderRecord {
 		}
 	}
 	for _, r := range b {
-		key := r.MinerAddress
-		if key == "" {
-			key = r.PeerID
-		}
+		key := recordKey(r)
 		if key == "" {
 			continue
 		}
@@ -154,6 +168,16 @@ func mergeRecords(a, b []wire.DHTProviderRecord) []wire.DHTProviderRecord {
 		}
 	}
 	return result
+}
+
+// recordKey returns a composite deduplication key for a provider record.
+// Uses both MinerAddress and PeerID to avoid collisions between records
+// from different sources (value lookup vs provider lookup).
+func recordKey(r wire.DHTProviderRecord) string {
+	if r.MinerAddress == "" && r.PeerID == "" {
+		return ""
+	}
+	return r.MinerAddress + "|" + r.PeerID
 }
 
 func recordScore(r wire.DHTProviderRecord) int {

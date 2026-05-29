@@ -348,3 +348,147 @@ func VerifyGovernanceExecute(req ExecuteGovernanceProposalRequest, expectedAddre
 	}
 	return nil
 }
+
+// ── Direct Governance Action Signing ──
+
+// directActionSigningPayload is the canonical payload for direct governance action signatures.
+type directActionSigningPayload struct {
+	Operator           string `json:"operator"`
+	ChainID            string `json:"chain_id"`
+	IntentID           string `json:"intent_id"`
+	Action             string `json:"action"`
+	ReasonHash         string `json:"reason_hash"`
+	ExpiresAtUnix      int64  `json:"expires_at_unix,omitempty"`
+	PreserveStorage    bool   `json:"preserve_storage,omitempty"`
+	AppealDeadlineUnix int64  `json:"appeal_deadline_unix,omitempty"`
+	Nonce              uint64 `json:"nonce"`
+	CreatedAtUnix      int64  `json:"created_at_unix"`
+}
+
+// DirectGovernanceActionHash returns the Keccak256 hash of the direct action signing payload.
+func DirectGovernanceActionHash(req DirectGovernanceActionRequest) ([]byte, error) {
+	payload := directActionSigningPayload{
+		Operator:           req.Operator,
+		ChainID:            req.ChainID,
+		IntentID:           req.IntentID,
+		Action:             req.Action,
+		ReasonHash:         req.ReasonHash,
+		ExpiresAtUnix:      req.ExpiresAtUnix,
+		PreserveStorage:    req.PreserveStorage,
+		AppealDeadlineUnix: req.AppealDeadlineUnix,
+		Nonce:              req.Nonce,
+		CreatedAtUnix:      req.CreatedAtUnix,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return ethcrypto.Keccak256(data), nil
+}
+
+// SignDirectGovernanceAction signs the direct action request with the given ECDSA private key.
+func SignDirectGovernanceAction(req *DirectGovernanceActionRequest, privateKey *ecdsa.PrivateKey) error {
+	hash, err := DirectGovernanceActionHash(*req)
+	if err != nil {
+		return err
+	}
+	signature, err := ethcrypto.Sign(hash, privateKey)
+	if err != nil {
+		return err
+	}
+	req.Signature = encodeHex(signature)
+	return nil
+}
+
+// VerifyDirectGovernanceAction verifies the direct action signature by recovering the signer
+// and comparing the derived address against the expected operator address.
+func VerifyDirectGovernanceAction(req DirectGovernanceActionRequest, expectedAddress string) error {
+	signature, err := decodeHex(req.Signature)
+	if err != nil {
+		return err
+	}
+	if len(signature) != 65 {
+		return errors.New("invalid direct governance action signature size")
+	}
+	hash, err := DirectGovernanceActionHash(req)
+	if err != nil {
+		return err
+	}
+	pub, err := ethcrypto.SigToPub(hash, signature)
+	if err != nil {
+		return err
+	}
+	addr := AccountAddress(pub)
+	if !strings.EqualFold(addr, expectedAddress) {
+		return errors.New("direct governance action signature does not match operator address")
+	}
+	return nil
+}
+
+// ── Direct Action Review Vote Signing ──
+
+// directActionReviewVoteSigningPayload is the canonical payload for review vote signatures.
+type directActionReviewVoteSigningPayload struct {
+	ActionID      string `json:"action_id"`
+	Voter         string `json:"voter"`
+	Reject        bool   `json:"reject"`
+	ChainID       string `json:"chain_id"`
+	Nonce         uint64 `json:"nonce"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+}
+
+// DirectActionReviewVoteHash returns the Keccak256 hash of the review vote signing payload.
+func DirectActionReviewVoteHash(req DirectActionReviewVoteRequest) ([]byte, error) {
+	payload := directActionReviewVoteSigningPayload{
+		ActionID:      req.ActionID,
+		Voter:         req.Voter,
+		Reject:        req.Reject,
+		ChainID:       req.ChainID,
+		Nonce:         req.Nonce,
+		CreatedAtUnix: req.CreatedAtUnix,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return ethcrypto.Keccak256(data), nil
+}
+
+// SignDirectActionReviewVote signs the review vote request with the given ECDSA private key.
+func SignDirectActionReviewVote(req *DirectActionReviewVoteRequest, privateKey *ecdsa.PrivateKey) error {
+	hash, err := DirectActionReviewVoteHash(*req)
+	if err != nil {
+		return err
+	}
+	signature, err := ethcrypto.Sign(hash, privateKey)
+	if err != nil {
+		return err
+	}
+	req.Signature = encodeHex(signature)
+	return nil
+}
+
+// VerifyDirectActionReviewVote verifies the review vote signature by recovering the signer
+// and comparing the derived address against the expected voter address.
+func VerifyDirectActionReviewVote(req DirectActionReviewVoteRequest, expectedAddress string) error {
+	signature, err := decodeHex(req.Signature)
+	if err != nil {
+		return err
+	}
+	if len(signature) != 65 {
+		return errors.New("invalid direct action review vote signature size")
+	}
+	hash, err := DirectActionReviewVoteHash(req)
+	if err != nil {
+		return err
+	}
+	pub, err := ethcrypto.SigToPub(hash, signature)
+	if err != nil {
+		return err
+	}
+	addr := AccountAddress(pub)
+	if !strings.EqualFold(addr, expectedAddress) {
+		return errors.New("direct action review vote signature does not match voter address")
+	}
+	return nil
+}

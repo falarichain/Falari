@@ -361,11 +361,6 @@ func (s *Store) payStorageRewardFromPoolLocked(minerAddress string, reward uint6
 	return s.data.RewardPools.PayFromStoragePool(reward)
 }
 
-func (s *Store) payRetrievalRewardFromPoolLocked(minerAddress string, reward uint64) bool {
-	s.initRewardPoolsLocked()
-	return s.data.RewardPools.PayFromRetrievalPool(reward)
-}
-
 func (s *Store) payRepairRewardFromPoolLocked(minerAddress string, reward uint64) bool {
 	s.initRewardPoolsLocked()
 	return s.data.RewardPools.PayFromRepairPool(reward)

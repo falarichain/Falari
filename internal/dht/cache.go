@@ -1,6 +1,7 @@
 package dht
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -54,6 +55,19 @@ func (c *ProviderCache) Set(shardHash string, records []wire.DHTProviderRecord) 
 	}
 }
 
+// SetWithTTL caches provider records with a custom TTL (useful for negative caching).
+func (c *ProviderCache) SetWithTTL(shardHash string, records []wire.DHTProviderRecord, ttl time.Duration) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[shardHash] = cacheEntry{
+		records:   records,
+		expiresAt: time.Now().Add(ttl),
+	}
+}
+
 // Cleanup removes expired entries from the cache.
 func (c *ProviderCache) Cleanup() {
 	if c == nil {
@@ -67,4 +81,20 @@ func (c *ProviderCache) Cleanup() {
 			delete(c.entries, key)
 		}
 	}
+}
+
+// StartCleanupLoop runs Cleanup periodically until the context is cancelled.
+func (c *ProviderCache) StartCleanupLoop(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.Cleanup()
+			}
+		}
+	}()
 }

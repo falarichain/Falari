@@ -42,6 +42,7 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 			s.checkAndLogDealHealths()
 
 			s.mu.Lock()
+			s.expireMinerBonusesLocked()
 			s.finalizeExitingValidatorsLocked()
 			s.finalizeExitingMinersLocked()
 			// NOTE: token release is deterministic from block production/acceptance.

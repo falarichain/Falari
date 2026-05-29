@@ -587,7 +587,7 @@ func (srv *Server) handleIntentShards(w http.ResponseWriter, r *http.Request) {
 func (srv *Server) handleMiners(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rows, err := srv.store.Pool().Query(ctx,
-		"SELECT miner_address, public_key, endpoint, capacity_bytes, used_bytes, stake, status, proof_success, proof_failure, retrieval_success, retrieval_bytes, storage_rewards, retrieval_rewards, repair_rewards, slashed, locked_bonus, bonus_released FROM miners ORDER BY capacity_bytes DESC LIMIT 100")
+		"SELECT miner_address, public_key, endpoint, capacity_bytes, used_bytes, stake, status, proof_success, proof_failure, retrieval_success, retrieval_bytes, storage_rewards, retrieval_rewards, repair_rewards, slashed, locked_bonus, bonus_released, bonus_expired FROM miners ORDER BY capacity_bytes DESC LIMIT 100")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -600,8 +600,8 @@ func (srv *Server) handleMiners(w http.ResponseWriter, r *http.Request) {
 		var addr, pubKey, endpoint, status string
 		var cap, used, stake int64
 		var proofOK, proofFail, retOK, retBytes, sRew, rRew, repRew, sl, lockedBonus int64
-		var bonusReleased bool
-		rows.Scan(&addr, &pubKey, &endpoint, &cap, &used, &stake, &status, &proofOK, &proofFail, &retOK, &retBytes, &sRew, &rRew, &repRew, &sl, &lockedBonus, &bonusReleased)
+		var bonusReleased, bonusExpired bool
+		rows.Scan(&addr, &pubKey, &endpoint, &cap, &used, &stake, &status, &proofOK, &proofFail, &retOK, &retBytes, &sRew, &rRew, &repRew, &sl, &lockedBonus, &bonusReleased, &bonusExpired)
 		m["miner_address"] = addr
 		m["public_key"] = pubKey
 		m["endpoint"] = endpoint
@@ -619,6 +619,7 @@ func (srv *Server) handleMiners(w http.ResponseWriter, r *http.Request) {
 		m["slashed"] = sl
 		m["locked_bonus"] = lockedBonus
 		m["bonus_released"] = bonusReleased
+		m["bonus_expired"] = bonusExpired
 		miners = append(miners, m)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"miners": miners})
@@ -632,20 +633,20 @@ func (srv *Server) handleMiner(w http.ResponseWriter, r *http.Request) {
 	var cap, used, reserved, stake int64
 	var proofOK, proofFail, consFails, rewards, sRewards, retOK, retBytes, retRewards, repRewards, slashed int64
 	var effWeight, speedScore, antiSpam, registeredAt, exitedAt, lastSeen, lockedBonus int64
-	var bonusReleased bool
+	var bonusReleased, bonusExpired bool
 
 	err := srv.store.Pool().QueryRow(ctx, `
 		SELECT miner_address, public_key, endpoint, capacity_bytes, used_bytes, reserved_bytes, stake, status,
 			proof_success, proof_failure, consecutive_failures, rewards, storage_rewards,
 			retrieval_success, retrieval_bytes, retrieval_rewards, repair_rewards, slashed,
 			effective_weight, speed_score, anti_spam_score, registered_at_unix, exited_at_unix, last_seen_unix,
-			locked_bonus, bonus_released
+			locked_bonus, bonus_released, bonus_expired
 		FROM miners WHERE miner_address = $1
 	`, address).Scan(&addr, &pubKey, &endpoint, &cap, &used, &reserved, &stake, &status,
 		&proofOK, &proofFail, &consFails, &rewards, &sRewards,
 		&retOK, &retBytes, &retRewards, &repRewards, &slashed,
 		&effWeight, &speedScore, &antiSpam, &registeredAt, &exitedAt, &lastSeen,
-		&lockedBonus, &bonusReleased)
+		&lockedBonus, &bonusReleased, &bonusExpired)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -677,6 +678,7 @@ func (srv *Server) handleMiner(w http.ResponseWriter, r *http.Request) {
 		"last_seen_unix":        lastSeen,
 		"locked_bonus":          lockedBonus,
 		"bonus_released":        bonusReleased,
+		"bonus_expired":         bonusExpired,
 	})
 }
 

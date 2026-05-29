@@ -27,9 +27,12 @@ import (
 	"chain/internal/client"
 	"chain/internal/consensus"
 	chaincrypto "chain/internal/crypto"
+	falaridht "chain/internal/dht"
 	"chain/internal/reward"
 	"chain/internal/storage"
 	"chain/internal/wire"
+
+	libp2p "github.com/libp2p/go-libp2p"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -56,6 +59,8 @@ func main() {
 		appendCollectionRecord(os.Args[2:])
 	case "collection-records":
 		listCollectionRecords(os.Args[2:])
+	case "collection-download":
+		downloadCollection(os.Args[2:])
 	case "record":
 		showRecord(os.Args[2:])
 	case "upload":
@@ -218,6 +223,7 @@ func createIntent(args []string) {
 	policy := wire.StoragePolicy{
 		Class:      *storageClass,
 		Redundancy: fmt.Sprintf("reed-solomon-%d-%d", *dataShards, *parityShards),
+		Renewable:  true,
 	}
 	if fee == 0 {
 		var quote wire.StorageQuoteResponse
@@ -346,6 +352,7 @@ func exportManifest(args []string) {
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
 	intentID := fs.String("intent", "", "intent id")
 	outPath := fs.String("out", "./download-plan.json", "path to write manifest upload plan")
+	noCache := fs.Bool("no-cache", false, "skip populating provider cache (faster export)")
 	fs.Parse(args)
 
 	if *intentID == "" {
@@ -354,6 +361,30 @@ func exportManifest(args []string) {
 	manifest, err := fetchManifest(*chainURL, *intentID)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if !*noCache {
+		// Collect unique shard hashes from receipts.
+		shardHashes := make(map[string]bool)
+		for _, receipt := range manifest.Plan.Receipts {
+			shardHashes[receipt.ShardHash] = true
+		}
+		// Query providers for each shard to build the offline cache.
+		var providerCache []wire.StorageProviderRecord
+		seen := make(map[string]bool)
+		for shardHash := range shardHashes {
+			providers := discoverStorageProviders(*chainURL, shardHash, "")
+			for _, p := range providers {
+				key := p.MinerAddress + "|" + p.PeerID + "|" + shardHash
+				if !seen[key] {
+					seen[key] = true
+					providerCache = append(providerCache, p)
+				}
+			}
+		}
+		manifest.Plan.ProviderCache = providerCache
+		if len(providerCache) > 0 {
+			log.Printf("provider cache populated with %d entries for %d shards", len(providerCache), len(shardHashes))
+		}
 	}
 	if err := client.SavePlan(*outPath, manifest.Plan); err != nil {
 		log.Fatal(err)
@@ -508,6 +539,67 @@ func listCollectionRecords(args []string) {
 			record.RecordID, record.IntentID, record.DealID, record.ParentRecord,
 			record.Kind, record.Key, record.FileRoot)
 	}
+}
+
+func downloadCollection(args []string) {
+	fs := flag.NewFlagSet("collection-download", flag.ExitOnError)
+	gatewayURL := fs.String("gateway", "http://localhost:9090", "gateway URL")
+	collectionID := fs.String("collection", "", "collection id to download")
+	outDir := fs.String("out", "./collection-download", "output directory")
+	fs.Parse(args)
+
+	if *collectionID == "" {
+		log.Fatal("-collection is required")
+	}
+
+	type collectionFileInfo struct {
+		IntentID  string `json:"intent_id"`
+		RecordID  string `json:"record_id"`
+		FileName  string `json:"file_name"`
+		FileSize  int64  `json:"file_size"`
+		Encrypted bool   `json:"encrypted"`
+		Kind      string `json:"kind,omitempty"`
+		Key       string `json:"key,omitempty"`
+	}
+	type collectionFilesResponse struct {
+		CollectionID string               `json:"collection_id"`
+		Name         string               `json:"name"`
+		Files        []collectionFileInfo `json:"files"`
+	}
+
+	var resp collectionFilesResponse
+	if err := client.NewHTTP(*gatewayURL).Get("/collection/"+*collectionID+"/files", &resp); err != nil {
+		log.Fatalf("fetch collection files: %v", err)
+	}
+
+	if len(resp.Files) == 0 {
+		log.Printf("collection %s (%s): no files found", resp.CollectionID, resp.Name)
+		return
+	}
+
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		log.Fatalf("create output directory: %v", err)
+	}
+
+	log.Printf("collection %s (%s): %d files", resp.CollectionID, resp.Name, len(resp.Files))
+
+	gwClient := client.NewHTTP(*gatewayURL)
+	for i, file := range resp.Files {
+		outPath := filepath.Join(*outDir, file.FileName)
+		log.Printf("[%d/%d] downloading %s (%d bytes)...", i+1, len(resp.Files), file.FileName, file.FileSize)
+
+		data, err := gwClient.GetBytes("/download/" + file.IntentID)
+		if err != nil {
+			log.Printf("  ERROR: %v", err)
+			continue
+		}
+		if err := os.WriteFile(outPath, data, 0o644); err != nil {
+			log.Printf("  ERROR writing %s: %v", outPath, err)
+			continue
+		}
+		log.Printf("  saved %s (%d bytes)", outPath, len(data))
+	}
+	log.Printf("done. %d files saved to %s", len(resp.Files), *outDir)
 }
 
 func showRecord(args []string) {
@@ -1235,6 +1327,12 @@ func governancePropose(args []string) {
 	maxBlockTxs := fs.Uint64("max-block-txs", 0, "max transactions per block (for update_mining_params)")
 	maxTxBytes := fs.Uint64("max-tx-bytes", 0, "max regular transaction size in bytes (for update_mining_params)")
 	maxStorageTxBytes := fs.Uint64("max-storage-tx-bytes", 0, "max storage metadata transaction size in bytes (for update_mining_params)")
+	registrationBonusAmount := fs.Uint64("registration-bonus-amount", 0, "registration bonus amount in smallest units (for update_mining_params)")
+	minBonusProofCount := fs.Uint64("min-bonus-proof-count", 0, "minimum successful proofs to release bonus (for update_mining_params)")
+	minBonusSuccessRateBPS := fs.Uint64("min-bonus-success-rate-bps", 0, "minimum success rate BPS for bonus release (for update_mining_params)")
+	minBonusRetrievalCount := fs.Uint64("min-bonus-retrieval-count", 0, "minimum successful retrievals for bonus release (for update_mining_params)")
+	maxBonusAddresses := fs.Uint64("max-bonus-addresses", 0, "maximum miners who can receive bonus (for update_mining_params)")
+	bonusDeadlineSeconds := fs.Uint64("bonus-deadline-seconds", 0, "bonus deadline in seconds (for update_mining_params)")
 	fs.Parse(args)
 
 	if *keyPath == "" || *reasonHash == "" {
@@ -1296,6 +1394,12 @@ func governancePropose(args []string) {
 		TargetMaxBlockTxs:                 *maxBlockTxs,
 		TargetMaxTxBytes:                  *maxTxBytes,
 		TargetMaxStorageTxBytes:           *maxStorageTxBytes,
+		TargetRegistrationBonusAmount:     *registrationBonusAmount,
+		TargetMinBonusProofCount:          *minBonusProofCount,
+		TargetMinBonusSuccessRateBPS:      *minBonusSuccessRateBPS,
+		TargetMinBonusRetrievalCount:      *minBonusRetrievalCount,
+		TargetMaxBonusAddresses:           *maxBonusAddresses,
+		TargetBonusDeadlineSeconds:        *bonusDeadlineSeconds,
 		Nonce:                             fetchOperatorNonce(*chainURL, key.Address),
 		CreatedAtUnix:                     now,
 	}
@@ -1629,7 +1733,36 @@ func download(args []string) {
 	planPath := fs.String("plan", "./upload-plan.json", "upload plan path")
 	outPath := fs.String("out", "./restored.bin", "output file path")
 	encryptionKey := fs.String("key", "", "encryption key file or raw base64/hex key for encrypted manifests")
+	dhtEnabled := fs.Bool("dht", false, "enable DHT-based provider discovery as fallback")
+	dhtBootstrap := fs.String("dht-bootstrap", "", "comma-separated DHT bootstrap peer multiaddrs")
 	fs.Parse(args)
+
+	var dhtService *falaridht.Service
+	if *dhtEnabled {
+		h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/0"))
+		if err != nil {
+			log.Fatalf("create ephemeral libp2p host: %v", err)
+		}
+		defer h.Close()
+		dhtCfg := falaridht.DefaultConfig()
+		if *dhtBootstrap != "" {
+			for _, addr := range strings.Split(*dhtBootstrap, ",") {
+				addr = strings.TrimSpace(addr)
+				if addr != "" {
+					dhtCfg.BootstrapPeers = append(dhtCfg.BootstrapPeers, addr)
+				}
+			}
+		}
+		dhtService, err = falaridht.New(h, dhtCfg)
+		if err != nil {
+			log.Fatalf("create DHT service: %v", err)
+		}
+		if err := dhtService.Start(); err != nil {
+			log.Fatalf("start DHT service: %v", err)
+		}
+		defer dhtService.Close()
+		log.Printf("DHT discovery enabled for download")
+	}
 
 	var plan wire.UploadPlan
 	useProviderDiscovery := false
@@ -1698,7 +1831,7 @@ func download(args []string) {
 		if useProviderDiscovery {
 			discoveryURL = *chainURL
 		}
-		shards, err := downloadSegmentShards(receipts, totalShards, plan.Erasure.DataShards, fallbackEndpoints, discoveryURL)
+		shards, err := downloadSegmentShards(receipts, totalShards, plan.Erasure.DataShards, fallbackEndpoints, discoveryURL, dhtService, plan.ProviderCache)
 		if err != nil {
 			log.Fatalf("download segment %d: %v", segmentID, err)
 		}
@@ -1729,6 +1862,8 @@ func repair(args []string) {
 	includeMissing := fs.Bool("include-missing", true, "include missing shards when creating on-chain repair tasks")
 	batchSize := fs.Int("batch", 64, "receipts per batch commit")
 	accountKeyPath := fs.String("account-key", "", "account key file used to sign repair batch commits")
+	dhtEnabled := fs.Bool("dht", false, "enable DHT-based provider discovery as fallback")
+	dhtBootstrap := fs.String("dht-bootstrap", "", "comma-separated DHT bootstrap peer multiaddrs")
 	fs.Parse(args)
 	if *accountKeyPath == "" {
 		log.Fatal("-account-key is required")
@@ -1736,6 +1871,33 @@ func repair(args []string) {
 	accountKey, err := loadAccountKey(*accountKeyPath)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	var dhtService *falaridht.Service
+	if *dhtEnabled {
+		h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/0"))
+		if err != nil {
+			log.Fatalf("create ephemeral libp2p host: %v", err)
+		}
+		defer h.Close()
+		dhtCfg := falaridht.DefaultConfig()
+		if *dhtBootstrap != "" {
+			for _, addr := range strings.Split(*dhtBootstrap, ",") {
+				addr = strings.TrimSpace(addr)
+				if addr != "" {
+					dhtCfg.BootstrapPeers = append(dhtCfg.BootstrapPeers, addr)
+				}
+			}
+		}
+		dhtService, err = falaridht.New(h, dhtCfg)
+		if err != nil {
+			log.Fatalf("create DHT service: %v", err)
+		}
+		if err := dhtService.Start(); err != nil {
+			log.Fatalf("start DHT service: %v", err)
+		}
+		defer dhtService.Close()
+		log.Printf("DHT discovery enabled for repair")
 	}
 
 	plan, err := client.LoadPlan(*planPath)
@@ -1791,6 +1953,17 @@ func repair(args []string) {
 			}
 			providers := discoverStorageProviders(*chainURL, receipt.ShardHash, receipt.ShardCID)
 			data, err := downloadShard(receipt, providers, endpoints)
+			if err != nil && dhtService != nil {
+				// DHT fallback for repair shard download.
+				ctx, cancel := context.WithTimeout(context.Background(), falaridht.DefaultLookupTimeout)
+				dhtRecords, dhtErr := dhtService.FindProviders(ctx, receipt.ShardHash)
+				cancel()
+				if dhtErr == nil && len(dhtRecords) > 0 {
+					dhtProviders := falaridht.ToStorageProviderRecords(dhtRecords)
+					dhtEndpoints := providerEndpoints(dhtProviders)
+					data, err = downloadShard(receipt, dhtProviders, dhtEndpoints)
+				}
+			}
 			if err != nil {
 				continue
 			}
@@ -2008,10 +2181,10 @@ func minerStats(args []string) {
 		rate := float64(stats.ProofSuccess) / float64(total) * 100
 		successRate = fmt.Sprintf("%.1f%%", rate)
 	}
-	fmt.Printf("miner %s status=%s success=%d failure=%d success_rate=%s consecutive=%d rewards=%s storage_rewards=%s retrieval_rewards=%s repair_rewards=%s slashed=%s locked_bonus=%s bonus_released=%v\n",
+	fmt.Printf("miner %s status=%s success=%d failure=%d success_rate=%s consecutive=%d rewards=%s storage_rewards=%s retrieval_rewards=%s repair_rewards=%s slashed=%s locked_bonus=%s bonus_released=%v bonus_expired=%v\n",
 		stats.MinerAddress, stats.Status, stats.ProofSuccess, stats.ProofFailure, successRate, stats.ConsecutiveFailures,
 		formatGF(stats.Rewards), formatGF(stats.StorageRewards), formatGF(stats.RetrievalRewards), formatGF(stats.RepairRewards),
-		formatGF(stats.Slashed), formatGF(stats.LockedBonus), stats.BonusReleased)
+		formatGF(stats.Slashed), formatGF(stats.LockedBonus), stats.BonusReleased, stats.BonusExpired)
 }
 
 func balance(args []string) {
@@ -3124,7 +3297,7 @@ type shardDownloadResult struct {
 	err        error
 }
 
-func downloadSegmentShards(receipts map[int]wire.MinerReceipt, totalShards int, requiredShards int, fallbackEndpoints []string, chainURL string) ([][]byte, error) {
+func downloadSegmentShards(receipts map[int]wire.MinerReceipt, totalShards int, requiredShards int, fallbackEndpoints []string, chainURL string, dhtSvc *falaridht.Service, providerCache []wire.StorageProviderRecord) ([][]byte, error) {
 	if requiredShards <= 0 {
 		return nil, fmt.Errorf("required shard count must be positive")
 	}
@@ -3140,6 +3313,7 @@ func downloadSegmentShards(receipts map[int]wire.MinerReceipt, totalShards int, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Phase 1: Try routes from chain API.
 			routes := discoverStorageRoutes(chainURL, receipt.ShardHash, receipt.ShardCID)
 			if data, err := downloadShardViaRoutes(receipt, routes); err == nil {
 				if chaincrypto.HashBytes(data) != receipt.ShardHash {
@@ -3148,6 +3322,40 @@ func downloadSegmentShards(receipts map[int]wire.MinerReceipt, totalShards int, 
 				resultCh <- shardDownloadResult{shardIndex: shardIndex, data: data, err: err}
 				return
 			}
+			// Phase 1.5: Try cached providers from plan (offline support).
+			if len(providerCache) > 0 {
+				cachedProviders := filterProvidersByShard(providerCache, receipt.ShardHash)
+				if len(cachedProviders) > 0 {
+					cachedEndpoints := providerEndpoints(cachedProviders)
+					data, err := downloadShard(receipt, cachedProviders, cachedEndpoints)
+					if err == nil && chaincrypto.HashBytes(data) != receipt.ShardHash {
+						err = fmt.Errorf("downloaded shard hash mismatch for segment %d shard %d", receipt.SegmentID, receipt.ShardIndex)
+					}
+					if err == nil {
+						resultCh <- shardDownloadResult{shardIndex: shardIndex, data: data}
+						return
+					}
+				}
+			}
+			// Phase 2: DHT discovery fallback.
+			if dhtSvc != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), falaridht.DefaultLookupTimeout)
+				dhtRecords, err := dhtSvc.FindProviders(ctx, receipt.ShardHash)
+				cancel()
+				if err == nil && len(dhtRecords) > 0 {
+					dhtProviders := falaridht.ToStorageProviderRecords(dhtRecords)
+					dhtEndpoints := providerEndpoints(dhtProviders)
+					data, err := downloadShard(receipt, dhtProviders, dhtEndpoints)
+					if err == nil && chaincrypto.HashBytes(data) != receipt.ShardHash {
+						err = fmt.Errorf("downloaded shard hash mismatch for segment %d shard %d", receipt.SegmentID, receipt.ShardIndex)
+					}
+					if err == nil {
+						resultCh <- shardDownloadResult{shardIndex: shardIndex, data: data}
+						return
+					}
+				}
+			}
+			// Phase 3: Chain API providers.
 			providers := discoverStorageProviders(chainURL, receipt.ShardHash, receipt.ShardCID)
 			endpoints := providerEndpoints(providers)
 			endpoints = append(endpoints, fallbackEndpoints...)
@@ -3269,6 +3477,31 @@ func providerFromRoute(route wire.StorageRoute) wire.StorageProviderRecord {
 		ProviderRecordLive: route.ProviderRecordLive,
 		ProviderSource:     route.ProviderSource,
 	}
+}
+
+// filterProvidersByShard returns providers whose ShardHashes or Shards contain the given shard hash.
+func filterProvidersByShard(providers []wire.StorageProviderRecord, shardHash string) []wire.StorageProviderRecord {
+	var out []wire.StorageProviderRecord
+	for _, p := range providers {
+		for _, h := range p.ShardHashes {
+			if h == shardHash {
+				out = append(out, p)
+				goto next
+			}
+		}
+		for _, s := range p.Shards {
+			if s.ShardHash == shardHash {
+				out = append(out, p)
+				goto next
+			}
+		}
+		// If provider has no shard list (e.g. from DHT), include it and let downloadShard try.
+		if len(p.ShardHashes) == 0 && len(p.Shards) == 0 && (p.Endpoint != "" || p.PeerID != "") {
+			out = append(out, p)
+		}
+	next:
+	}
+	return out
 }
 
 func discoverStorageEndpoints(chainURL string, shardHash string, shardCID string) []string {
@@ -3538,6 +3771,7 @@ func usage() {
   chainctl collection-append -chain http://localhost:8080 -collection collection_xxx -intent intent_xxx -kind memory -key session/1
   chainctl collection-append -chain http://localhost:8080 -account-key ./alice.json -collection collection_xxx -intent intent_xxx -kind memory -key session/1
   chainctl collection-records -chain http://localhost:8080 -collection collection_xxx -kind memory -key session/1 -latest -limit 5
+  chainctl collection-download -gateway http://localhost:9090 -collection collection_xxx -out ./downloads
   chainctl record       -chain http://localhost:8080 -id record_xxx
   chainctl create-intent -chain http://localhost:8080 -file ./data.bin -out ./upload-plan.json -data-shards 4 -parity-shards 2
   chainctl create-intent -chain http://localhost:8080 -file ./data.bin -out ./upload-plan.json -encrypt -key-out ./storage.key

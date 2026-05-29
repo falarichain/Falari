@@ -98,6 +98,8 @@ func agentPermissionAliases(operation string) []string {
 	switch operation {
 	case "finalize_deal":
 		return []string{"finalize"}
+	case "terminate_deal":
+		return []string{"terminate"}
 	case "create_collection":
 		return []string{"collection_create"}
 	case "create_share":
