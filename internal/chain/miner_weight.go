@@ -1,6 +1,9 @@
 package chain
 
 import (
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"chain/internal/wire"
@@ -9,9 +12,100 @@ import (
 // DHTStalenessSeconds is the maximum age (in seconds) of a miner's last DHT
 // publish before it is considered stale. Miners with stale DHT records have
 // their RetrievalObligMet flag cleared at epoch finalization.
-const DHTStalenessSeconds = 900 // 15 minutes (~3 epochs at 5 min)
+const DHTStalenessSeconds = int64(EpochIntervalDefault / time.Second) // 1 epoch interval (default 1800s = 30min)
 
-func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 {
+// minerIP extracts the IP address string for a miner from its Endpoint or
+// ProviderRecord PeerAddrs. Returns empty string if no IP can be determined.
+func (s *Store) minerIP(addr string, stats wire.MinerStats) string {
+	// Try Endpoint first (URL format: http://IP:PORT).
+	if stats.Endpoint != "" {
+		if u, err := url.Parse(stats.Endpoint); err == nil && u.Hostname() != "" {
+			if ip := net.ParseIP(u.Hostname()); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	// Fallback: extract IP from ProviderRecord PeerAddrs (multiaddr /ip4/X.X.X.X/tcp/PORT).
+	if record, ok := s.data.ProviderRecords[addr]; ok {
+		for _, ma := range record.PeerAddrs {
+			parts := strings.Split(ma, "/")
+			for i, p := range parts {
+				if p == "ip4" && i+1 < len(parts) {
+					if ip := net.ParseIP(parts[i+1]); ip != nil {
+						return ip.String()
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// ip16Subnet returns the /16 subnet prefix (first two octets) of an IP string.
+// Returns empty string for invalid IPs.
+func ip16Subnet(ipStr string) string {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return ""
+	}
+	ip = ip.To4()
+	if ip == nil {
+		return "" // IPv6 not handled as /16
+	}
+	return strings.Join(strings.Split(ip.String(), ".")[:2], ".")
+}
+
+// computeIPDispersionScoresLocked computes a per-miner IP dispersion score
+// (0-10000) based on how many other miners share the same /16 IP subnet.
+// Miners on unique subnets get full score; crowded subnets get penalized.
+func (s *Store) computeIPDispersionScoresLocked() map[string]uint64 {
+	scores := make(map[string]uint64, len(s.data.Miners))
+
+	// Pass 1: collect /16 subnet → miner addresses.
+	subnetMiners := map[string][]string{}
+	minerSubnet := map[string]string{}
+	for addr, stats := range s.data.Miners {
+		if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited || stats.Status == wire.MinerStatusJailed {
+			continue
+		}
+		if stats.UsedBytes == 0 {
+			continue
+		}
+		ip := s.minerIP(addr, stats)
+		if ip == "" {
+			scores[addr] = 5000 // unknown IP → neutral score
+			continue
+		}
+		subnet := ip16Subnet(ip)
+		if subnet == "" {
+			scores[addr] = 5000
+			continue
+		}
+		subnetMiners[subnet] = append(subnetMiners[subnet], addr)
+		minerSubnet[addr] = subnet
+	}
+
+	// Pass 2: assign score based on subnet crowd size.
+	for addr, subnet := range minerSubnet {
+		count := len(subnetMiners[subnet])
+		switch {
+		case count <= 1:
+			scores[addr] = 10000
+		case count <= 5:
+			scores[addr] = 7500
+		case count <= 20:
+			scores[addr] = 5000
+		case count <= 50:
+			scores[addr] = 2500
+		default:
+			scores[addr] = 0
+		}
+	}
+
+	return scores
+}
+
+func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats, ipDispersionScores map[string]uint64) uint64 {
 	if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited || stats.Status == wire.MinerStatusJailed {
 		return 0
 	}
@@ -42,10 +136,12 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 
 		}
 	}
 
-	decentralizationScore := uint64(5000)
-	if stats.DelegatorCount > 1 {
-		decentralizationScore = 10000
-	}
+	// Retrieval speed score (0-10000): reuses existing SpeedScore computed
+	// by RecomputeAllAntiSpamScoresLocked. Default 5000 when no retrievals.
+	retrievalSpeedScore := stats.SpeedScore
+
+	// IP dispersion score (0-10000): computed globally before this call.
+	ipDispersionScore := ipDispersionScores[stats.MinerAddress]
 
 	switch stats.Status {
 	case wire.MinerStatusDegraded:
@@ -58,9 +154,10 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 
 
 	params := s.miningParamsLocked()
 	weight := storedBytes * proofScore / 10000 * params.StoredBytesWeightBPS / 10000
-	weight += storedBytes * availabilityScore / 10000 * params.AvailabilityWeightBPS / 10000
-	weight += storedBytes * decentralizationScore / 10000 * params.DecentralizationWeightBPS / 10000
 	weight += storedBytes * proofScore / 10000 * params.ProofScoreWeightBPS / 10000
+	weight += storedBytes * availabilityScore / 10000 * params.AvailabilityWeightBPS / 10000
+	weight += storedBytes * retrievalSpeedScore / 10000 * params.RetrievalSpeedWeightBPS / 10000
+	weight += storedBytes * ipDispersionScore / 10000 * params.IPDispersionWeightBPS / 10000
 
 	// Retrieval obligation penalty: miners who don't participate in
 	// retrieval+DHT lose a portion of their weight.
@@ -72,10 +169,11 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats) uint64 
 }
 
 func (s *Store) RecomputeAllMinerWeightsLocked() {
+	ipDispersionScores := s.computeIPDispersionScoresLocked()
 	for addr, stats := range s.data.Miners {
 		s.accrueStorageRewardForMinerLocked(addr)
 		stats = s.data.Miners[addr]
-		stats.EffectiveWeight = s.computeMinerEffectiveWeightLocked(stats)
+		stats.EffectiveWeight = s.computeMinerEffectiveWeightLocked(stats, ipDispersionScores)
 		s.data.Miners[addr] = stats
 	}
 }

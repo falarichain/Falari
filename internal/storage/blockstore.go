@@ -39,6 +39,7 @@ type CIDBlkStore struct {
 	mu         sync.RWMutex
 	db         *leveldb.DB
 	verifyHash bool
+	tempPath   string
 }
 
 const leveldbBloomsize = 10
@@ -58,13 +59,32 @@ func NewLevelDBBlkStore(path string) (*CIDBlkStore, error) {
 }
 
 func NewMemoryBlkStore() *CIDBlkStore {
-	store, _ := NewLevelDBBlkStore("")
+	dir, err := os.MkdirTemp("", "falari-blockstore-*")
+	if err != nil {
+		panic(err)
+	}
+	store, err := NewLevelDBBlkStore(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		panic(err)
+	}
+	store.tempPath = dir
 	return store
 }
 
 func (s *CIDBlkStore) Close() error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	tempPath := s.tempPath
+	s.tempPath = ""
+	defer func() {
+		s.mu.Unlock()
+		if tempPath != "" {
+			_ = os.RemoveAll(tempPath)
+		}
+	}()
 	if s.db != nil {
 		return s.db.Close()
 	}

@@ -361,6 +361,251 @@ func TestDirectActionRejectAfterExpiryFails(t *testing.T) {
 	}
 }
 
+func signDirectActionAgent(t *testing.T, store *Store, req *wire.DirectGovernanceActionRequest, agentKey *ecdsa.PrivateKey, agentKeyID string, agentNonce uint64) {
+	t.Helper()
+	req.ChainID = store.data.ChainID
+	req.AgentKeyID = agentKeyID
+	req.AgentNonce = agentNonce
+	if req.CreatedAtUnix == 0 {
+		req.CreatedAtUnix = time.Now().Unix()
+	}
+	if err := wire.SignDirectGovernanceActionAgent(req, agentKey); err != nil {
+		t.Fatalf("failed to sign agent direct action: %v", err)
+	}
+}
+
+func signReviewVoteAgent(t *testing.T, store *Store, req *wire.DirectActionReviewVoteRequest, agentKey *ecdsa.PrivateKey, agentKeyID string, agentNonce uint64) {
+	t.Helper()
+	req.ChainID = store.data.ChainID
+	req.AgentKeyID = agentKeyID
+	req.AgentNonce = agentNonce
+	if req.CreatedAtUnix == 0 {
+		req.CreatedAtUnix = time.Now().Unix()
+	}
+	if err := wire.SignDirectActionReviewVoteAgent(req, agentKey); err != nil {
+		t.Fatalf("failed to sign agent review vote: %v", err)
+	}
+}
+
+// setupAgentKey creates an agent key for a given operator with specified permissions and returns the agent private key, key ID, and agent address.
+func setupAgentKey(t *testing.T, store *Store, operatorAddr string, permissions []string) (*ecdsa.PrivateKey, string, string) {
+	t.Helper()
+	agentPriv, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPub := "0x" + hex.EncodeToString(ethcrypto.FromECDSAPub(&agentPriv.PublicKey))
+	keyID := "agent_gov_" + operatorAddr[:8]
+
+	store.data.AgentKeys[keyID] = &wire.AgentKey{
+		KeyID:       keyID,
+		Master:      operatorAddr,
+		AgentPub:    agentPub,
+		Permissions: permissions,
+		Nonce:       0,
+		DailyLimit:  1000,
+		TotalLimit:  10000,
+		DayResetAt:  time.Now().Add(24 * time.Hour).Unix(),
+	}
+
+	return agentPriv, keyID, agentPub
+}
+
+func TestAgentDirectGovernanceActionFreeze(t *testing.T) {
+	store, _, addresses := testDirectActionSetup(t)
+
+	// Create agent key for operator 0 with governance_action permission.
+	agentPriv, keyID, _ := setupAgentKey(t, store, addresses[0], []string{"governance_action"})
+
+	expiresAt := time.Now().Add(48 * time.Hour).Unix()
+	req := wire.DirectGovernanceActionRequest{
+		Operator:      addresses[0],
+		IntentID:      "intent_lifecycle",
+		Action:        "freeze",
+		ReasonHash:    "agent_freeze_reason",
+		ExpiresAtUnix: expiresAt,
+	}
+	agentKey := store.data.AgentKeys[keyID]
+	signDirectActionAgent(t, store, &req, agentPriv, keyID, agentKey.Nonce)
+
+	resp, err := store.DirectGovernanceAction(req)
+	if err != nil {
+		t.Fatalf("Agent DirectGovernanceAction failed: %v", err)
+	}
+
+	// Verify response.
+	if resp.Record.ReviewStatus != wire.DirectActionPendingReview {
+		t.Fatalf("expected pending_review, got %s", resp.Record.ReviewStatus)
+	}
+	if resp.GovernanceResult.ModerationStatus != wire.ModerationStatusFrozen {
+		t.Fatalf("expected frozen moderation, got %s", resp.GovernanceResult.ModerationStatus)
+	}
+	if resp.GovernanceResult.AccessStatus != wire.AccessStatusSuspended {
+		t.Fatalf("expected suspended access, got %s", resp.GovernanceResult.AccessStatus)
+	}
+
+	// Verify agent nonce was advanced (not operator nonce).
+	agentKey = store.data.AgentKeys[keyID]
+	if agentKey.Nonce != 1 {
+		t.Fatalf("expected agent nonce 1, got %d", agentKey.Nonce)
+	}
+	operatorNonce := store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])]
+	if operatorNonce != 0 {
+		t.Fatalf("expected operator nonce 0 (unchanged), got %d", operatorNonce)
+	}
+
+	// Verify blacklist entry has review status.
+	entry, ok := store.data.BlacklistedShards["shard_lifecycle"]
+	if !ok {
+		t.Fatal("expected blacklist entry for shard_lifecycle")
+	}
+	if entry.ReviewStatus != wire.DirectActionPendingReview {
+		t.Fatalf("expected blacklist review_status pending_review, got %s", entry.ReviewStatus)
+	}
+}
+
+func TestAgentDirectGovernanceActionWrongPermission(t *testing.T) {
+	store, _, addresses := testDirectActionSetup(t)
+
+	// Create agent key WITHOUT governance_action permission.
+	agentPriv, keyID, _ := setupAgentKey(t, store, addresses[0], []string{"create_intent"})
+
+	expiresAt := time.Now().Add(48 * time.Hour).Unix()
+	req := wire.DirectGovernanceActionRequest{
+		Operator:      addresses[0],
+		IntentID:      "intent_lifecycle",
+		Action:        "freeze",
+		ReasonHash:    "agent_freeze_reason",
+		ExpiresAtUnix: expiresAt,
+	}
+	agentKey := store.data.AgentKeys[keyID]
+	signDirectActionAgent(t, store, &req, agentPriv, keyID, agentKey.Nonce)
+
+	_, err := store.DirectGovernanceAction(req)
+	if err == nil {
+		t.Fatal("expected error for agent without governance_action permission")
+	}
+}
+
+func TestAgentCastDirectActionReviewVote(t *testing.T) {
+	store, privKeys, addresses := testDirectActionSetup(t)
+
+	// First create a direct action using operator 0 (direct signature).
+	expiresAt := time.Now().Add(48 * time.Hour).Unix()
+	actionReq := wire.DirectGovernanceActionRequest{
+		Operator:      addresses[0],
+		IntentID:      "intent_lifecycle",
+		Action:        "freeze",
+		ReasonHash:    "agent_review_test",
+		ExpiresAtUnix: expiresAt,
+	}
+	signDirectAction(t, store, &actionReq, privKeys[0])
+
+	actionResp, err := store.DirectGovernanceAction(actionReq)
+	if err != nil {
+		t.Fatalf("DirectGovernanceAction failed: %v", err)
+	}
+	actionID := actionResp.Record.ActionID
+
+	// Create agent key for operator 1 with governance_review permission.
+	agentPriv, keyID, _ := setupAgentKey(t, store, addresses[1], []string{"governance_review"})
+
+	// Cast rejection vote via agent key.
+	voteReq := wire.DirectActionReviewVoteRequest{
+		ActionID: actionID,
+		Voter:    addresses[1],
+		Reject:   true,
+	}
+	agentKey := store.data.AgentKeys[keyID]
+	signReviewVoteAgent(t, store, &voteReq, agentPriv, keyID, agentKey.Nonce)
+
+	voteResp, err := store.CastDirectActionReviewVote(voteReq)
+	if err != nil {
+		t.Fatalf("Agent CastDirectActionReviewVote failed: %v", err)
+	}
+	if !voteResp.Rejected {
+		t.Fatal("expected action to be rejected")
+	}
+
+	// Verify agent nonce advanced.
+	agentKey = store.data.AgentKeys[keyID]
+	if agentKey.Nonce != 1 {
+		t.Fatalf("expected agent nonce 1, got %d", agentKey.Nonce)
+	}
+	// Operator 1 nonce should be unchanged.
+	opNonce := store.data.OperatorNonces[normalizeGovernanceOperator(addresses[1])]
+	if opNonce != 0 {
+		t.Fatalf("expected operator nonce 0 (unchanged), got %d", opNonce)
+	}
+
+	// Verify record is rejected.
+	record := store.data.DirectActionRecords[actionID]
+	if record.ReviewStatus != wire.DirectActionRejected {
+		t.Fatalf("expected rejected, got %s", record.ReviewStatus)
+	}
+}
+
+func TestAgentDirectActionAndReviewFullFlow(t *testing.T) {
+	store, _, addresses := testDirectActionSetup(t)
+
+	// Agent for operator 0 creates the direct action.
+	agentPriv0, keyID0, _ := setupAgentKey(t, store, addresses[0], []string{"governance_action"})
+
+	intent := store.data.Intents["intent_lifecycle"]
+	intent.Receipts[0][0] = wire.MinerReceipt{
+		MinerAddress:   "miner_lifecycle",
+		MinerPublicKey: "miner_pub",
+		ShardHash:      "shard_lifecycle",
+		ShardSize:      32,
+	}
+
+	appealDeadline := time.Now().Add(2 * time.Hour).Unix()
+	actionReq := wire.DirectGovernanceActionRequest{
+		Operator:           addresses[0],
+		IntentID:           "intent_lifecycle",
+		Action:             "block",
+		ReasonHash:         "agent_full_flow",
+		PreserveStorage:    false,
+		AppealDeadlineUnix: appealDeadline,
+	}
+	agentKey0 := store.data.AgentKeys[keyID0]
+	signDirectActionAgent(t, store, &actionReq, agentPriv0, keyID0, agentKey0.Nonce)
+
+	actionResp, err := store.DirectGovernanceAction(actionReq)
+	if err != nil {
+		t.Fatalf("Agent DirectGovernanceAction failed: %v", err)
+	}
+	actionID := actionResp.Record.ActionID
+
+	// Verify storage is NOT terminating during review.
+	if actionResp.GovernanceResult.StorageStatus != wire.StorageStatusActive {
+		t.Fatalf("expected storage active during review, got %s", actionResp.GovernanceResult.StorageStatus)
+	}
+
+	// Ratify the action.
+	if err := store.RatifyDirectAction(actionID, time.Now().Unix()); err != nil {
+		t.Fatalf("RatifyDirectAction failed: %v", err)
+	}
+
+	// Verify storage is now terminating.
+	intent = store.data.Intents["intent_lifecycle"]
+	if intent.StorageStatus != wire.StorageStatusTerminating {
+		t.Fatalf("expected storage terminating after ratify, got %s", intent.StorageStatus)
+	}
+
+	// Verify delete tasks were created.
+	tasks := store.DeleteTasks("intent_lifecycle", "", "pending")
+	if len(tasks.Tasks) != 1 {
+		t.Fatalf("expected 1 pending delete task, got %d", len(tasks.Tasks))
+	}
+
+	// Verify record is ratified.
+	record := store.data.DirectActionRecords[actionID]
+	if record.ReviewStatus != wire.DirectActionRatified {
+		t.Fatalf("expected ratified, got %s", record.ReviewStatus)
+	}
+}
+
 func TestDirectActionListFiltering(t *testing.T) {
 	store, privKeys, addresses := testDirectActionSetup(t)
 

@@ -254,6 +254,11 @@ type ChainStatusResponse struct {
 	LibP2PEnabled            bool           `json:"libp2p_enabled,omitempty"`
 	LibP2PID                 string         `json:"libp2p_id,omitempty"`
 	LibP2PAddrs              []string       `json:"libp2p_addrs,omitempty"`
+	BonusGrantedCount        uint64         `json:"bonus_granted_count,omitempty"`
+	MaxBonusAddresses        uint64         `json:"max_bonus_addresses,omitempty"`
+	RegistrationBonusAmount  uint64         `json:"registration_bonus_amount,omitempty"`
+	StakePerTiB              uint64         `json:"stake_per_tib,omitempty"`
+	MinCapacityBytes         uint64         `json:"min_capacity_bytes,omitempty"`
 }
 
 type StorageNodeStatusResponse struct {
@@ -1138,9 +1143,9 @@ const (
 	TokenTotalSupply           uint64 = 10_000_000_000 * TokenUnit
 	TokenMiningSupply          uint64 = 9_000_000_000 * TokenUnit
 	TokenStoragePoolInitial    uint64 = 6_000_000_000 * TokenUnit
-	TokenRetrievalPoolInitial  uint64 = 1_000_000_000 * TokenUnit
-	TokenValidatorPoolInitial  uint64 = 1_000_000_000 * TokenUnit
-	TokenPermanentFundPoolInitial uint64 = 1_000_000_000 * TokenUnit
+	TokenRetrievalPoolInitial  uint64 = 600_000_000 * TokenUnit
+	TokenValidatorPoolInitial  uint64 = 1_200_000_000 * TokenUnit
+	TokenPermanentFundPoolInitial uint64 = 1_200_000_000 * TokenUnit
 	TokenFoundationPoolInitial uint64 = 1_000_000_000 * TokenUnit
 
 	MinDelegationAmount    uint64 = 1000 * TokenUnit
@@ -1158,6 +1163,7 @@ type RewardPools struct {
 
 type MinerStats struct {
 	MinerAddress            string `json:"miner_address"`
+	MinerID                 uint64 `json:"miner_id,omitempty"`
 	PublicKey               string `json:"public_key"`
 	Endpoint                string `json:"endpoint"`
 	CapacityBytes           uint64 `json:"capacity_bytes"`
@@ -1199,6 +1205,7 @@ type MinerStats struct {
 	BonusReleased           bool   `json:"bonus_released,omitempty"`
 	BonusExpired            bool   `json:"bonus_expired,omitempty"`
 	LockedBonus             uint64 `json:"locked_bonus,omitempty"`
+	LastCapacityAdjustUnix  int64  `json:"last_capacity_adjust_unix,omitempty"`
 }
 
 // MinerShardsResponse lists all shard hashes currently assigned to a miner
@@ -1234,6 +1241,19 @@ type RegisterMinerRequest struct {
 
 type RegisterMinerResponse struct {
 	Miner MinerStats `json:"miner"`
+}
+
+type AdjustCapacityRequest struct {
+	MinerAddress     string `json:"miner_address"`
+	NewCapacityBytes uint64 `json:"new_capacity_bytes"`
+	ChainID          string `json:"chain_id"`
+	Nonce            uint64 `json:"nonce,omitempty"`
+	Signature        string `json:"signature"`
+}
+
+type AdjustCapacityResponse struct {
+	Miner          MinerStats `json:"miner"`
+	RefundUnbonding uint64    `json:"refund_unbonding,omitempty"`
 }
 
 type ClaimMiningRewardsRequest struct {
@@ -1815,7 +1835,8 @@ type GovernanceProposal struct {
 	TargetStoredBytesWeightBPS        uint64 `json:"target_stored_bytes_weight_bps,omitempty"`
 	TargetProofScoreWeightBPS         uint64 `json:"target_proof_score_weight_bps,omitempty"`
 	TargetAvailabilityWeightBPS       uint64 `json:"target_availability_weight_bps,omitempty"`
-	TargetDecentralizationWeightBPS   uint64 `json:"target_decentralization_weight_bps,omitempty"`
+	TargetRetrievalSpeedWeightBPS     uint64 `json:"target_retrieval_speed_weight_bps,omitempty"`
+	TargetIPDispersionWeightBPS       uint64 `json:"target_ip_dispersion_weight_bps,omitempty"`
 	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
 	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
 	TargetPermanentFundTakeoverSeconds int64  `json:"target_repair_pool_takeover_seconds,omitempty"`
@@ -1885,7 +1906,8 @@ type CreateGovernanceProposalRequest struct {
 	TargetStoredBytesWeightBPS        uint64 `json:"target_stored_bytes_weight_bps,omitempty"`
 	TargetProofScoreWeightBPS         uint64 `json:"target_proof_score_weight_bps,omitempty"`
 	TargetAvailabilityWeightBPS       uint64 `json:"target_availability_weight_bps,omitempty"`
-	TargetDecentralizationWeightBPS   uint64 `json:"target_decentralization_weight_bps,omitempty"`
+	TargetRetrievalSpeedWeightBPS     uint64 `json:"target_retrieval_speed_weight_bps,omitempty"`
+	TargetIPDispersionWeightBPS       uint64 `json:"target_ip_dispersion_weight_bps,omitempty"`
 	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
 	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
 	TargetPermanentFundTakeoverSeconds int64  `json:"target_repair_pool_takeover_seconds,omitempty"`
@@ -2194,6 +2216,9 @@ type DirectGovernanceActionRequest struct {
 	Nonce              uint64 `json:"nonce"`
 	Signature          string `json:"signature"`
 	CreatedAtUnix      int64  `json:"created_at_unix"`
+	AgentKeyID         string `json:"agent_key_id,omitempty"`
+	AgentNonce         uint64 `json:"agent_nonce,omitempty"`
+	AgentSignature     string `json:"agent_signature,omitempty"`
 }
 
 // DirectGovernanceActionResponse is the response for a direct governance action.
@@ -2205,13 +2230,16 @@ type DirectGovernanceActionResponse struct {
 
 // DirectActionReviewVoteRequest is the HTTP request for an operator to cast a review vote.
 type DirectActionReviewVoteRequest struct {
-	ActionID      string `json:"action_id"`
-	Voter         string `json:"voter"`
-	Reject        bool   `json:"reject"`
-	ChainID       string `json:"chain_id"`
-	Nonce         uint64 `json:"nonce"`
-	Signature     string `json:"signature"`
-	CreatedAtUnix int64  `json:"created_at_unix"`
+	ActionID       string `json:"action_id"`
+	Voter          string `json:"voter"`
+	Reject         bool   `json:"reject"`
+	ChainID        string `json:"chain_id"`
+	Nonce          uint64 `json:"nonce"`
+	Signature      string `json:"signature"`
+	CreatedAtUnix  int64  `json:"created_at_unix"`
+	AgentKeyID     string `json:"agent_key_id,omitempty"`
+	AgentNonce     uint64 `json:"agent_nonce,omitempty"`
+	AgentSignature string `json:"agent_signature,omitempty"`
 }
 
 // DirectActionReviewVoteResponse is the response after casting a review vote.

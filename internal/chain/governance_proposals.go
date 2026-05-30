@@ -160,7 +160,8 @@ func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, pro
 		TargetStoredBytesWeightBPS:        req.TargetStoredBytesWeightBPS,
 		TargetProofScoreWeightBPS:         req.TargetProofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       req.TargetAvailabilityWeightBPS,
-		TargetDecentralizationWeightBPS:   req.TargetDecentralizationWeightBPS,
+		TargetRetrievalSpeedWeightBPS:     req.TargetRetrievalSpeedWeightBPS,
+		TargetIPDispersionWeightBPS:       req.TargetIPDispersionWeightBPS,
 		TargetRetrievalRewardPerMiB:       req.TargetRetrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: req.TargetMaxRetrievalRewardPerWindow,
 		TargetPermanentFundTakeoverSeconds: req.TargetPermanentFundTakeoverSeconds,
@@ -554,7 +555,8 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.StoredBytesWeightBPS, proposal.TargetStoredBytesWeightBPS)
 	applyIfNonZero(&p.ProofScoreWeightBPS, proposal.TargetProofScoreWeightBPS)
 	applyIfNonZero(&p.AvailabilityWeightBPS, proposal.TargetAvailabilityWeightBPS)
-	applyIfNonZero(&p.DecentralizationWeightBPS, proposal.TargetDecentralizationWeightBPS)
+	applyIfNonZero(&p.RetrievalSpeedWeightBPS, proposal.TargetRetrievalSpeedWeightBPS)
+	applyIfNonZero(&p.IPDispersionWeightBPS, proposal.TargetIPDispersionWeightBPS)
 	applyIfNonZero(&p.RetrievalRewardPerMiB, proposal.TargetRetrievalRewardPerMiB)
 	applyIfNonZero(&p.MaxRetrievalRewardPerWindow, proposal.TargetMaxRetrievalRewardPerWindow)
 	if proposal.TargetPermanentFundTakeoverSeconds > 0 {
@@ -590,7 +592,7 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 
 	// Post-application bounds validation (defense-in-depth: rejects proposals
 	// created before bounds were enforced).
-	weightSum := p.StoredBytesWeightBPS + p.ProofScoreWeightBPS + p.AvailabilityWeightBPS + p.DecentralizationWeightBPS
+	weightSum := p.StoredBytesWeightBPS + p.ProofScoreWeightBPS + p.AvailabilityWeightBPS + p.RetrievalSpeedWeightBPS + p.IPDispersionWeightBPS
 	if weightSum > maxWeightBPSSum {
 		return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: weight BPS sum %d exceeds maximum %d", weightSum, maxWeightBPSSum)
 	}
@@ -954,7 +956,8 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		req.TargetStoredBytesWeightBPS != 0 ||
 		req.TargetProofScoreWeightBPS != 0 ||
 		req.TargetAvailabilityWeightBPS != 0 ||
-		req.TargetDecentralizationWeightBPS != 0 ||
+		req.TargetRetrievalSpeedWeightBPS != 0 ||
+		req.TargetIPDispersionWeightBPS != 0 ||
 		req.TargetRetrievalRewardPerMiB != 0 ||
 		req.TargetMaxRetrievalRewardPerWindow != 0 ||
 		req.TargetPermanentFundTakeoverSeconds != 0 ||
@@ -1046,13 +1049,14 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 
 	// Weight BPS sum: use proposed values where non-zero, fall back to current.
 	if currentParams != nil && (req.TargetStoredBytesWeightBPS != 0 || req.TargetProofScoreWeightBPS != 0 ||
-		req.TargetAvailabilityWeightBPS != 0 || req.TargetDecentralizationWeightBPS != 0) {
+		req.TargetAvailabilityWeightBPS != 0 || req.TargetRetrievalSpeedWeightBPS != 0 || req.TargetIPDispersionWeightBPS != 0) {
 		sb := nonZeroOr(req.TargetStoredBytesWeightBPS, currentParams.StoredBytesWeightBPS)
 		ps := nonZeroOr(req.TargetProofScoreWeightBPS, currentParams.ProofScoreWeightBPS)
 		av := nonZeroOr(req.TargetAvailabilityWeightBPS, currentParams.AvailabilityWeightBPS)
-		dc := nonZeroOr(req.TargetDecentralizationWeightBPS, currentParams.DecentralizationWeightBPS)
-		if sb+ps+av+dc > maxWeightBPSSum {
-			return fmt.Errorf("weight BPS sum %d exceeds maximum %d", sb+ps+av+dc, maxWeightBPSSum)
+		rs := nonZeroOr(req.TargetRetrievalSpeedWeightBPS, currentParams.RetrievalSpeedWeightBPS)
+		ip := nonZeroOr(req.TargetIPDispersionWeightBPS, currentParams.IPDispersionWeightBPS)
+		if sb+ps+av+rs+ip > maxWeightBPSSum {
+			return fmt.Errorf("weight BPS sum %d exceeds maximum %d", sb+ps+av+rs+ip, maxWeightBPSSum)
 		}
 	}
 
@@ -1064,7 +1068,8 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 		{"stored_bytes_weight_bps", req.TargetStoredBytesWeightBPS},
 		{"proof_score_weight_bps", req.TargetProofScoreWeightBPS},
 		{"availability_weight_bps", req.TargetAvailabilityWeightBPS},
-		{"decentralization_weight_bps", req.TargetDecentralizationWeightBPS},
+		{"retrieval_speed_weight_bps", req.TargetRetrievalSpeedWeightBPS},
+		{"ip_dispersion_weight_bps", req.TargetIPDispersionWeightBPS},
 		{"validator_commission_bps", req.TargetValidatorCommissionBPS},
 		{"block_production_reward_bps", req.TargetBlockProductionRewardBPS},
 		{"availability_threshold_bps", req.TargetAvailabilityThresholdBPS},
@@ -1138,7 +1143,8 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetStoredBytesWeightBPS:        p.TargetStoredBytesWeightBPS,
 		TargetProofScoreWeightBPS:         p.TargetProofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       p.TargetAvailabilityWeightBPS,
-		TargetDecentralizationWeightBPS:   p.TargetDecentralizationWeightBPS,
+		TargetRetrievalSpeedWeightBPS:     p.TargetRetrievalSpeedWeightBPS,
+		TargetIPDispersionWeightBPS:       p.TargetIPDispersionWeightBPS,
 		TargetRetrievalRewardPerMiB:       p.TargetRetrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: p.TargetMaxRetrievalRewardPerWindow,
 		TargetPermanentFundTakeoverSeconds: p.TargetPermanentFundTakeoverSeconds,

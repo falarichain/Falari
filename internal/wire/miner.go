@@ -131,3 +131,38 @@ func VerifyClaimMiningRewards(req ClaimMiningRewardsRequest) error {
 	}
 	return verifyInfraSignature(req.MinerAddress, req.Signature, payload)
 }
+
+type adjustCapacityPayload struct {
+	Action           string `json:"action"`
+	ChainID          string `json:"chain_id"`
+	MinerAddress     string `json:"miner_address"`
+	NewCapacityBytes uint64 `json:"new_capacity_bytes"`
+	Nonce            uint64 `json:"nonce"`
+}
+
+func SignAdjustCapacity(req *AdjustCapacityRequest, privateKey *ecdsa.PrivateKey) error {
+	payload := adjustCapacityPayload{
+		Action:           "adjust_capacity",
+		ChainID:          req.ChainID,
+		MinerAddress:     req.MinerAddress,
+		NewCapacityBytes: req.NewCapacityBytes,
+		Nonce:            req.Nonce,
+	}
+	sig, _, err := signInfraPayload(payload, privateKey)
+	if err != nil {
+		return err
+	}
+	req.Signature = sig
+	return nil
+}
+
+func VerifyAdjustCapacity(req AdjustCapacityRequest) error {
+	payload := adjustCapacityPayload{
+		Action:           "adjust_capacity",
+		ChainID:          req.ChainID,
+		MinerAddress:     req.MinerAddress,
+		NewCapacityBytes: req.NewCapacityBytes,
+		Nonce:            req.Nonce,
+	}
+	return verifyInfraSignature(req.MinerAddress, req.Signature, payload)
+}

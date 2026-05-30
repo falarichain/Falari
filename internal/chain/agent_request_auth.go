@@ -106,6 +106,10 @@ func agentPermissionAliases(operation string) []string {
 		return []string{"share_create"}
 	case "revoke_share":
 		return []string{"share_revoke"}
+	case "direct_governance_action":
+		return []string{"governance_action"}
+	case "direct_action_review_vote":
+		return []string{"governance_review"}
 	default:
 		return nil
 	}

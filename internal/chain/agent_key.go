@@ -25,6 +25,8 @@ var agentAllowedOps = []string{
 	"create_key_envelope",
 	"share_create",
 	"share_revoke",
+	"governance_action",
+	"governance_review",
 }
 
 const maxAgentKeyNameLen = 64
@@ -306,8 +308,15 @@ func agentKeyID(master string, nonce uint64) string {
 }
 
 func normalizeAgentPermissions(permissions []string) ([]string, error) {
-	if len(permissions) == 0 || len(permissions) > maxAgentKeyPermissions {
-		return nil, fmt.Errorf("permissions must have between 1 and %d entries", maxAgentKeyPermissions)
+	// Empty permissions defaults to all allowed operations.
+	if len(permissions) == 0 {
+		normalized := make([]string, len(agentAllowedOps))
+		copy(normalized, agentAllowedOps)
+		sort.Strings(normalized)
+		return normalized, nil
+	}
+	if len(permissions) > maxAgentKeyPermissions {
+		return nil, fmt.Errorf("permissions must have at most %d entries", maxAgentKeyPermissions)
 	}
 	seen := map[string]bool{}
 	normalized := make([]string, 0, len(permissions))

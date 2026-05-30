@@ -1316,7 +1316,8 @@ func governancePropose(args []string) {
 	storedBytesWeightBPS := fs.Uint64("stored-bytes-weight-bps", 0, "stored bytes weight factor BPS (for update_mining_params)")
 	proofScoreWeightBPS := fs.Uint64("proof-score-weight-bps", 0, "proof score weight factor BPS (for update_mining_params)")
 	availabilityWeightBPS := fs.Uint64("availability-weight-bps", 0, "availability weight factor BPS (for update_mining_params)")
-	decentralizationWeightBPS := fs.Uint64("decentralization-weight-bps", 0, "decentralization weight factor BPS (for update_mining_params)")
+	retrievalSpeedWeightBPS := fs.Uint64("retrieval-speed-weight-bps", 0, "retrieval speed weight factor BPS (for update_mining_params)")
+	ipDispersionWeightBPS := fs.Uint64("ip-dispersion-weight-bps", 0, "IP dispersion weight factor BPS (for update_mining_params)")
 	retrievalRewardPerMiB := fs.Uint64("retrieval-reward-per-mib", 0, "retrieval reward per MiB (for update_mining_params)")
 	maxRetrievalRewardPerWindow := fs.Uint64("max-retrieval-reward-per-window", 0, "max retrieval reward per window (for update_mining_params)")
 	minerDegradeThreshold := fs.Uint64("miner-degrade-threshold", 0, "miner degrade threshold (for update_mining_params)")
@@ -1383,7 +1384,8 @@ func governancePropose(args []string) {
 		TargetStoredBytesWeightBPS:        *storedBytesWeightBPS,
 		TargetProofScoreWeightBPS:         *proofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       *availabilityWeightBPS,
-		TargetDecentralizationWeightBPS:   *decentralizationWeightBPS,
+		TargetRetrievalSpeedWeightBPS:     *retrievalSpeedWeightBPS,
+		TargetIPDispersionWeightBPS:       *ipDispersionWeightBPS,
 		TargetRetrievalRewardPerMiB:       *retrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: *maxRetrievalRewardPerWindow,
 		TargetMinerDegradeThreshold:       *minerDegradeThreshold,
@@ -3553,7 +3555,7 @@ func agentKeyCreate(args []string) {
 	fs := flag.NewFlagSet("agent-key create", flag.ExitOnError)
 	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
 	name := fs.String("name", "", "agent key name")
-	permissions := fs.String("allow", "", "comma-separated permissions: upload,retrieval,renew")
+	permissions := fs.String("allow", "", "comma-separated permissions (empty = all)")
 	dailyLimit := fs.Uint64("daily-limit", 0, "daily spending limit")
 	totalLimit := fs.Uint64("total-limit", 0, "total spending limit")
 	expire := fs.Duration("expire", 0, "key lifetime (e.g. 90d)")
@@ -3563,9 +3565,6 @@ func agentKeyCreate(args []string) {
 	fs.Parse(args)
 	if *name == "" {
 		log.Fatal("-name is required")
-	}
-	if *permissions == "" {
-		log.Fatal("-allow is required")
 	}
 	if *masterKey == "" {
 		log.Fatal("-master-key is required")
@@ -3591,12 +3590,16 @@ func agentKeyCreate(args []string) {
 	if *expire > 0 {
 		expiresAt = time.Now().Add(*expire).Unix()
 	}
+	var perms []string
+	if *permissions != "" {
+		perms = strings.Split(*permissions, ",")
+	}
 	req := wire.RegisterAgentKeyRequest{
 		ChainID:     chainID(*chainURL),
 		Master:      master.Address,
 		Name:        *name,
 		AgentPub:    agentPub,
-		Permissions: strings.Split(*permissions, ","),
+		Permissions: perms,
 		DailyLimit:  *dailyLimit,
 		TotalLimit:  *totalLimit,
 		ExpiresAt:   expiresAt,

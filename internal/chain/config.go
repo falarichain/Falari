@@ -1,7 +1,16 @@
 package chain
 
 import (
+	"time"
+
 	"chain/internal/reward"
+)
+
+// Epoch timing defaults — single source of truth for all epoch-derived values.
+// Change these to adjust the epoch cycle across the entire system.
+const (
+	EpochIntervalDefault = 30 * time.Minute // epoch trigger interval
+	EpochDurationDefault = 10 * time.Minute // proof submission window per epoch
 )
 
 // MiningParams holds all mining-related parameters that can be hot-reloaded
@@ -26,10 +35,11 @@ type MiningParams struct {
 	StorageRewardPerBlock uint64 `json:"storage_reward_per_block,omitempty"`
 
 	// ── Miner effective weight factors (BPS) ──
-	StoredBytesWeightBPS      uint64 `json:"stored_bytes_weight_bps"`
-	ProofScoreWeightBPS       uint64 `json:"proof_score_weight_bps"`
-	AvailabilityWeightBPS     uint64 `json:"availability_weight_bps"`
-	DecentralizationWeightBPS uint64 `json:"decentralization_weight_bps"`
+	StoredBytesWeightBPS    uint64 `json:"stored_bytes_weight_bps"`
+	ProofScoreWeightBPS     uint64 `json:"proof_score_weight_bps"`
+	AvailabilityWeightBPS   uint64 `json:"availability_weight_bps"`
+	RetrievalSpeedWeightBPS uint64 `json:"retrieval_speed_weight_bps"`
+	IPDispersionWeightBPS   uint64 `json:"ip_dispersion_weight_bps"`
 
 	// ── Legacy retrieval receipts (kept for telemetry / audits) ──
 	RetrievalRewardPerMiB       uint64 `json:"retrieval_reward_per_mib"`
@@ -117,6 +127,9 @@ type MiningParams struct {
 	// StakePerTiB: required locked stake (bonus + stake) per TiB of declared
 	// capacity. Default 1000 * TokenUnit (1000 tokens/TiB). Set to 0 to disable.
 	StakePerTiB uint64 `json:"stake_per_tib,omitempty"`
+	// CapacityAdjustCooldownSeconds: minimum time between capacity adjustments.
+	// Default 604_800 (7 days). Set to 0 to disable cooldown.
+	CapacityAdjustCooldownSeconds uint64 `json:"capacity_adjust_cooldown_seconds,omitempty"`
 }
 
 // DefaultMiningParams returns the factory-default mining parameters.
@@ -128,10 +141,11 @@ func DefaultMiningParams() MiningParams {
 		RetrievalAnnualRateBPS:      1000,
 		FoundationAnnualRateBPS:     1000,
 		StorageRewardPerBlock:       50 * reward.TokenUnit,
-		StoredBytesWeightBPS:        4000,
-		ProofScoreWeightBPS:         3500,
-		AvailabilityWeightBPS:       1500,
-		DecentralizationWeightBPS:   1000,
+		StoredBytesWeightBPS:      4000,
+		ProofScoreWeightBPS:       3000,
+		AvailabilityWeightBPS:     1000,
+		RetrievalSpeedWeightBPS:   1000,
+		IPDispersionWeightBPS:     1000,
 		RetrievalRewardPerMiB:       0,
 		MaxRetrievalRewardPerWindow: 0,
 		PermanentFundTakeoverSeconds: 50 * 365 * 24 * 60 * 60, // 50 years
@@ -149,7 +163,7 @@ func DefaultMiningParams() MiningParams {
 		MaxBlockTxs:                 defaultMaxBlockTxs,
 		MaxTxBytes:                  defaultMaxTxBytes,
 		MaxStorageTxBytes:           defaultMaxStorageTxBytes,
-		RetrievalWeightBPS:          1000,
+		RetrievalWeightBPS:          3000,
 		RegistrationBonusAmount:     5000 * reward.TokenUnit,
 		MinBonusProofCount:          5000,
 		MinBonusSuccessRateBPS:      9500,
@@ -160,6 +174,7 @@ func DefaultMiningParams() MiningParams {
 		RepairDelayEpochs:           3,
 		MinCapacityBytes:            200 * 1024 * 1024 * 1024,
 		StakePerTiB:                 1000 * reward.TokenUnit,
+		CapacityAdjustCooldownSeconds: 7 * 24 * 60 * 60,
 	}
 }
 

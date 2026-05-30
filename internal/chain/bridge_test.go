@@ -30,7 +30,7 @@ func setupBridgeStore(t *testing.T) (*Store, testUser, testUser) {
 		RelayerAddress:    relayer.Addr,
 		MinBridgeAmount:   100,
 		DelaySeconds:      86400,
-		MaxAmountPerDay:    1_000_000_000_000,
+		MaxAmountPerDay:   1_000_000_000_000,
 		DayStartUnix:      time.Now().Unix(),
 	}
 
@@ -569,8 +569,18 @@ func TestBridgeClaimBeforeDelayDoesNotMutateState(t *testing.T) {
 	poolAddr := store.data.BridgeConfig.BridgePoolAddress
 	fundAccount(store, poolAddr, 10_000)
 
-	// No pre-registered inbound — the claim will auto-create one locally.
 	sourceHash := "0xNoStaleInbound"
+	store.data.BridgeInbounds[sourceHash] = &wire.BridgeInbound{
+		Nonce:             1,
+		SourceTxHash:      sourceHash,
+		SourceBlockNumber: 42,
+		Recipient:         wire.NormalizeAddress(recipient.Addr),
+		Amount:            500,
+		Status:            wire.BridgeStatusPending,
+		DetectedAtUnix:    time.Now().Unix(),
+		ClaimableAfter:    time.Now().Unix() + 3600,
+	}
+
 	claimReq := wire.BridgeInClaimRequest{
 		SourceTxHash:      sourceHash,
 		SourceBlockNumber: 42,
@@ -587,10 +597,13 @@ func TestBridgeClaimBeforeDelayDoesNotMutateState(t *testing.T) {
 		t.Fatal("expected delay error")
 	}
 
-	// Verify the inbound was NOT persisted — failure path must not mutate state.
-	_, lookupErr := store.BridgeInbound(sourceHash)
-	if lookupErr == nil {
-		t.Fatal("expected no inbound to be persisted after failed claim")
+	// Verify the pre-existing inbound was not marked claimed.
+	inbound, lookupErr := store.BridgeInbound(sourceHash)
+	if lookupErr != nil {
+		t.Fatal(lookupErr)
+	}
+	if inbound.Status != wire.BridgeStatusPending {
+		t.Fatalf("expected inbound to remain pending, got %s", inbound.Status)
 	}
 }
 
@@ -777,19 +790,7 @@ func TestBridgeClaimAutoRegisterSucceedsWhenDelayElapsed(t *testing.T) {
 	poolAddr := store.data.BridgeConfig.BridgePoolAddress
 	fundAccount(store, poolAddr, 10_000)
 
-	// Pre-register the inbound with a delay that has already elapsed.
-	now := time.Now().Unix()
 	sourceHash := "0xAutoRegisterClaim"
-	store.data.BridgeInbounds[sourceHash] = &wire.BridgeInbound{
-		Nonce:             1,
-		SourceTxHash:      sourceHash,
-		SourceBlockNumber: 42,
-		Recipient:         wire.NormalizeAddress(recipient.Addr),
-		Amount:            500,
-		Status:            wire.BridgeStatusPending,
-		DetectedAtUnix:    now - 90000,
-		ClaimableAfter:    now - 1, // delay already elapsed
-	}
 
 	claimReq := wire.BridgeInClaimRequest{
 		SourceTxHash:      sourceHash,

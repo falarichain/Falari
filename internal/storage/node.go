@@ -313,7 +313,12 @@ func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, 
 	if err := wire.SignMinerRegistration(&req, chainID, nonce, n.privateKey); err != nil {
 		return err
 	}
-	return postJSON(chainURL, "/miners", req)
+	err = postJSON(chainURL, "/miners", req)
+	if err != nil && strings.Contains(err.Error(), "already registered") {
+		log.Printf("miner %s already registered, skipping registration", n.address)
+		return nil
+	}
+	return err
 }
 
 func (n *Node) Store(req wire.UploadRequest) (wire.MinerReceipt, error) {

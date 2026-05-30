@@ -6,9 +6,9 @@ const (
 	TotalSupply           uint64 = 10_000_000_000 * TokenUnit
 	MiningSupply          uint64 = 9_000_000_000 * TokenUnit
 	StoragePoolInitial    uint64 = 6_000_000_000 * TokenUnit
-	RetrievalPoolInitial  uint64 = 1_000_000_000 * TokenUnit
-	ValidatorPoolInitial  uint64 = 1_000_000_000 * TokenUnit
-	PermanentFundPoolInitial uint64 = 1_000_000_000 * TokenUnit
+	RetrievalPoolInitial  uint64 = 600_000_000 * TokenUnit
+	ValidatorPoolInitial  uint64 = 1_200_000_000 * TokenUnit
+	PermanentFundPoolInitial uint64 = 1_200_000_000 * TokenUnit
 	FoundationPoolInitial uint64 = 1_000_000_000 * TokenUnit
 )
 

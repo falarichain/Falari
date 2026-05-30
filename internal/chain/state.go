@@ -92,6 +92,7 @@ type State struct {
 	ConfirmedTxs               map[string]bool                           `json:"confirmed_txs"`
 	EpochRound                 uint64                                    `json:"epoch_round"`
 	BonusGrantedCount          uint64                                    `json:"bonus_granted_count,omitempty"`
+	NextMinerID                uint64                                    `json:"next_miner_id,omitempty"`
 	ConsensusHeight            uint64                                    `json:"consensus_height"`
 	ConsensusRound             uint64                                    `json:"consensus_round"`
 	ConsensusPhase             string                                    `json:"consensus_phase"`
@@ -1695,7 +1696,6 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 	if req.CapacityBytes == 0 {
 		return wire.RegisterMinerResponse{}, errors.New("capacity must be positive")
 	}
-	// Stake is optional: zero means no staking (penalties deducted from vesting rewards).
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1712,42 +1712,30 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 		return wire.RegisterMinerResponse{}, err
 	}
 
-	existing := s.minerStatsLocked(req.MinerAddress)
-	if existing.MinerAddress != "" {
-		s.accrueStorageRewardForMinerLocked(req.MinerAddress)
-		existing = s.minerStatsLocked(req.MinerAddress)
-	}
-
-	// State guard: reject re-registration of miners in non-active terminal/penalty states.
-	switch existing.Status {
-	case wire.MinerStatusExiting:
-		return wire.RegisterMinerResponse{}, errors.New("miner is currently exiting; wait for exit to complete")
-	case wire.MinerStatusExited:
-		return wire.RegisterMinerResponse{}, errors.New("miner has exited; registration replay is not allowed")
-	case wire.MinerStatusJailed:
-		return wire.RegisterMinerResponse{}, errors.New("miner is jailed; must go through unjailing process")
+	// Strict one-time registration: reject if this address has ever registered.
+	if _, exists := s.data.Miners[req.MinerAddress]; exists {
+		existing := s.data.Miners[req.MinerAddress]
+		return wire.RegisterMinerResponse{}, fmt.Errorf("address %s is already registered as miner #%d; use adjust-capacity to change capacity", req.MinerAddress, existing.MinerID)
 	}
 
 	account := s.accountLocked(req.MinerAddress)
-	if req.Stake > existing.Stake {
-		additionalStake := req.Stake - existing.Stake
-		if account.Balance < additionalStake {
+	// Lock user-supplied stake from balance.
+	if req.Stake > 0 {
+		if account.Balance < req.Stake {
 			return wire.RegisterMinerResponse{}, errors.New("insufficient balance for miner stake")
 		}
-		account.Balance -= additionalStake
-		account.LockedStake += additionalStake
+		account.Balance -= req.Stake
+		account.LockedStake += req.Stake
 	}
 	// One-time registration bonus (with cap + pool accounting).
-	if !existing.BonusReleased && !existing.BonusExpired {
-		if params.RegistrationBonusAmount > 0 {
-			capOK := params.MaxBonusAddresses == 0 || s.data.BonusGrantedCount < params.MaxBonusAddresses
-			if capOK {
-				s.initRewardPoolsLocked()
-				if s.data.RewardPools.StorageRemaining >= params.RegistrationBonusAmount {
-					account.LockedBonus += params.RegistrationBonusAmount
-					s.data.RewardPools.StorageRemaining -= params.RegistrationBonusAmount
-					s.data.BonusGrantedCount++
-				}
+	if params.RegistrationBonusAmount > 0 {
+		capOK := params.MaxBonusAddresses == 0 || s.data.BonusGrantedCount < params.MaxBonusAddresses
+		if capOK {
+			s.initRewardPoolsLocked()
+			if s.data.RewardPools.StorageRemaining >= params.RegistrationBonusAmount {
+				account.LockedBonus += params.RegistrationBonusAmount
+				s.data.RewardPools.StorageRemaining -= params.RegistrationBonusAmount
+				s.data.BonusGrantedCount++
 			}
 		}
 	}
@@ -1759,30 +1747,34 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 			return wire.RegisterMinerResponse{}, errors.New("insufficient stake for declared capacity")
 		}
 	}
-	existing.MinerAddress = req.MinerAddress
-	existing.PublicKey = req.PublicKey
-	existing.Endpoint = req.Endpoint
-	existing.CapacityBytes = req.CapacityBytes
-	existing.AccessServiceRequired = true
-	existing.UploadServiceEnabled = true
-	existing.DownloadServiceEnabled = true
-	existing.Stake = req.Stake
-	existing.Status = wire.MinerStatusActive
-	existing.RetrievalObligMet = true
-	if existing.StorageRewardIndex == "" {
-		existing.StorageRewardIndex = s.data.StorageRewardIndex
-	}
-	if existing.RegisteredAtUnix == 0 {
-		existing.RegisteredAtUnix = time.Now().Unix()
+	// Assign unique miner ID.
+	s.data.NextMinerID++
+	minerID := s.data.NextMinerID
+
+	now := time.Now().Unix()
+	stats := wire.MinerStats{
+		MinerAddress:           req.MinerAddress,
+		MinerID:                minerID,
+		PublicKey:              req.PublicKey,
+		Endpoint:               req.Endpoint,
+		CapacityBytes:          req.CapacityBytes,
+		Stake:                  req.Stake,
+		Status:                 wire.MinerStatusActive,
+		RegisteredAtUnix:       now,
+		AccessServiceRequired:  true,
+		UploadServiceEnabled:   true,
+		DownloadServiceEnabled: true,
+		RetrievalObligMet:      true,
+		StorageRewardIndex:     s.data.StorageRewardIndex,
 	}
 	s.consumeAccountNonceLocked(req.MinerAddress)
 	s.data.Accounts[req.MinerAddress] = account
-	s.data.Miners[req.MinerAddress] = existing
+	s.data.Miners[req.MinerAddress] = stats
 	s.recordTxLocked("register_miner", req.MinerAddress, req)
 	if err := s.saveLocked(); err != nil {
 		return wire.RegisterMinerResponse{}, err
 	}
-	return wire.RegisterMinerResponse{Miner: existing}, nil
+	return wire.RegisterMinerResponse{Miner: stats}, nil
 }
 
 func (s *Store) DeregisterMiner(req wire.DeregisterMinerRequest) error {
@@ -1819,6 +1811,118 @@ func (s *Store) DeregisterMiner(req wire.DeregisterMinerRequest) error {
 		ExitedAtUnix: exitedAt,
 	})
 	return s.saveLocked()
+}
+
+func (s *Store) AdjustCapacity(req wire.AdjustCapacityRequest) (wire.AdjustCapacityResponse, error) {
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
+	if req.MinerAddress == "" {
+		return wire.AdjustCapacityResponse{}, errors.New("miner address is required")
+	}
+	if req.NewCapacityBytes == 0 {
+		return wire.AdjustCapacityResponse{}, errors.New("new capacity must be positive")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	params := s.miningParamsLocked()
+	if params.MinCapacityBytes > 0 && req.NewCapacityBytes < params.MinCapacityBytes {
+		return wire.AdjustCapacityResponse{}, errors.New("new capacity below minimum")
+	}
+
+	// Verify signature.
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyAdjustCapacity(req)
+	}); err != nil {
+		return wire.AdjustCapacityResponse{}, err
+	}
+
+	stats := s.minerStatsLocked(req.MinerAddress)
+	if stats.MinerAddress == "" {
+		return wire.AdjustCapacityResponse{}, errors.New("miner not registered")
+	}
+	if stats.Status != wire.MinerStatusActive && stats.Status != wire.MinerStatusDegraded {
+		return wire.AdjustCapacityResponse{}, errors.New("capacity can only be adjusted while miner is active or degraded")
+	}
+
+	// Cooldown check.
+	cooldown := params.CapacityAdjustCooldownSeconds
+	if cooldown == 0 {
+		cooldown = 7 * 24 * 60 * 60
+	}
+	now := time.Now().Unix()
+	if stats.LastCapacityAdjustUnix > 0 && uint64(now-stats.LastCapacityAdjustUnix) < cooldown {
+		remaining := cooldown - uint64(now-stats.LastCapacityAdjustUnix)
+		return wire.AdjustCapacityResponse{}, fmt.Errorf("capacity adjustment on cooldown; try again in %d seconds", remaining)
+	}
+
+	oldCapacity := stats.CapacityBytes
+	newCapacity := req.NewCapacityBytes
+	account := s.accountLocked(req.MinerAddress)
+	var refundUnbonding uint64
+
+	if params.StakePerTiB > 0 {
+		oldRequired := RequiredStakeForCapacity(oldCapacity, params.StakePerTiB)
+		newRequired := RequiredStakeForCapacity(newCapacity, params.StakePerTiB)
+
+		if newRequired > oldRequired {
+			// Increasing capacity: require immediate additional stake from balance.
+			totalLocked := account.LockedBonus + account.LockedStake
+			if totalLocked < newRequired {
+				shortfall := newRequired - totalLocked
+				if account.Balance < shortfall {
+					return wire.AdjustCapacityResponse{}, fmt.Errorf("insufficient balance for additional stake; need %d more", shortfall)
+				}
+				account.Balance -= shortfall
+				account.LockedStake += shortfall
+			}
+		} else if newRequired < oldRequired {
+			// Decreasing capacity: refund excess LockedStake via 7-day unbonding.
+			// Only refund from LockedStake (user's own funds), never from LockedBonus.
+			excess := oldRequired - newRequired
+			refundFromLockedStake := excess
+			if refundFromLockedStake > account.LockedStake {
+				refundFromLockedStake = account.LockedStake
+			}
+			// But never refund more than what's actually "excess" beyond newRequired.
+			afterRefund := account.LockedBonus + account.LockedStake - refundFromLockedStake
+			if afterRefund < newRequired {
+				refundFromLockedStake = account.LockedBonus + account.LockedStake - newRequired
+				if refundFromLockedStake > account.LockedStake {
+					refundFromLockedStake = account.LockedStake
+				}
+			}
+			if refundFromLockedStake > 0 {
+				account.LockedStake -= refundFromLockedStake
+				account.UnbondingBalance += refundFromLockedStake
+				refundUnbonding = refundFromLockedStake
+
+				if s.data.UnbondingEntries == nil {
+					s.data.UnbondingEntries = map[string]wire.UnbondingEntry{}
+				}
+				unbondingID := req.MinerAddress + ":capacity_adjust:" + strconv.FormatInt(now, 10)
+				s.data.UnbondingEntries[unbondingID] = wire.UnbondingEntry{
+					ID:            unbondingID,
+					Delegator:     req.MinerAddress,
+					Validator:     req.MinerAddress,
+					Amount:        refundFromLockedStake,
+					CreatedAtUnix: now,
+					MaturesAtUnix: now + wire.UnbondingPeriodSeconds,
+				}
+			}
+		}
+	}
+
+	stats.CapacityBytes = newCapacity
+	stats.LastCapacityAdjustUnix = now
+	s.consumeAccountNonceLocked(req.MinerAddress)
+	s.data.Accounts[req.MinerAddress] = account
+	s.data.Miners[req.MinerAddress] = stats
+	s.recordTxLocked("adjust_capacity", req.MinerAddress, req)
+	if err := s.saveLocked(); err != nil {
+		return wire.AdjustCapacityResponse{}, err
+	}
+	return wire.AdjustCapacityResponse{Miner: stats, RefundUnbonding: refundUnbonding}, nil
 }
 
 func (s *Store) ClaimMiningRewards(req wire.ClaimMiningRewardsRequest) (wire.ClaimMiningRewardsResponse, error) {

@@ -787,15 +787,24 @@ func (s *Store) DirectGovernanceAction(req wire.DirectGovernanceActionRequest) (
 		return wire.DirectGovernanceActionResponse{}, err
 	}
 
-	// Verify signature.
-	if err := wire.VerifyDirectGovernanceAction(req, operator); err != nil {
-		return wire.DirectGovernanceActionResponse{}, err
-	}
-
-	// Verify nonce.
-	expectedNonce := s.data.OperatorNonces[operator]
-	if req.Nonce != expectedNonce {
-		return wire.DirectGovernanceActionResponse{}, errors.New("invalid operator nonce")
+	usesAgent := requestUsesAgent(req.AgentKeyID)
+	if usesAgent {
+		// Agent key authentication path.
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, operator, "direct_governance_action", 0, func(agentPub string) error {
+			return wire.VerifyDirectGovernanceActionAgent(req, agentPub)
+		}); err != nil {
+			return wire.DirectGovernanceActionResponse{}, err
+		}
+	} else {
+		// Operator direct signature verification.
+		if err := wire.VerifyDirectGovernanceAction(req, operator); err != nil {
+			return wire.DirectGovernanceActionResponse{}, err
+		}
+		// Verify operator nonce.
+		expectedNonce := s.data.OperatorNonces[operator]
+		if req.Nonce != expectedNonce {
+			return wire.DirectGovernanceActionResponse{}, errors.New("invalid operator nonce")
+		}
 	}
 
 	// Validate clock skew.
@@ -894,8 +903,14 @@ func (s *Store) DirectGovernanceAction(req wire.DirectGovernanceActionRequest) (
 		s.data.DirectActionReviewVotes[actionID] = []wire.DirectActionReviewVote{}
 	}
 
-	// Advance operator nonce.
-	s.data.OperatorNonces[operator] = expectedNonce + 1
+	// Advance nonce.
+	if usesAgent {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return wire.DirectGovernanceActionResponse{}, err
+		}
+	} else {
+		s.data.OperatorNonces[operator] = s.data.OperatorNonces[operator] + 1
+	}
 
 	resp := wire.DirectGovernanceActionResponse{
 		Record:             record,
@@ -932,15 +947,24 @@ func (s *Store) CastDirectActionReviewVote(req wire.DirectActionReviewVoteReques
 		return wire.DirectActionReviewVoteResponse{}, errors.New("voter has no public key registered")
 	}
 
-	// Verify signature.
-	if err := wire.VerifyDirectActionReviewVote(req, voter); err != nil {
-		return wire.DirectActionReviewVoteResponse{}, err
-	}
-
-	// Verify nonce.
-	expectedNonce := s.data.OperatorNonces[voter]
-	if req.Nonce != expectedNonce {
-		return wire.DirectActionReviewVoteResponse{}, errors.New("invalid voter nonce")
+	usesAgent := requestUsesAgent(req.AgentKeyID)
+	if usesAgent {
+		// Agent key authentication path.
+		if err := s.verifyAgentRequestLocked(req.ChainID, req.AgentKeyID, req.AgentNonce, voter, "direct_action_review_vote", 0, func(agentPub string) error {
+			return wire.VerifyDirectActionReviewVoteAgent(req, agentPub)
+		}); err != nil {
+			return wire.DirectActionReviewVoteResponse{}, err
+		}
+	} else {
+		// Operator direct signature verification.
+		if err := wire.VerifyDirectActionReviewVote(req, voter); err != nil {
+			return wire.DirectActionReviewVoteResponse{}, err
+		}
+		// Verify voter nonce.
+		expectedNonce := s.data.OperatorNonces[voter]
+		if req.Nonce != expectedNonce {
+			return wire.DirectActionReviewVoteResponse{}, errors.New("invalid voter nonce")
+		}
 	}
 
 	// Validate clock skew.
@@ -1001,7 +1025,14 @@ func (s *Store) CastDirectActionReviewVote(req wire.DirectActionReviewVoteReques
 		s.rejectDirectActionLocked(record, now)
 	}
 
-	s.data.OperatorNonces[voter] = expectedNonce + 1
+	// Advance nonce.
+	if usesAgent {
+		if err := s.consumeAgentRequestLocked(req.AgentKeyID, 0); err != nil {
+			return wire.DirectActionReviewVoteResponse{}, err
+		}
+	} else {
+		s.data.OperatorNonces[voter] = s.data.OperatorNonces[voter] + 1
+	}
 
 	resp := wire.DirectActionReviewVoteResponse{
 		Vote:        vote,

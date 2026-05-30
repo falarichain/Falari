@@ -86,6 +86,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /miners", s.registerMiner)
 	mux.HandleFunc("POST /miners/deregister", s.deregisterMiner)
 	mux.HandleFunc("POST /miners/claim-rewards", s.claimMiningRewards)
+	mux.HandleFunc("POST /miners/adjust-capacity", s.adjustCapacity)
 	mux.HandleFunc("GET /miners/{address}/shards", s.getMinerShards)
 	mux.HandleFunc("GET /miners/", s.getMinerStats)
 	mux.HandleFunc("POST /validators", s.registerValidator)
@@ -659,6 +660,19 @@ func (s *Server) claimMiningRewards(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, err := s.store.ClaimMiningRewards(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) adjustCapacity(w http.ResponseWriter, r *http.Request) {
+	var req wire.AdjustCapacityRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.AdjustCapacity(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

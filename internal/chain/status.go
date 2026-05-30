@@ -150,6 +150,15 @@ func (s *Store) Status() wire.ChainStatusResponse {
 		resp.TotalMiningPending = saturatingAdd(resp.TotalMiningPending, bucket.Total-bucket.Released)
 		resp.PendingMiningBuckets++
 	}
+	// Mining params & bonus quota.
+	{
+		params := s.miningParamsLocked()
+		resp.BonusGrantedCount = s.data.BonusGrantedCount
+		resp.MaxBonusAddresses = params.MaxBonusAddresses
+		resp.RegistrationBonusAmount = params.RegistrationBonusAmount
+		resp.StakePerTiB = params.StakePerTiB
+		resp.MinCapacityBytes = params.MinCapacityBytes
+	}
 	return resp
 }
 

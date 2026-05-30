@@ -32,7 +32,8 @@ type governanceProposalSigningPayload struct {
 	TargetStoredBytesWeightBPS        uint64   `json:"target_stored_bytes_weight_bps,omitempty"`
 	TargetProofScoreWeightBPS         uint64   `json:"target_proof_score_weight_bps,omitempty"`
 	TargetAvailabilityWeightBPS       uint64   `json:"target_availability_weight_bps,omitempty"`
-	TargetDecentralizationWeightBPS   uint64   `json:"target_decentralization_weight_bps,omitempty"`
+	TargetRetrievalSpeedWeightBPS     uint64   `json:"target_retrieval_speed_weight_bps,omitempty"`
+	TargetIPDispersionWeightBPS       uint64   `json:"target_ip_dispersion_weight_bps,omitempty"`
 	TargetRetrievalRewardPerMiB       uint64   `json:"target_retrieval_reward_per_mib,omitempty"`
 	TargetMaxRetrievalRewardPerWindow uint64   `json:"target_max_retrieval_reward_per_window,omitempty"`
 	TargetPermanentFundTakeoverSeconds int64    `json:"target_repair_pool_takeover_seconds,omitempty"`
@@ -94,7 +95,8 @@ func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, err
 		TargetStoredBytesWeightBPS:        req.TargetStoredBytesWeightBPS,
 		TargetProofScoreWeightBPS:         req.TargetProofScoreWeightBPS,
 		TargetAvailabilityWeightBPS:       req.TargetAvailabilityWeightBPS,
-		TargetDecentralizationWeightBPS:   req.TargetDecentralizationWeightBPS,
+		TargetRetrievalSpeedWeightBPS:     req.TargetRetrievalSpeedWeightBPS,
+		TargetIPDispersionWeightBPS:       req.TargetIPDispersionWeightBPS,
 		TargetRetrievalRewardPerMiB:       req.TargetRetrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: req.TargetMaxRetrievalRewardPerWindow,
 		TargetPermanentFundTakeoverSeconds: req.TargetPermanentFundTakeoverSeconds,
@@ -485,6 +487,88 @@ func VerifyDirectActionReviewVote(req DirectActionReviewVoteRequest, expectedAdd
 	addr := AccountAddress(pub)
 	if !strings.EqualFold(addr, expectedAddress) {
 		return errors.New("direct action review vote signature does not match voter address")
+	}
+	return nil
+}
+
+// ── Agent-signed Direct Governance Action ──
+
+// SignDirectGovernanceActionAgent signs the direct action request using an agent key.
+// The agent signs the same hash as the operator but stores the result in AgentSignature.
+func SignDirectGovernanceActionAgent(req *DirectGovernanceActionRequest, privateKey *ecdsa.PrivateKey) error {
+	hash, err := DirectGovernanceActionHash(*req)
+	if err != nil {
+		return err
+	}
+	signature, err := ethcrypto.Sign(hash, privateKey)
+	if err != nil {
+		return err
+	}
+	req.AgentSignature = encodeHex(signature)
+	return nil
+}
+
+// VerifyDirectGovernanceActionAgent verifies the agent signature on a direct action request
+// by recovering the signer and comparing against the expected agent public key.
+func VerifyDirectGovernanceActionAgent(req DirectGovernanceActionRequest, agentPub string) error {
+	signature, err := decodeHex(req.AgentSignature)
+	if err != nil {
+		return err
+	}
+	if len(signature) != 65 {
+		return errors.New("invalid agent direct action signature size")
+	}
+	hash, err := DirectGovernanceActionHash(req)
+	if err != nil {
+		return err
+	}
+	pub, err := ethcrypto.SigToPub(hash, signature)
+	if err != nil {
+		return err
+	}
+	recoveredPub := encodeHex(ethcrypto.FromECDSAPub(pub))
+	if !strings.EqualFold(recoveredPub, agentPub) {
+		return errors.New("agent direct action signature does not match agent public key")
+	}
+	return nil
+}
+
+// ── Agent-signed Direct Action Review Vote ──
+
+// SignDirectActionReviewVoteAgent signs the review vote request using an agent key.
+func SignDirectActionReviewVoteAgent(req *DirectActionReviewVoteRequest, privateKey *ecdsa.PrivateKey) error {
+	hash, err := DirectActionReviewVoteHash(*req)
+	if err != nil {
+		return err
+	}
+	signature, err := ethcrypto.Sign(hash, privateKey)
+	if err != nil {
+		return err
+	}
+	req.AgentSignature = encodeHex(signature)
+	return nil
+}
+
+// VerifyDirectActionReviewVoteAgent verifies the agent signature on a review vote request.
+func VerifyDirectActionReviewVoteAgent(req DirectActionReviewVoteRequest, agentPub string) error {
+	signature, err := decodeHex(req.AgentSignature)
+	if err != nil {
+		return err
+	}
+	if len(signature) != 65 {
+		return errors.New("invalid agent review vote signature size")
+	}
+	hash, err := DirectActionReviewVoteHash(req)
+	if err != nil {
+		return err
+	}
+	pub, err := ethcrypto.SigToPub(hash, signature)
+	if err != nil {
+		return err
+	}
+	recoveredPub := encodeHex(ethcrypto.FromECDSAPub(pub))
+	if !strings.EqualFold(recoveredPub, agentPub) {
+		return errors.New("agent review vote signature does not match agent public key")
 	}
 	return nil
 }

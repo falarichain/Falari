@@ -25,7 +25,7 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 		return
 	}
 	if config.Duration <= 0 {
-		config.Duration = 10 * time.Minute
+		config.Duration = EpochDurationDefault
 	}
 	if config.ChallengesPerDeal <= 0 {
 		config.ChallengesPerDeal = 1

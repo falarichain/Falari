@@ -166,7 +166,8 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 	inbound, ok := s.data.BridgeInbounds[inboundKey]
 	autoRegistered := false
 	if !ok {
-		// Build inbound record locally — do NOT write to state until all checks pass.
+		// Build inbound record locally. The trusted relayer has already waited
+		// for the Ethereum-side burn delay and included that event in this claim.
 		now := time.Now().Unix()
 		inbound = &wire.BridgeInbound{
 			Nonce:             req.Nonce,
@@ -176,7 +177,7 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 			Amount:            req.Amount,
 			Status:            wire.BridgeStatusPending,
 			DetectedAtUnix:    now,
-			ClaimableAfter:    now + cfg.DelaySeconds,
+			ClaimableAfter:    now,
 		}
 		autoRegistered = true
 	}
@@ -275,7 +276,7 @@ func (s *Store) applyBridgeSetConfigLocked(req wire.BridgeSetConfigRequest) erro
 
 	// ── Validate action and compute proposed state — no writes yet ──
 
-	var newPaused *bool          // non-nil ⇒ pause/unpause succeeded
+	var newPaused *bool              // non-nil ⇒ pause/unpause succeeded
 	var newConfig *wire.BridgeConfig // non-nil ⇒ update_config proposed config
 
 	switch req.Action {
@@ -303,7 +304,7 @@ func (s *Store) applyBridgeSetConfigLocked(req wire.BridgeSetConfigRequest) erro
 				Enabled:           true,
 				BridgePoolAddress: BridgePoolAddress(),
 				DelaySeconds:      86400,
-				MaxAmountPerDay:    1_000_000_000_000, // 10000 FAL (8 decimals)
+				MaxAmountPerDay:   1_000_000_000_000, // 10000 FAL (8 decimals)
 				DayStartUnix:      time.Now().Unix(),
 			}
 		}
@@ -478,11 +479,11 @@ func (s *Store) BridgeOut(req wire.BridgeOutRequest) (map[string]any, error) {
 		return nil, err
 	}
 	return map[string]any{
-		"nonce":    s.data.BridgeOutboundNonce,
-		"sender":   req.Sender,
+		"nonce":     s.data.BridgeOutboundNonce,
+		"sender":    req.Sender,
 		"recipient": req.Recipient,
-		"amount":   req.Amount,
-		"fee":      req.Fee,
+		"amount":    req.Amount,
+		"fee":       req.Fee,
 	}, nil
 }
 
