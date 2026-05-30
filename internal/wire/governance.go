@@ -35,9 +35,7 @@ type governanceProposalSigningPayload struct {
 	TargetDecentralizationWeightBPS   uint64   `json:"target_decentralization_weight_bps,omitempty"`
 	TargetRetrievalRewardPerMiB       uint64   `json:"target_retrieval_reward_per_mib,omitempty"`
 	TargetMaxRetrievalRewardPerWindow uint64   `json:"target_max_retrieval_reward_per_window,omitempty"`
-	TargetRepairRewardPerShard        uint64   `json:"target_repair_reward_per_shard,omitempty"`
-	TargetRepairPoolTakeoverBPS       uint64   `json:"target_repair_pool_takeover_bps,omitempty"`
-	TargetRepairPoolSubsidyBPS        uint64   `json:"target_repair_pool_subsidy_bps,omitempty"`
+	TargetPermanentFundTakeoverSeconds int64    `json:"target_repair_pool_takeover_seconds,omitempty"`
 	TargetMinerDegradeThreshold       uint64   `json:"target_miner_degrade_threshold,omitempty"`
 	TargetStorageProofSamples         int      `json:"target_storage_proof_samples,omitempty"`
 	TargetValidatorCommissionBPS      uint64   `json:"target_validator_commission_bps,omitempty"`
@@ -99,9 +97,7 @@ func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, err
 		TargetDecentralizationWeightBPS:   req.TargetDecentralizationWeightBPS,
 		TargetRetrievalRewardPerMiB:       req.TargetRetrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: req.TargetMaxRetrievalRewardPerWindow,
-		TargetRepairRewardPerShard:        req.TargetRepairRewardPerShard,
-		TargetRepairPoolTakeoverBPS:       req.TargetRepairPoolTakeoverBPS,
-		TargetRepairPoolSubsidyBPS:        req.TargetRepairPoolSubsidyBPS,
+		TargetPermanentFundTakeoverSeconds: req.TargetPermanentFundTakeoverSeconds,
 		TargetMinerDegradeThreshold:       req.TargetMinerDegradeThreshold,
 		TargetStorageProofSamples:         req.TargetStorageProofSamples,
 		TargetValidatorCommissionBPS:      req.TargetValidatorCommissionBPS,

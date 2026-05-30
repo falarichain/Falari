@@ -296,7 +296,7 @@ func (s *Store) completeRepairTaskAfterProofLocked(repairID string, challengeID 
 	existing.ProofVerified = true
 	s.data.RepairTasks[repairID] = existing
 
-	reward := s.miningParamsLocked().RepairRewardPerShard
+	reward := s.computeRepairRewardLocked(existing.Assignment.ShardSize)
 	s.payRepairRewardLocked(intent, existing.Assignment.MinerAddress, reward)
 	stats := s.minerStatsLocked(existing.Assignment.MinerAddress)
 	stats.RepairRewards = saturatingAdd(stats.RepairRewards, reward)
@@ -345,4 +345,92 @@ func repairSourceReceipts(receipts map[int]wire.MinerReceipt, shardIndex int, ol
 		out = append(out, receipt)
 	}
 	return out
+}
+
+// computeRepairRewardLocked calculates the repair reward as one-tenth of the
+// storage base price for the given shard size: shardSizeMiB × basePrice / 10.
+func (s *Store) computeRepairRewardLocked(shardSize int64) uint64 {
+	basePrice := s.data.StoragePricing.BasePrice
+	if basePrice == 0 {
+		basePrice = defaultStorageBasePrice
+	}
+	if shardSize <= 0 {
+		return 0
+	}
+	const bytesPerMiB = 1024 * 1024
+	shardSizeMiB := uint64(shardSize) / bytesPerMiB
+	if shardSizeMiB == 0 {
+		shardSizeMiB = 1 // minimum 1 MiB
+	}
+	return (shardSizeMiB*basePrice + 9) / 10
+}
+
+// pendingShardRepairKey builds the composite key for the PendingShardRepairs map.
+func pendingShardRepairKey(intentID string, segmentID int, shardIndex int, minerAddress string) string {
+	return intentID + ":" + strconv.Itoa(segmentID) + ":" + strconv.Itoa(shardIndex) + ":" + minerAddress
+}
+
+// trackMissedProofForRepairLocked records a missed proof for delayed repair
+// tracking. It increments the consecutive miss counter for the shard and, once
+// the counter reaches RepairDelayEpochs, promotes the pending entry to a full
+// RepairTask. Returns the created task (if any) and whether one was created.
+func (s *Store) trackMissedProofForRepairLocked(challenge wire.StorageChallenge, epochRound uint64) (wire.RepairTask, bool) {
+	if challenge.IntentID == "" || challenge.MinerAddress == "" {
+		return wire.RepairTask{}, false
+	}
+
+	key := pendingShardRepairKey(challenge.IntentID, challenge.SegmentID, challenge.ShardIndex, challenge.MinerAddress)
+	delay := s.miningParamsLocked().RepairDelayEpochs
+	if delay == 0 {
+		delay = 1 // safety: 0 means no delay, create immediately
+	}
+
+	pending, exists := s.data.PendingShardRepairs[key]
+	if !exists {
+		pending = wire.PendingShardRepair{
+			IntentID:              challenge.IntentID,
+			SegmentID:             challenge.SegmentID,
+			ShardIndex:            challenge.ShardIndex,
+			MinerAddress:          challenge.MinerAddress,
+			FirstMissedEpochRound: epochRound,
+			ConsecutiveMisses:     1,
+		}
+	} else {
+		pending.ConsecutiveMisses++
+	}
+
+	if pending.ConsecutiveMisses < delay {
+		s.data.PendingShardRepairs[key] = pending
+		return wire.RepairTask{}, false
+	}
+
+	// Threshold reached — promote to a real repair task.
+	delete(s.data.PendingShardRepairs, key)
+
+	task, ok := s.repairTaskForMissedChallengeLocked(challenge)
+	if !ok {
+		return wire.RepairTask{}, false
+	}
+	return task, true
+}
+
+// clearPendingShardRepairsForMinerLocked removes all pending shard repair
+// tracking entries for the given miner and cancels any pending (not yet
+// committed) repair tasks where the miner is the old miner. This is called
+// when a miner successfully submits a proof, indicating they are back online.
+func (s *Store) clearPendingShardRepairsForMinerLocked(minerAddress string) {
+	// Remove pending tracking entries.
+	for key, pending := range s.data.PendingShardRepairs {
+		if pending.MinerAddress == minerAddress {
+			delete(s.data.PendingShardRepairs, key)
+		}
+	}
+
+	// Cancel pending repair tasks where this miner is the old (offline) miner.
+	for repairID, task := range s.data.RepairTasks {
+		if task.OldMinerAddress == minerAddress && task.Status == repairStatusPending {
+			s.releaseStorageReservationLocked(task.Assignment)
+			delete(s.data.RepairTasks, repairID)
+		}
+	}
 }

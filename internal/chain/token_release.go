@@ -348,22 +348,12 @@ func (s *Store) validatorDelegationsLocked(validatorAddress string) []wire.Stake
 	return delegations
 }
 
-func (s *Store) addSlashedToRepairPoolLocked(amount uint64) {
+func (s *Store) addSlashedToPermanentFundLocked(amount uint64) {
 	if amount == 0 {
 		return
 	}
 	s.initRewardPoolsLocked()
-	s.data.RewardPools.RepairRemaining = saturatingAdd(s.data.RewardPools.RepairRemaining, amount)
-}
-
-func (s *Store) payStorageRewardFromPoolLocked(minerAddress string, reward uint64) bool {
-	s.initRewardPoolsLocked()
-	return s.data.RewardPools.PayFromStoragePool(reward)
-}
-
-func (s *Store) payRepairRewardFromPoolLocked(minerAddress string, reward uint64) bool {
-	s.initRewardPoolsLocked()
-	return s.data.RewardPools.PayFromRepairPool(reward)
+	s.data.RewardPools.PermanentFundRemaining = saturatingAdd(s.data.RewardPools.PermanentFundRemaining, amount)
 }
 
 // StartTokenReleaseScheduler is deprecated. Token release is now handled

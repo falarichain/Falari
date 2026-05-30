@@ -139,6 +139,8 @@ func main() {
 		storageProviders(os.Args[2:])
 	case "mine":
 		mine(os.Args[2:])
+	case "gc":
+		garbageCollect(os.Args[2:])
 	case "genesis":
 		genesisCommand(os.Args[2:])
 	default:
@@ -156,7 +158,7 @@ func createIntent(args []string) {
 	accountKeyPath := fs.String("account-key", "", "account key file used to sign the intent")
 	segmentSize := fs.Int64("segment-size", 4*1024*1024, "segment size in bytes")
 	dataShards := fs.Int("data-shards", 4, "erasure data shard count")
-	parityShards := fs.Int("parity-shards", 2, "erasure parity shard count")
+	parityShards := fs.Int("parity-shards", 3, "erasure parity shard count")
 	storageClass := fs.String("class", "permanent", "storage class")
 	lockedFee := fs.Uint64("fee", 0, "locked storage fee")
 	encrypt := fs.Bool("encrypt", false, "encrypt file locally before erasure coding and upload")
@@ -312,9 +314,9 @@ func showStatus(args []string) {
 	fmt.Printf("deals at_risk=%d critical=%d\n", status.DealsAtRisk, status.DealsCritical)
 	fmt.Printf("rewards storage=%s retrieval=%s repair=%s slashed=%s\n",
 		formatGF(status.TotalStorageRewards), formatGF(status.TotalRetrievalRewards), formatGF(status.TotalRepairRewards), formatGF(status.TotalSlashed))
-	fmt.Printf("pools storage=%s retrieval=%s validator=%s repair=%s released=%s supply=%s\n",
+	fmt.Printf("pools storage=%s retrieval=%s validator=%s permanent_fund=%s released=%s supply=%s\n",
 		formatGF(status.StoragePoolRemaining), formatGF(status.RetrievalPoolRemaining), formatGF(status.ValidatorPoolRemaining),
-		formatGF(status.RepairPoolRemaining), formatGF(status.TokensReleased), formatGF(status.TotalSupply))
+		formatGF(status.PermanentFundRemaining), formatGF(status.TokensReleased), formatGF(status.TotalSupply))
 	fmt.Printf("retrieval receipts=%d bytes=%s\n", status.RetrievalReceipts, formatBytes(status.RetrievalBytes))
 	fmt.Printf("intents total=%d uploading=%d partial=%d finalized=%d expired=%d deals=%d\n",
 		status.Intents, status.UploadingIntents, status.PartialIntents, status.FinalizedIntents, status.ExpiredIntents, status.Deals)
@@ -1317,7 +1319,6 @@ func governancePropose(args []string) {
 	decentralizationWeightBPS := fs.Uint64("decentralization-weight-bps", 0, "decentralization weight factor BPS (for update_mining_params)")
 	retrievalRewardPerMiB := fs.Uint64("retrieval-reward-per-mib", 0, "retrieval reward per MiB (for update_mining_params)")
 	maxRetrievalRewardPerWindow := fs.Uint64("max-retrieval-reward-per-window", 0, "max retrieval reward per window (for update_mining_params)")
-	repairRewardPerShard := fs.Uint64("repair-reward-per-shard", 0, "repair reward per shard (for update_mining_params)")
 	minerDegradeThreshold := fs.Uint64("miner-degrade-threshold", 0, "miner degrade threshold (for update_mining_params)")
 	storageProofSamples := fs.Int("storage-proof-samples", 0, "storage proof samples count (for update_mining_params)")
 	validatorCommissionBPS := fs.Uint64("validator-commission-bps", 0, "validator commission BPS (for update_mining_params)")
@@ -1333,6 +1334,7 @@ func governancePropose(args []string) {
 	minBonusRetrievalCount := fs.Uint64("min-bonus-retrieval-count", 0, "minimum successful retrievals for bonus release (for update_mining_params)")
 	maxBonusAddresses := fs.Uint64("max-bonus-addresses", 0, "maximum miners who can receive bonus (for update_mining_params)")
 	bonusDeadlineSeconds := fs.Uint64("bonus-deadline-seconds", 0, "bonus deadline in seconds (for update_mining_params)")
+	activationWindowSeconds := fs.Uint64("activation-window-seconds", 0, "activation window in seconds (for update_mining_params)")
 	fs.Parse(args)
 
 	if *keyPath == "" || *reasonHash == "" {
@@ -1384,7 +1386,6 @@ func governancePropose(args []string) {
 		TargetDecentralizationWeightBPS:   *decentralizationWeightBPS,
 		TargetRetrievalRewardPerMiB:       *retrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: *maxRetrievalRewardPerWindow,
-		TargetRepairRewardPerShard:        *repairRewardPerShard,
 		TargetMinerDegradeThreshold:       *minerDegradeThreshold,
 		TargetStorageProofSamples:         *storageProofSamples,
 		TargetValidatorCommissionBPS:      *validatorCommissionBPS,
@@ -1400,6 +1401,7 @@ func governancePropose(args []string) {
 		TargetMinBonusRetrievalCount:      *minBonusRetrievalCount,
 		TargetMaxBonusAddresses:           *maxBonusAddresses,
 		TargetBonusDeadlineSeconds:        *bonusDeadlineSeconds,
+		TargetActivationWindowSeconds:     *activationWindowSeconds,
 		Nonce:                             fetchOperatorNonce(*chainURL, key.Address),
 		CreatedAtUnix:                     now,
 	}
@@ -3745,7 +3747,7 @@ func genesisInit(args []string) {
 			StoragePoolRemaining:    wire.TokenStoragePoolInitial,
 			RetrievalPoolRemaining:  wire.TokenRetrievalPoolInitial,
 			ValidatorPoolRemaining:  wire.TokenValidatorPoolInitial,
-			RepairPoolRemaining:     wire.TokenRepairPoolInitial,
+			PermanentFundRemaining:  wire.TokenPermanentFundPoolInitial,
 			FoundationPoolRemaining: wire.TokenFoundationPoolInitial,
 		},
 	}
@@ -3760,6 +3762,67 @@ func genesisInit(args []string) {
 	fmt.Printf("genesis file created: %s\n", *outPath)
 	fmt.Printf("edit this file to add accounts and validators, then start chainnode with:\n")
 	fmt.Printf("  chainnode -genesis %s\n", *outPath)
+}
+
+func garbageCollect(args []string) {
+	fs := flag.NewFlagSet("gc", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	data := fs.String("data", "./data/miner1", "storage data directory")
+	fs.Parse(args)
+
+	minerKey := os.Getenv("MINER_PRIVATE_KEY")
+	if minerKey == "" {
+		log.Fatal("MINER_PRIVATE_KEY environment variable is not set")
+	}
+	node, err := storage.OpenNode(*data, minerKey)
+	if err != nil {
+		log.Fatalf("open storage node: %v", err)
+	}
+
+	blocks, err := node.ListStoredBlocks()
+	if err != nil {
+		log.Fatalf("list local blocks: %v", err)
+	}
+	if len(blocks) == 0 {
+		fmt.Println("gc: no local shards found")
+		return
+	}
+
+	var resp wire.MinerShardsResponse
+	if err := client.NewHTTP(*chainURL).Get("/miners/"+node.Address()+"/shards", &resp); err != nil {
+		log.Fatalf("query chain shards: %v", err)
+	}
+
+	assigned := make(map[string]bool, len(resp.ShardHashes))
+	for _, h := range resp.ShardHashes {
+		assigned[h] = true
+	}
+
+	var orphans []storage.StoredBlock
+	for _, block := range blocks {
+		if !assigned[block.Hash] {
+			orphans = append(orphans, block)
+		}
+	}
+
+	if len(orphans) == 0 {
+		fmt.Printf("gc complete local=%d assigned=%d orphans=0\n", len(blocks), len(resp.ShardHashes))
+		return
+	}
+
+	var deleted int
+	var freedBytes int64
+	for _, orphan := range orphans {
+		if err := node.DeleteShard(orphan.Hash); err != nil {
+			log.Printf("gc delete failed shard=%s error=%v", orphan.Hash, err)
+			continue
+		}
+		deleted++
+		freedBytes += orphan.Size
+		fmt.Printf("gc deleted shard=%s size=%s\n", orphan.Hash, formatBytes(uint64(orphan.Size)))
+	}
+	fmt.Printf("gc complete local=%d assigned=%d orphans=%d deleted=%d freed=%s\n",
+		len(blocks), len(resp.ShardHashes), len(orphans), deleted, formatBytes(uint64(freedBytes)))
 }
 
 func usage() {
@@ -3798,6 +3861,7 @@ func usage() {
   chainctl download      -chain http://localhost:8080 -record record_xxx -out ./restored.bin
   chainctl download      -chain http://localhost:8080 -intent intent_xxx -out ./restored.bin -key ./storage.key
   chainctl mine          -chain http://localhost:8080 -addr :9090 -data ./data/miner1 -endpoint http://localhost:9090
+  chainctl gc            -chain http://localhost:8080 -data ./data/miner1
   chainctl repair        -chain http://localhost:8080 -storage http://localhost:9090,http://localhost:9091 -plan ./upload-plan.json -unavailable miner_xxx
   chainctl prove         -chain http://localhost:8080 -intent intent_xxx -count 3
   chainctl storage-providers -chain http://localhost:8080 -shard shard_hash

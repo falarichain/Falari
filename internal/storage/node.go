@@ -291,6 +291,10 @@ func (n *Node) ShardHashes() []string {
 	return hashes
 }
 
+func (n *Node) ListStoredBlocks() ([]StoredBlock, error) {
+	return n.backend.ListBlocks()
+}
+
 func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, stake uint64) error {
 	if chainURL == "" {
 		return nil

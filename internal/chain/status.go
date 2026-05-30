@@ -11,6 +11,7 @@ func (s *Store) Status() wire.ChainStatusResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.expireInactiveMinersLocked()
 	s.expireMinerBonusesLocked()
 	s.finalizeExitingMinersLocked()
 
@@ -71,7 +72,7 @@ func (s *Store) Status() wire.ChainStatusResponse {
 		resp.StoragePoolRemaining = s.data.RewardPools.StorageRemaining
 		resp.RetrievalPoolRemaining = s.data.RewardPools.RetrievalRemaining
 		resp.ValidatorPoolRemaining = s.data.RewardPools.ValidatorRemaining
-		resp.RepairPoolRemaining = s.data.RewardPools.RepairRemaining
+		resp.PermanentFundRemaining = s.data.RewardPools.PermanentFundRemaining
 		resp.FoundationPoolRemaining = s.data.RewardPools.FoundationRemaining
 		resp.TokensReleased = s.data.RewardPools.TokensReleased
 	}

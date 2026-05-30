@@ -8,7 +8,7 @@ const (
 	StoragePoolInitial    uint64 = 6_000_000_000 * TokenUnit
 	RetrievalPoolInitial  uint64 = 1_000_000_000 * TokenUnit
 	ValidatorPoolInitial  uint64 = 1_000_000_000 * TokenUnit
-	RepairPoolInitial     uint64 = 1_000_000_000 * TokenUnit
+	PermanentFundPoolInitial uint64 = 1_000_000_000 * TokenUnit
 	FoundationPoolInitial uint64 = 1_000_000_000 * TokenUnit
 )
 
@@ -16,7 +16,7 @@ type Pools struct {
 	StorageRemaining    uint64 `json:"storage_pool_remaining"`
 	RetrievalRemaining  uint64 `json:"retrieval_pool_remaining"`
 	ValidatorRemaining  uint64 `json:"validator_pool_remaining"`
-	RepairRemaining     uint64 `json:"repair_pool_remaining"`
+	PermanentFundRemaining uint64 `json:"repair_pool_remaining"`
 	FoundationRemaining uint64 `json:"foundation_pool_remaining"`
 	TokensReleased      uint64 `json:"tokens_released"`
 }
@@ -26,7 +26,7 @@ func NewPools() *Pools {
 		StorageRemaining:    StoragePoolInitial,
 		RetrievalRemaining:  RetrievalPoolInitial,
 		ValidatorRemaining:  ValidatorPoolInitial,
-		RepairRemaining:     RepairPoolInitial,
+		PermanentFundRemaining: PermanentFundPoolInitial,
 		FoundationRemaining: FoundationPoolInitial,
 	}
 }
@@ -83,8 +83,8 @@ func (p *Pools) PayFromRetrievalPool(reward uint64) bool {
 	return p.payFromPool(&p.RetrievalRemaining, reward)
 }
 
-func (p *Pools) PayFromRepairPool(reward uint64) bool {
-	return p.payFromPool(&p.RepairRemaining, reward)
+func (p *Pools) PayFromPermanentFund(reward uint64) bool {
+	return p.payFromPool(&p.PermanentFundRemaining, reward)
 }
 
 func (p *Pools) payFromPool(pool *uint64, reward uint64) bool {

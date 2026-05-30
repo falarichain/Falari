@@ -133,6 +133,10 @@ type testMinerIdentity struct {
 
 func registerTestMiner(t *testing.T, store *Store, _ string, endpoint string, capacity uint64) testMinerIdentity {
 	t.Helper()
+	// Disable min-capacity and stake-per-TiB checks so tests can use small capacities.
+	params := store.miningParamsLocked()
+	params.MinCapacityBytes = 0
+	params.StakePerTiB = 0
 	key, err := ethcrypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)

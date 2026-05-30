@@ -15,8 +15,8 @@ func TestNewPoolsInitialBalances(t *testing.T) {
 	if p.ValidatorRemaining != ValidatorPoolInitial {
 		t.Fatalf("validator pool: expected %d got %d", ValidatorPoolInitial, p.ValidatorRemaining)
 	}
-	if p.RepairRemaining != RepairPoolInitial {
-		t.Fatalf("repair pool: expected %d got %d", RepairPoolInitial, p.RepairRemaining)
+	if p.PermanentFundRemaining != PermanentFundPoolInitial {
+		t.Fatalf("permanent fund: expected %d got %d", PermanentFundPoolInitial, p.PermanentFundRemaining)
 	}
 	if p.FoundationRemaining != FoundationPoolInitial {
 		t.Fatalf("foundation pool: expected %d got %d", FoundationPoolInitial, p.FoundationRemaining)
@@ -69,11 +69,11 @@ func TestPayFromPool(t *testing.T) {
 		t.Fatal("expected pay to fail when pool insufficient")
 	}
 
-	if !p.PayFromRepairPool(50) {
-		t.Fatal("expected repair pay to succeed")
+	if !p.PayFromPermanentFund(50) {
+		t.Fatal("expected permanent fund pay to succeed")
 	}
-	if p.RepairRemaining != RepairPoolInitial-50 {
-		t.Fatalf("repair pool: expected %d got %d", RepairPoolInitial-50, p.RepairRemaining)
+	if p.PermanentFundRemaining != PermanentFundPoolInitial-50 {
+		t.Fatalf("permanent fund: expected %d got %d", PermanentFundPoolInitial-50, p.PermanentFundRemaining)
 	}
 }
 
@@ -82,7 +82,7 @@ func TestReleaseEpochDepletesPool(t *testing.T) {
 		StorageRemaining:    10,
 		RetrievalRemaining:  10,
 		ValidatorRemaining:  10,
-		RepairRemaining:     RepairPoolInitial,
+		PermanentFundRemaining: PermanentFundPoolInitial,
 		FoundationRemaining: 10,
 	}
 	s, r, v, f := p.ReleaseEpochRewards(3, 20, 2, 1)

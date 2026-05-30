@@ -172,16 +172,16 @@ func TestSubmitProofRewardIsCappedByLockedStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Reward != 9 {
-		t.Fatalf("expected full reward 9 with storage pool subsidy, got %d", resp.Reward)
+	if resp.Reward != 4 {
+		t.Fatalf("expected reward capped at user escrow 4 (no pool fallback for finite intents), got %d", resp.Reward)
 	}
 	if user := store.accountLocked("alice"); user.LockedStorage != 0 {
 		t.Fatalf("expected user locked storage 0, got %d", user.LockedStorage)
 	}
 	if miner := store.accountLocked(minerAddress); miner.Balance != 0 {
 		t.Fatalf("expected miner balance 0 before vesting release, got %d", miner.Balance)
-	} else if miner.PendingMiningRewards != 9 {
-		t.Fatalf("expected miner pending mining rewards 9, got %d", miner.PendingMiningRewards)
+	} else if miner.PendingMiningRewards != 4 {
+		t.Fatalf("expected miner pending mining rewards 4, got %d", miner.PendingMiningRewards)
 	}
 }
 

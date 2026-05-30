@@ -86,6 +86,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /miners", s.registerMiner)
 	mux.HandleFunc("POST /miners/deregister", s.deregisterMiner)
 	mux.HandleFunc("POST /miners/claim-rewards", s.claimMiningRewards)
+	mux.HandleFunc("GET /miners/{address}/shards", s.getMinerShards)
 	mux.HandleFunc("GET /miners/", s.getMinerStats)
 	mux.HandleFunc("POST /validators", s.registerValidator)
 	mux.HandleFunc("GET /validators", s.listValidators)
@@ -618,6 +619,12 @@ func (s *Server) getMinerStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) getMinerShards(w http.ResponseWriter, r *http.Request) {
+	address := r.PathValue("address")
+	resp := s.store.MinerShards(address)
 	writeJSON(w, http.StatusOK, resp)
 }
 

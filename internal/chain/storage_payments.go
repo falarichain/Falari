@@ -7,8 +7,10 @@ import (
 )
 
 // payableStorageRewardLocked calculates the maximum reward payable for a
-// storage proof challenge, taking into account user escrow, repair-pool
-// subsidy (for depleted permanent funds), and the storage mining pool.
+// storage proof challenge, taking into account user escrow and permanent-fund
+// pool subsidy (for permanent intents past the takeover time).
+// Finite intents are limited to user escrow only — the global storage mining
+// pool is NOT used to cover user payment shortfalls.
 func (s *Store) payableStorageRewardLocked(challenge wire.StorageChallenge) uint64 {
 	if challenge.Reward == 0 {
 		return 0
@@ -37,23 +39,19 @@ func (s *Store) payableStorageRewardLocked(challenge wire.StorageChallenge) uint
 	if feeAvailable >= reward {
 		return reward
 	}
-	shortfall := reward - feeAvailable
-	// For permanent intents with depleted fund, add repair pool subsidy.
-	subsidy := uint64(0)
+	// For permanent intents, add platform-level permanent fund pool subsidy (100%)
+	// if the takeover time has elapsed.
 	if isPermanentIntent(intent) {
-		subsidy = s.repairPoolSubsidyCapLocked(intent, shortfall)
-		shortfall -= subsidy
-		if shortfall == 0 {
-			return reward
+		shortfall := reward - feeAvailable
+		subsidy := s.permanentFundSubsidyCapLocked(intent, shortfall)
+		covered := saturatingAdd(feeAvailable, subsidy)
+		if covered < reward {
+			return covered
 		}
+		return reward
 	}
-	s.initRewardPoolsLocked()
-	poolAvailable := s.data.RewardPools.StorageRemaining
-	covered := saturatingAdd(feeAvailable, saturatingAdd(subsidy, poolAvailable))
-	if covered < reward {
-		return covered
-	}
-	return reward
+	// Finite intents: only user escrow, no pool fallback.
+	return feeAvailable
 }
 
 func (s *Store) payStorageRewardLocked(challenge wire.StorageChallenge, minerAddress string, reward uint64) {
@@ -77,10 +75,10 @@ func (s *Store) payStorageRewardLocked(challenge wire.StorageChallenge, minerAdd
 			}
 			remainingReward -= paidFromFees
 		}
-		// Repair pool subsidy: when permanent fund is depleted, the repair pool
-		// covers a configurable fraction of the shortfall.
+		// Permanent fund pool subsidy: when the takeover time has elapsed,
+		// the platform-level permanent fund pool covers 100% of the shortfall.
 		if isPermanentIntent(intent) && remainingReward > 0 {
-			subsidy := s.payRepairPoolSubsidyLocked(intent, minerAddress, remainingReward, now)
+			subsidy := s.payPermanentFundSubsidyLocked(intent, minerAddress, remainingReward, now)
 			if subsidy > 0 {
 				s.vestMiningRewardLocked(minerAddress, subsidy, miningRewardSourceRepairPoolSubsidy, now)
 				if subsidy >= remainingReward {
@@ -89,9 +87,7 @@ func (s *Store) payStorageRewardLocked(challenge wire.StorageChallenge, minerAdd
 				remainingReward -= subsidy
 			}
 		}
-	}
-	if s.payStorageRewardFromPoolLocked(minerAddress, remainingReward) {
-		s.vestMiningRewardLocked(minerAddress, remainingReward, miningRewardSourceStoragePool, now)
+		// Finite intents do not fall back to any pool.
 	}
 }
 
@@ -114,9 +110,9 @@ func (s *Store) payRepairRewardLocked(intent *Intent, minerAddress string, rewar
 		}
 		remainingReward -= paidFromFees
 	}
-	// Repair pool subsidy for depleted permanent funds.
+	// Permanent fund pool subsidy for depleted permanent funds (100% coverage).
 	if isPermanentIntent(intent) && remainingReward > 0 {
-		subsidy := s.payRepairPoolSubsidyLocked(intent, minerAddress, remainingReward, now)
+		subsidy := s.payPermanentFundSubsidyLocked(intent, minerAddress, remainingReward, now)
 		if subsidy > 0 {
 			s.vestMiningRewardLocked(minerAddress, subsidy, miningRewardSourceRepairPoolSubsidy, now)
 			if subsidy >= remainingReward {
@@ -124,77 +120,73 @@ func (s *Store) payRepairRewardLocked(intent *Intent, minerAddress string, rewar
 			}
 			remainingReward -= subsidy
 		}
+		// Permanent intents do not fall back to any other pool.
+		return
 	}
-	if s.payRepairRewardFromPoolLocked(minerAddress, remainingReward) {
-		s.vestMiningRewardLocked(minerAddress, remainingReward, miningRewardSourceRepair, now)
-	}
+	// Finite intents: only user escrow, no pool fallback.
 }
 
-// repairPoolSubsidyCapLocked calculates the maximum repair pool subsidy for a
-// given shortfall without actually paying. Used by payableStorageRewardLocked.
-func (s *Store) repairPoolSubsidyCapLocked(intent *Intent, shortfall uint64) uint64 {
+// permanentFundSubsidyCapLocked calculates the maximum permanent fund pool
+// subsidy for a given shortfall without actually paying. The pool covers 100%
+// of the shortfall when the fund's age exceeds the takeover time (default 50
+// years). Used by payableStorageRewardLocked.
+func (s *Store) permanentFundSubsidyCapLocked(intent *Intent, shortfall uint64) uint64 {
 	if intent == nil || shortfall == 0 || !isPermanentIntent(intent) {
 		return 0
 	}
 	params := s.miningParamsLocked()
-	if params.RepairPoolTakeoverBPS == 0 || params.RepairPoolSubsidyBPS == 0 {
+	if params.PermanentFundTakeoverSeconds <= 0 {
 		return 0
 	}
 	fund := s.ensurePermanentFundLocked(intent, 0)
 	if fund.Closed {
 		return 0
 	}
-	// Ratio-based takeover: trigger when current daily rate drops below
-	// InitialDailyRate * RepairPoolTakeoverBPS / 10000.
-	threshold := fund.InitialDailyRate * params.RepairPoolTakeoverBPS / 10000
-	if threshold == 0 {
-		threshold = 1
-	}
-	if fund.SustainableDailyRate >= threshold {
+	// Time-based takeover: trigger when fund age exceeds PermanentFundTakeoverSeconds.
+	fundAge := time.Now().Unix() - fund.CreatedAtUnix
+	if fundAge < params.PermanentFundTakeoverSeconds {
 		return 0
 	}
 	s.initRewardPoolsLocked()
-	subsidy := shortfall * params.RepairPoolSubsidyBPS / 10000
-	if subsidy > s.data.RewardPools.RepairRemaining {
-		subsidy = s.data.RewardPools.RepairRemaining
+	// 100% subsidy: cover the entire shortfall.
+	subsidy := shortfall
+	if subsidy > s.data.RewardPools.PermanentFundRemaining {
+		subsidy = s.data.RewardPools.PermanentFundRemaining
 	}
 	return subsidy
 }
 
-// payRepairPoolSubsidyLocked deducts from the repair pool to subsidize miner
-// payments when a permanent storage fund's daily rate drops below the takeover
-// threshold (a configurable fraction of the initial rate). Returns the amount
-// actually paid.
-func (s *Store) payRepairPoolSubsidyLocked(intent *Intent, minerAddress string, shortfall uint64, now int64) uint64 {
+// payPermanentFundSubsidyLocked deducts from the platform-level permanent fund
+// pool to subsidize miner payments when the fund's age exceeds the takeover
+// time (default 50 years). The pool covers 100% of the shortfall.
+// Returns the amount actually paid.
+func (s *Store) payPermanentFundSubsidyLocked(intent *Intent, minerAddress string, shortfall uint64, now int64) uint64 {
 	if intent == nil || shortfall == 0 || !isPermanentIntent(intent) {
 		return 0
 	}
 	params := s.miningParamsLocked()
-	if params.RepairPoolTakeoverBPS == 0 || params.RepairPoolSubsidyBPS == 0 {
+	if params.PermanentFundTakeoverSeconds <= 0 {
 		return 0
 	}
 	fund := s.ensurePermanentFundLocked(intent, now)
 	if fund.Closed {
 		return 0
 	}
-	// Ratio-based takeover: trigger when current daily rate drops below
-	// InitialDailyRate * RepairPoolTakeoverBPS / 10000.
-	threshold := fund.InitialDailyRate * params.RepairPoolTakeoverBPS / 10000
-	if threshold == 0 {
-		threshold = 1
-	}
-	if fund.SustainableDailyRate >= threshold {
+	// Time-based takeover: trigger when fund age exceeds PermanentFundTakeoverSeconds.
+	fundAge := now - fund.CreatedAtUnix
+	if fundAge < params.PermanentFundTakeoverSeconds {
 		return 0
 	}
 	s.initRewardPoolsLocked()
-	subsidy := shortfall * params.RepairPoolSubsidyBPS / 10000
-	if subsidy > s.data.RewardPools.RepairRemaining {
-		subsidy = s.data.RewardPools.RepairRemaining
+	// 100% subsidy: cover the entire shortfall.
+	subsidy := shortfall
+	if subsidy > s.data.RewardPools.PermanentFundRemaining {
+		subsidy = s.data.RewardPools.PermanentFundRemaining
 	}
 	if subsidy == 0 {
 		return 0
 	}
-	s.data.RewardPools.PayFromRepairPool(subsidy)
+	s.data.RewardPools.PayFromPermanentFund(subsidy)
 	s.data.StorageFeePool.RepairPoolTransferred = saturatingAdd(s.data.StorageFeePool.RepairPoolTransferred, subsidy)
 	return subsidy
 }

@@ -42,6 +42,7 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 			s.checkAndLogDealHealths()
 
 			s.mu.Lock()
+			s.expireInactiveMinersLocked()
 			s.expireMinerBonusesLocked()
 			s.finalizeExitingValidatorsLocked()
 			s.finalizeExitingMinersLocked()

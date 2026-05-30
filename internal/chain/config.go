@@ -35,17 +35,11 @@ type MiningParams struct {
 	RetrievalRewardPerMiB       uint64 `json:"retrieval_reward_per_mib"`
 	MaxRetrievalRewardPerWindow uint64 `json:"max_retrieval_reward_per_window"`
 
-	// ── Repair ──
-	RepairRewardPerShard uint64 `json:"repair_reward_per_shard"`
-
-	// ── Repair pool takeover (subsidizes payments when permanent fund is depleted) ──
-	// RepairPoolTakeoverBPS: when a permanent fund's SustainableDailyRate drops
-	// below InitialDailyRate * RepairPoolTakeoverBPS / 10000, the repair pool
-	// takes over. Default 1000 = 10% of initial rate.
-	RepairPoolTakeoverBPS uint64 `json:"repair_pool_takeover_bps"`
-	// RepairPoolSubsidyBPS: fraction of shortfall paid by repair pool (basis points).
-	// Default 8000 = 80%.
-	RepairPoolSubsidyBPS uint64 `json:"repair_pool_subsidy_bps"`
+	// ── Permanent fund takeover (subsidizes payments when permanent fund is depleted) ──
+	// PermanentFundTakeoverSeconds: the platform-level permanent fund pool begins
+	// subsidizing miner payments only after this duration has elapsed since the
+	// fund was created. Default: 50 years (matching the permanent storage billing period).
+	PermanentFundTakeoverSeconds int64 `json:"repair_pool_takeover_seconds"`
 
 	// ── Penalties / thresholds ──
 	MinerDegradeThreshold  uint64 `json:"miner_degrade_threshold"`
@@ -105,6 +99,24 @@ type MiningParams struct {
 	// BonusDeadlineSeconds: maximum time after registration to meet release conditions.
 	// Default 7_776_000 (90 days). Set to 0 to disable deadline.
 	BonusDeadlineSeconds uint64 `json:"bonus_deadline_seconds,omitempty"`
+	// ActivationWindowSeconds: maximum time after registration to submit the
+	// first valid storage proof. Miners who fail to do so are considered
+	// inactive: their bonus is cancelled and they enter the exit flow.
+	// Default 604_800 (7 days). Set to 0 to disable.
+	ActivationWindowSeconds uint64 `json:"activation_window_seconds,omitempty"`
+
+	// ── Repair delay ──
+	// RepairDelayEpochs: number of consecutive missed epochs before a repair task
+	// is created for a missing shard. Default 3.
+	RepairDelayEpochs uint64 `json:"repair_delay_epochs,omitempty"`
+
+	// ── Miner registration requirements ──
+	// MinCapacityBytes: minimum disk capacity a miner must declare to register.
+	// Default 200 GiB (200 * 1024^3). Set to 0 to disable.
+	MinCapacityBytes uint64 `json:"min_capacity_bytes,omitempty"`
+	// StakePerTiB: required locked stake (bonus + stake) per TiB of declared
+	// capacity. Default 1000 * TokenUnit (1000 tokens/TiB). Set to 0 to disable.
+	StakePerTiB uint64 `json:"stake_per_tib,omitempty"`
 }
 
 // DefaultMiningParams returns the factory-default mining parameters.
@@ -122,10 +134,8 @@ func DefaultMiningParams() MiningParams {
 		DecentralizationWeightBPS:   1000,
 		RetrievalRewardPerMiB:       0,
 		MaxRetrievalRewardPerWindow: 0,
-		RepairRewardPerShard:        100_000_000,
-		RepairPoolTakeoverBPS:       1000,
-		RepairPoolSubsidyBPS:        8000,
-		MinerDegradeThreshold:       3,
+		PermanentFundTakeoverSeconds: 50 * 365 * 24 * 60 * 60, // 50 years
+		MinerDegradeThreshold:    24,
 		StorageProofSamples:         16,
 		ValidatorCommissionBPS:      1000,
 		AvailabilityWindowSize:      7200,
@@ -146,6 +156,10 @@ func DefaultMiningParams() MiningParams {
 		MinBonusRetrievalCount:      100,
 		MaxBonusAddresses:           200_000,
 		BonusDeadlineSeconds:        90 * 24 * 60 * 60,
+		ActivationWindowSeconds:     7 * 24 * 60 * 60,
+		RepairDelayEpochs:           3,
+		MinCapacityBytes:            200 * 1024 * 1024 * 1024,
+		StakePerTiB:                 1000 * reward.TokenUnit,
 	}
 }
 
@@ -158,6 +172,18 @@ func (s *Store) miningParamsLocked() *MiningParams {
 		s.data.MiningParams = &defaults
 	}
 	return s.data.MiningParams
+}
+
+// RequiredStakeForCapacity calculates the minimum locked stake (LockedBonus +
+// LockedStake) required for a miner to register with the given capacity.
+// Uses ceiling division: sub-TiB fractions are charged as 1 TiB.
+func RequiredStakeForCapacity(capacityBytes uint64, stakePerTiB uint64) uint64 {
+	const TiB = uint64(1) << 40
+	if capacityBytes == 0 || stakePerTiB == 0 {
+		return 0
+	}
+	tibCount := (capacityBytes + TiB - 1) / TiB
+	return tibCount * stakePerTiB
 }
 
 // Governance parameter bounds — hard safety limits that cannot be exceeded

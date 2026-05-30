@@ -196,25 +196,6 @@ func (s *Store) spendPermanentFundLocked(intent *Intent, amount uint64, now int6
 	if fund.Closed {
 		return 0
 	}
-	if fund.SustainableDailyRate == 0 {
-		fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
-	}
-	lastPayout := fund.LastPayoutUnix
-	if lastPayout == 0 {
-		lastPayout = firstNonZero(fund.CreatedAtUnix, intent.CreatedAt, now)
-	}
-	elapsedDays := (now - lastPayout) / miningRewardVestingDaySeconds
-	if elapsedDays <= 0 {
-		fund.UpdatedAtUnix = now
-		s.data.PermanentStorageFunds[intent.IntentID] = fund
-		intent.PermanentFundBalance = fund.Balance
-		intent.PermanentFundPaid = fund.Paid
-		return 0
-	}
-	spendLimit := fund.SustainableDailyRate * uint64(elapsedDays)
-	if amount > spendLimit {
-		amount = spendLimit
-	}
 	if amount > fund.Balance {
 		amount = fund.Balance
 	}
@@ -231,6 +212,8 @@ func (s *Store) spendPermanentFundLocked(intent *Intent, amount uint64, now int6
 	fund.Paid = saturatingAdd(fund.Paid, amount)
 	fund.LastPayoutUnix = now
 	fund.UpdatedAtUnix = now
+	// Update SustainableDailyRate for informational/tracking purposes.
+	fund.SustainableDailyRate = permanentFundDailyRate(fund.Balance)
 	s.data.PermanentStorageFunds[intent.IntentID] = fund
 	intent.PermanentFundBalance = fund.Balance
 	intent.PermanentFundPaid = fund.Paid

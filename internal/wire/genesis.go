@@ -32,7 +32,7 @@ type GenesisRewardPools struct {
 	StoragePoolRemaining    uint64 `json:"storage_pool_remaining"`
 	RetrievalPoolRemaining  uint64 `json:"retrieval_pool_remaining"`
 	ValidatorPoolRemaining  uint64 `json:"validator_pool_remaining"`
-	RepairPoolRemaining     uint64 `json:"repair_pool_remaining"`
+	PermanentFundRemaining uint64 `json:"repair_pool_remaining"`
 	FoundationPoolRemaining uint64 `json:"foundation_pool_remaining"`
 }
 

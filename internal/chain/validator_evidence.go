@@ -59,7 +59,7 @@ func (s *Store) applyValidatorEvidenceLocked(evidence wire.ValidatorEvidence) (b
 	}
 	account.LockedStake -= slash
 	s.data.Accounts[account.Address] = account
-	s.addSlashedToRepairPoolLocked(slash)
+	s.addSlashedToPermanentFundLocked(slash)
 
 	validator := s.validatorLocked(ownerAddr)
 	validator.Stake = account.LockedStake

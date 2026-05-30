@@ -46,7 +46,7 @@ func TestFiniteDealEscrowAccruesByServiceTime(t *testing.T) {
 	}
 }
 
-func TestPermanentFundPaysOnlySustainableDailyRate(t *testing.T) {
+func TestPermanentFundPaysFullRequestedAmount(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -70,14 +70,14 @@ func TestPermanentFundPaysOnlySustainableDailyRate(t *testing.T) {
 	store.createDealEscrowLocked(intent, now)
 
 	paid := store.spendPermanentFundLocked(intent, 1000, now+miningRewardVestingDaySeconds)
-	if paid != 2 {
-		t.Fatalf("expected one day sustainable payment of 2, got %d", paid)
+	if paid != 1000 {
+		t.Fatalf("expected permanent fund to pay full requested amount 1000, got %d", paid)
 	}
 	fund := store.data.PermanentStorageFunds[intent.IntentID]
-	if fund.Balance != 36498 || fund.Paid != 2 {
+	if fund.Balance != 35500 || fund.Paid != 1000 {
 		t.Fatalf("unexpected permanent fund after payment: %+v", fund)
 	}
-	if account := store.accountLocked("alice"); account.LockedStorage != 36498 {
-		t.Fatalf("expected locked storage 36498 after payment, got %d", account.LockedStorage)
+	if account := store.accountLocked("alice"); account.LockedStorage != 35500 {
+		t.Fatalf("expected locked storage 35500 after payment, got %d", account.LockedStorage)
 	}
 }

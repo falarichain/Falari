@@ -9,7 +9,6 @@ import (
 )
 
 const storageQuoteBasePeriodDays = int64(300)
-const storageQuoteYearDays = int64(360)
 const storageQuoteMiB = uint64(1 << 20)
 
 func (s *Store) StorageQuote(req wire.StorageQuoteRequest) (wire.StorageQuoteResponse, error) {
@@ -55,14 +54,14 @@ func (s *Store) storageQuoteLocked(req wire.StorageQuoteRequest) (wire.StorageQu
 	if err != nil {
 		return wire.StorageQuoteResponse{}, err
 	}
-	tieredFee, err := quoteTieredFee(redundantBytes, duration, pricing.BasePrice)
+	storageFee, err := computeStorageFee(redundantBytes, duration, pricing.BasePrice)
 	if err != nil {
 		return wire.StorageQuoteResponse{}, err
 	}
 	activeCapacity, activeUsed := s.activeStorageCapacityLocked()
 	utilizationBPS := utilizationBPS(activeUsed, activeCapacity)
 	multiplier := storageUtilizationMultiplier(utilizationBPS)
-	requiredFee := applyMultiplierAndMinimum(tieredFee, multiplier, pricing.MinimumFee)
+	requiredFee := applyMultiplierAndMinimum(storageFee, multiplier, pricing.MinimumFee)
 	return wire.StorageQuoteResponse{
 		Pricing:               pricing,
 		FileSize:              req.FileSize,
@@ -114,12 +113,11 @@ func totalStorageMiBDays(redundantBytes uint64, duration int64) (uint64, error) 
 	return result, nil
 }
 
-// quoteTieredFee computes the storage fee using yearly tiered pricing.
+// computeStorageFee calculates the storage fee using flat-rate pricing.
 //
 // Base rate: basePrice tokens per MiB per 300 days.
-// Each year y (1-indexed) gets a discount of min((y-1)*10, 90) percent,
-// applied only to that year's portion of the storage.
-func quoteTieredFee(redundantBytes uint64, duration int64, basePrice uint64) (uint64, error) {
+// fee = ceil(redundantMiB × basePrice × totalDays / basePeriodDays)
+func computeStorageFee(redundantBytes uint64, duration int64, basePrice uint64) (uint64, error) {
 	if duration <= 0 {
 		return 0, errors.New("storage duration must be positive")
 	}
@@ -135,43 +133,19 @@ func quoteTieredFee(redundantBytes uint64, duration int64, basePrice uint64) (ui
 		redundantMiB = 1
 	}
 
-	var totalFee uint64
-	var remaining int64 = totalDays
-	var yearNum uint64 = 1
-
-	for remaining > 0 {
-		daysThisYear := storageQuoteYearDays
-		if remaining < daysThisYear {
-			daysThisYear = remaining
-		}
-		// Discount: each year after the first gets 10% more discount,
-		// capped at 90% total discount.
-		discountBPS := (yearNum - 1) * 1000
-		if discountBPS > 9000 {
-			discountBPS = 9000
-		}
-		priceBPS := 10_000 - discountBPS
-
-		// year_fee = ceil(redundantMiB * basePrice * daysThisYear * priceBPS / (basePeriod * 10000))
-		num := new(big.Int).SetUint64(redundantMiB)
-		num.Mul(num, new(big.Int).SetUint64(basePrice))
-		num.Mul(num, new(big.Int).SetInt64(daysThisYear))
-		num.Mul(num, new(big.Int).SetUint64(priceBPS))
-		den := new(big.Int).SetInt64(storageQuoteBasePeriodDays)
-		den.Mul(den, big.NewInt(10_000))
-		yearFee := ceilBigDiv(num, den)
-		if !yearFee.IsUint64() {
-			return 0, errors.New("storage fee overflows uint64")
-		}
-		totalFee = saturatingAdd(totalFee, yearFee.Uint64())
-
-		remaining -= daysThisYear
-		yearNum++
+	num := new(big.Int).SetUint64(redundantMiB)
+	num.Mul(num, new(big.Int).SetUint64(basePrice))
+	num.Mul(num, new(big.Int).SetInt64(totalDays))
+	den := new(big.Int).SetInt64(storageQuoteBasePeriodDays)
+	fee := ceilBigDiv(num, den)
+	if !fee.IsUint64() {
+		return 0, errors.New("storage fee overflows uint64")
 	}
-	if totalFee == 0 {
-		totalFee = 1
+	result := fee.Uint64()
+	if result == 0 {
+		result = 1
 	}
-	return totalFee, nil
+	return result, nil
 }
 
 // applyMultiplierAndMinimum applies the utilization multiplier and enforces

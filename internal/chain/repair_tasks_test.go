@@ -162,8 +162,9 @@ func TestRepairRewardRequiresForcedProof(t *testing.T) {
 		t.Fatalf("expected repair completed after proof, got %+v", completed)
 	}
 	stats := store.data.Miners[miner.Address]
-	if stats.RepairRewards != store.miningParamsLocked().RepairRewardPerShard {
-		t.Fatalf("expected repair reward after proof, got %+v", stats)
+	expectedReward := store.computeRepairRewardLocked(task.Assignment.ShardSize)
+	if stats.RepairRewards != expectedReward {
+		t.Fatalf("expected repair reward %d after proof, got %+v", expectedReward, stats)
 	}
 }
 
@@ -191,6 +192,8 @@ func TestStartEpochDefaultRewardPerProofIsOneGF(t *testing.T) {
 
 func TestFinalizeEpochCreatesRepairTaskForMissedProof(t *testing.T) {
 	store, _, resp, _ := setupCommittedAssignedIntent(t)
+	// With repair delay = 1 epoch, a single missed proof triggers immediate repair.
+	store.data.MiningParams.RepairDelayEpochs = 1
 	intent := store.data.Intents[resp.IntentID]
 	intent.Status = wire.StatusFinalized
 	intent.DealID = "deal_auto_repair"

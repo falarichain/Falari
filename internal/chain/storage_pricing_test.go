@@ -19,9 +19,9 @@ func TestStorageQuoteUsesErasureDurationAndUtilization(t *testing.T) {
 		Status:        "active",
 	}
 
-	// 1 GiB file, 2+1 erasure → 1536 MiB redundant, 30 days (year 1, full price)
-	// With basePrice=10^7 (0.01 Token/MiB/30天):
-	// tieredFee = 1536 * 10^7 * 30 * 10000 / (300 * 10000) = 1_536_000_000
+	// 1 GiB file, 2+1 erasure → 1536 MiB redundant, 30 days
+	// Fee is based on redundant size (1536 MiB):
+	// storageFee = 1536 * 10^7 * 30 / 300 = 1_536_000_000
 	// utilization 70%+ → multiplier 1.5x → fee = 1_536_000_000 * 15000 / 10000 = 2_304_000_000
 	quote, err := store.StorageQuote(wire.StorageQuoteRequest{
 		FileSize: 1 << 30,
@@ -45,17 +45,14 @@ func TestStorageQuoteUsesErasureDurationAndUtilization(t *testing.T) {
 	}
 }
 
-func TestStorageQuoteTieredDiscount(t *testing.T) {
+func TestStorageQuoteFlatRate3Years(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 1000 MiB file, 1+0 erasure, 3 years (1080 days)
-	// Year 1 (360d): 1000 * 10^7 * 360 * 10000 / (300 * 10000) = 120 * 10^8
-	// Year 2 (360d): 1000 * 10^7 * 360 * 9000  / (300 * 10000) = 108 * 10^8
-	// Year 3 (360d): 1000 * 10^7 * 360 * 8000  / (300 * 10000) =  96 * 10^8
-	// Total: 324 * 10^8
+	// Flat rate: 1000 * 10^7 * 1080 / 300 = 36 * 10^9 = 360 tokens
 	quote, err := store.StorageQuote(wire.StorageQuoteRequest{
 		FileSize: 1000 * (1 << 20),
 		Erasure:  wire.ErasurePolicy{DataShards: 1, ParityShards: 0},
@@ -64,22 +61,19 @@ func TestStorageQuoteTieredDiscount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if quote.RequiredFee != gfTokens(324) {
-		t.Fatalf("expected tiered fee 324, got %d", quote.RequiredFee)
+	if quote.RequiredFee != gfTokens(360) {
+		t.Fatalf("expected flat-rate fee 360 tokens, got %d", quote.RequiredFee)
 	}
 }
 
-func TestStorageQuoteTieredDiscountMaxCap(t *testing.T) {
+func TestStorageQuoteFlatRate10Years(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 1000 MiB file, 1+0 erasure, 10 years (3600 days)
-	// Year 1:  120, Year 2:  108, Year 3:  96, Year 4:  84
-	// Year 5:   72, Year 6:   60, Year 7:  48, Year 8:  36
-	// Year 9:   24, Year 10:  12 (90% discount cap)
-	// Total: 660 * 10^8
+	// Flat rate: 1000 * 10^7 * 3600 / 300 = 120 * 10^9 = 1200 tokens
 	quote, err := store.StorageQuote(wire.StorageQuoteRequest{
 		FileSize: 1000 * (1 << 20),
 		Erasure:  wire.ErasurePolicy{DataShards: 1, ParityShards: 0},
@@ -88,8 +82,47 @@ func TestStorageQuoteTieredDiscountMaxCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if quote.RequiredFee != gfTokens(660) {
-		t.Fatalf("expected tiered fee 660, got %d", quote.RequiredFee)
+	if quote.RequiredFee != gfTokens(1200) {
+		t.Fatalf("expected flat-rate fee 1200 tokens, got %d", quote.RequiredFee)
+	}
+}
+
+func TestStorageQuotePermanentFlatRate(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1000 MiB file, 1+0 erasure, permanent storage (Duration=0 → 50 years)
+	// Flat rate: redundantMiB × basePrice × totalDays / basePeriodDays
+	//
+	// 50 years = 50*365 = 18250 days
+	// fee = ceil(1000 * 10^7 * 18250 / 300) = 608_333_333_334
+	quote, err := store.StorageQuote(wire.StorageQuoteRequest{
+		FileSize: 1000 * (1 << 20),
+		Erasure:  wire.ErasurePolicy{DataShards: 1, ParityShards: 0},
+		Policy:   wire.StoragePolicy{Duration: 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFee := uint64(608_333_333_334)
+	if quote.RequiredFee != expectedFee {
+		t.Fatalf("expected permanent flat-rate fee %d, got %d", expectedFee, quote.RequiredFee)
+	}
+
+	// Explicit 50-year duration should produce the same fee as Duration=0.
+	explicitQuote, err := store.StorageQuote(wire.StorageQuoteRequest{
+		FileSize: 1000 * (1 << 20),
+		Erasure:  wire.ErasurePolicy{DataShards: 1, ParityShards: 0},
+		Policy:   wire.StoragePolicy{Duration: 18250 * 24 * 60 * 60},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitQuote.RequiredFee != quote.RequiredFee {
+		t.Fatalf("explicit 50-year fee (%d) should match permanent fee (%d)",
+			explicitQuote.RequiredFee, quote.RequiredFee)
 	}
 }
 

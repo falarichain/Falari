@@ -624,6 +624,11 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 		return errors.New("replay miner registration: miner is jailed")
 	}
 
+	params := s.miningParamsLocked()
+	if params.MinCapacityBytes > 0 && req.CapacityBytes < params.MinCapacityBytes {
+		return errors.New("replay miner registration: capacity below minimum")
+	}
+
 	account := s.accountLocked(req.MinerAddress)
 	if req.Stake > existing.Stake {
 		additionalStake := req.Stake - existing.Stake
@@ -635,7 +640,6 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 	}
 	// One-time registration bonus (with cap + pool accounting).
 	if !existing.BonusReleased && !existing.BonusExpired {
-		params := s.miningParamsLocked()
 		if params.RegistrationBonusAmount > 0 {
 			capOK := params.MaxBonusAddresses == 0 || s.data.BonusGrantedCount < params.MaxBonusAddresses
 			if capOK {
@@ -646,6 +650,14 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 					s.data.BonusGrantedCount++
 				}
 			}
+		}
+	}
+	// Stake requirement: LockedBonus + LockedStake must cover capacity-based stake.
+	if params.StakePerTiB > 0 {
+		requiredStake := RequiredStakeForCapacity(req.CapacityBytes, params.StakePerTiB)
+		totalLocked := account.LockedBonus + account.LockedStake
+		if totalLocked < requiredStake {
+			return errors.New("replay miner registration: insufficient stake for declared capacity")
 		}
 	}
 	existing.MinerAddress = req.MinerAddress
@@ -1585,6 +1597,7 @@ func (s *Store) applySubmitProofLocked(payload submitProofTxPayload) error {
 		stats := s.minerStatsLocked(proof.MinerAddress)
 		stats.ProofSuccess++
 		stats.ConsecutiveFailures = 0
+		s.clearPendingShardRepairsForMinerLocked(proof.MinerAddress)
 		stats.Rewards = saturatingAdd(stats.Rewards, reward)
 		stats.StorageRewards = saturatingAdd(stats.StorageRewards, reward)
 		if stats.Status == wire.MinerStatusDegraded {
@@ -1720,7 +1733,7 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 		stats.Stake = account.LockedStake
 		stats.Slashed += actualSlash
 		totalSlashed += actualSlash
-		s.addSlashedToRepairPoolLocked(actualSlash)
+		s.addSlashedToPermanentFundLocked(actualSlash)
 
 		// Auto-exit: bonus and stake both depleted.
 		if account.LockedBonus == 0 && account.LockedStake == 0 && actualSlash > 0 {
@@ -1733,7 +1746,7 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 		}
 		s.data.Accounts[account.Address] = account
 		s.data.Miners[challenge.MinerAddress] = stats
-		if task, ok := s.repairTaskForMissedChallengeLocked(challenge); ok {
+		if task, created := s.trackMissedProofForRepairLocked(challenge, epoch.EpochRound); created {
 			if err := s.applyRepairTasksLocked([]wire.RepairTask{task}); err == nil {
 				repairTasks = append(repairTasks, task)
 			}

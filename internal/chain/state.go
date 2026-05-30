@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,6 +136,10 @@ type State struct {
 	BridgeInbounds         map[string]*wire.BridgeInbound         `json:"bridge_inbounds,omitempty"`
 	BridgeConsumedMessages map[string]*wire.BridgeConsumedMessage `json:"bridge_consumed_messages,omitempty"`
 	BridgeOutboundNonce    uint64                                 `json:"bridge_outbound_nonce,omitempty"`
+
+	// Pending shard repairs: tracks missed proofs that haven't yet reached the
+	// repair delay threshold. Key format: intentID:segmentID:shardIndex:minerAddress.
+	PendingShardRepairs map[string]wire.PendingShardRepair `json:"pending_shard_repairs,omitempty"`
 }
 
 type Store struct {
@@ -262,7 +267,7 @@ func newStateFromGenesis(doc wire.GenesisDoc) (State, error) {
 			StorageRemaining:    doc.RewardPools.StoragePoolRemaining,
 			RetrievalRemaining:  doc.RewardPools.RetrievalPoolRemaining,
 			ValidatorRemaining:  doc.RewardPools.ValidatorPoolRemaining,
-			RepairRemaining:     doc.RewardPools.RepairPoolRemaining,
+			PermanentFundRemaining: doc.RewardPools.PermanentFundRemaining,
 			FoundationRemaining: doc.RewardPools.FoundationPoolRemaining,
 		}
 	}
@@ -402,6 +407,7 @@ func newState() State {
 		BridgeOutbounds:        map[uint64]*wire.BridgeOutbound{},
 		BridgeInbounds:         map[string]*wire.BridgeInbound{},
 		BridgeConsumedMessages: map[string]*wire.BridgeConsumedMessage{},
+		PendingShardRepairs:    map[string]wire.PendingShardRepair{},
 		StorageRewardIndex:     "0",
 		StorageRewardRemainder: "0",
 		// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
@@ -486,6 +492,9 @@ func normalizeState(state *State) {
 	}
 	if state.RepairTasks == nil {
 		state.RepairTasks = map[string]wire.RepairTask{}
+	}
+	if state.PendingShardRepairs == nil {
+		state.PendingShardRepairs = map[string]wire.PendingShardRepair{}
 	}
 	if state.ProviderRecords == nil {
 		state.ProviderRecords = map[string]wire.StorageProviderRecord{}
@@ -1472,7 +1481,7 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.Fina
 		stats.Stake = account.LockedStake
 		stats.Slashed += actualSlash
 		totalSlashed += actualSlash
-		s.addSlashedToRepairPoolLocked(actualSlash)
+		s.addSlashedToPermanentFundLocked(actualSlash)
 
 		// Auto-exit: bonus and stake both depleted.
 		if account.LockedBonus == 0 && account.LockedStake == 0 && actualSlash > 0 {
@@ -1480,7 +1489,7 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.Fina
 			stats.ExitedAtUnix = time.Now().Add(7 * 24 * time.Hour).Unix()
 		}
 		s.data.Miners[challenge.MinerAddress] = stats
-		if task, ok := s.repairTaskForMissedChallengeLocked(challenge); ok {
+		if task, created := s.trackMissedProofForRepairLocked(challenge, epoch.EpochRound); created {
 			if err := s.applyRepairTasksLocked([]wire.RepairTask{task}); err == nil {
 				repairTasks = append(repairTasks, task)
 			}
@@ -1573,6 +1582,7 @@ func (s *Store) MinerStats(minerAddress string) (wire.MinerStats, error) {
 	minerAddress = wire.NormalizeAddress(minerAddress)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireInactiveMinersLocked()
 	s.expireMinerBonusesLocked()
 	s.finalizeExitingMinersLocked()
 	stats, ok := s.data.Miners[minerAddress]
@@ -1588,6 +1598,34 @@ func (s *Store) MinerStats(minerAddress string) (wire.MinerStats, error) {
 	account := s.accountLocked(minerAddress)
 	stats.LockedBonus = account.LockedBonus
 	return stats, nil
+}
+
+// MinerShards returns all shard hashes currently assigned to a miner
+// across all committed intent receipts.
+func (s *Store) MinerShards(minerAddress string) wire.MinerShardsResponse {
+	minerAddress = wire.NormalizeAddress(minerAddress)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[string]bool)
+	for _, intent := range s.data.Intents {
+		for _, segmentReceipts := range intent.Receipts {
+			for _, receipt := range segmentReceipts {
+				if receipt.MinerAddress == minerAddress && receipt.ShardHash != "" {
+					seen[receipt.ShardHash] = true
+				}
+			}
+		}
+	}
+	hashes := make([]string, 0, len(seen))
+	for h := range seen {
+		hashes = append(hashes, h)
+	}
+	sort.Strings(hashes)
+	return wire.MinerShardsResponse{
+		MinerAddress: minerAddress,
+		ShardHashes:  hashes,
+		ShardCount:   len(hashes),
+	}
 }
 
 func (s *Store) Account(address string) (wire.Account, error) {
@@ -1662,6 +1700,11 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	params := s.miningParamsLocked()
+	if params.MinCapacityBytes > 0 && req.CapacityBytes < params.MinCapacityBytes {
+		return wire.RegisterMinerResponse{}, errors.New("capacity below minimum")
+	}
+
 	// Verify chain_id, nonce, and signature — prevents replay of old registration signatures.
 	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
 		return wire.VerifyMinerRegistration(req)
@@ -1696,7 +1739,6 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 	}
 	// One-time registration bonus (with cap + pool accounting).
 	if !existing.BonusReleased && !existing.BonusExpired {
-		params := s.miningParamsLocked()
 		if params.RegistrationBonusAmount > 0 {
 			capOK := params.MaxBonusAddresses == 0 || s.data.BonusGrantedCount < params.MaxBonusAddresses
 			if capOK {
@@ -1707,6 +1749,14 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 					s.data.BonusGrantedCount++
 				}
 			}
+		}
+	}
+	// Stake requirement: LockedBonus + LockedStake must cover capacity-based stake.
+	if params.StakePerTiB > 0 {
+		requiredStake := RequiredStakeForCapacity(req.CapacityBytes, params.StakePerTiB)
+		totalLocked := account.LockedBonus + account.LockedStake
+		if totalLocked < requiredStake {
+			return wire.RegisterMinerResponse{}, errors.New("insufficient stake for declared capacity")
 		}
 	}
 	existing.MinerAddress = req.MinerAddress
@@ -2034,6 +2084,55 @@ func (s *Store) finalizeExitingMinersLocked() {
 	}
 }
 
+// expireInactiveMinersLocked cancels registration bonuses and initiates exit
+// for miners who failed to submit any valid storage proof within the activation
+// window. Called from the scheduler, Status, and MinerStats alongside the
+// other cleanup functions.
+func (s *Store) expireInactiveMinersLocked() {
+	params := s.miningParamsLocked()
+	if params.ActivationWindowSeconds == 0 {
+		return
+	}
+	now := time.Now().Unix()
+	for address, stats := range s.data.Miners {
+		// Only target active or degraded miners.
+		if stats.Status != wire.MinerStatusActive && stats.Status != wire.MinerStatusDegraded {
+			continue
+		}
+		// Miner has submitted at least one proof — activated.
+		if stats.ProofSuccess > 0 {
+			continue
+		}
+		// Already processed.
+		if stats.BonusExpired || stats.BonusReleased {
+			continue
+		}
+		if stats.RegisteredAtUnix <= 0 {
+			continue
+		}
+		// Activation window not yet passed.
+		if (now - stats.RegisteredAtUnix) <= int64(params.ActivationWindowSeconds) {
+			continue
+		}
+		// Cancel bonus and return to pool.
+		account := s.accountLocked(address)
+		if account.LockedBonus > 0 {
+			s.initRewardPoolsLocked()
+			s.data.RewardPools.StorageRemaining = saturatingAdd(
+				s.data.RewardPools.StorageRemaining, account.LockedBonus)
+			account.LockedBonus = 0
+			if s.data.BonusGrantedCount > 0 {
+				s.data.BonusGrantedCount--
+			}
+		}
+		stats.BonusExpired = true
+		stats.Status = wire.MinerStatusExiting
+		stats.ExitedAtUnix = now + wire.UnbondingPeriodSeconds
+		s.data.Accounts[address] = account
+		s.data.Miners[address] = stats
+	}
+}
+
 // expireMinerBonusesLocked batch-expires registration bonuses for miners whose
 // 90-day deadline has passed. This catches miners who stopped submitting proofs
 // before meeting the release conditions. Called from the scheduler, Status, and
@@ -2130,6 +2229,7 @@ func (s *Store) SubmitProof(req wire.SubmitProofRequest) (wire.SubmitProofRespon
 		reward = s.payableStorageRewardLocked(challenge)
 		stats.ProofSuccess++
 		stats.ConsecutiveFailures = 0
+		s.clearPendingShardRepairsForMinerLocked(req.Proof.MinerAddress)
 		stats.StorageRewards = saturatingAdd(stats.StorageRewards, reward)
 		stats.Rewards = saturatingAdd(stats.Rewards, reward)
 		if stats.Status == wire.MinerStatusDegraded {

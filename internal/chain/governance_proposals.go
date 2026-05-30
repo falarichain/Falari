@@ -163,9 +163,7 @@ func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, pro
 		TargetDecentralizationWeightBPS:   req.TargetDecentralizationWeightBPS,
 		TargetRetrievalRewardPerMiB:       req.TargetRetrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: req.TargetMaxRetrievalRewardPerWindow,
-		TargetRepairRewardPerShard:        req.TargetRepairRewardPerShard,
-		TargetRepairPoolTakeoverBPS:       req.TargetRepairPoolTakeoverBPS,
-		TargetRepairPoolSubsidyBPS:        req.TargetRepairPoolSubsidyBPS,
+		TargetPermanentFundTakeoverSeconds: req.TargetPermanentFundTakeoverSeconds,
 		TargetMinerDegradeThreshold:       req.TargetMinerDegradeThreshold,
 		TargetStorageProofSamples:         req.TargetStorageProofSamples,
 		TargetValidatorCommissionBPS:      req.TargetValidatorCommissionBPS,
@@ -559,9 +557,9 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.DecentralizationWeightBPS, proposal.TargetDecentralizationWeightBPS)
 	applyIfNonZero(&p.RetrievalRewardPerMiB, proposal.TargetRetrievalRewardPerMiB)
 	applyIfNonZero(&p.MaxRetrievalRewardPerWindow, proposal.TargetMaxRetrievalRewardPerWindow)
-	applyIfNonZero(&p.RepairRewardPerShard, proposal.TargetRepairRewardPerShard)
-	applyIfNonZero(&p.RepairPoolTakeoverBPS, proposal.TargetRepairPoolTakeoverBPS)
-	applyIfNonZero(&p.RepairPoolSubsidyBPS, proposal.TargetRepairPoolSubsidyBPS)
+	if proposal.TargetPermanentFundTakeoverSeconds > 0 {
+		p.PermanentFundTakeoverSeconds = proposal.TargetPermanentFundTakeoverSeconds
+	}
 	applyIfNonZero(&p.MinerDegradeThreshold, proposal.TargetMinerDegradeThreshold)
 	if proposal.TargetStorageProofSamples > 0 {
 		p.StorageProofSamples = proposal.TargetStorageProofSamples
@@ -588,6 +586,7 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.MinBonusRetrievalCount, proposal.TargetMinBonusRetrievalCount)
 	applyIfNonZero(&p.MaxBonusAddresses, proposal.TargetMaxBonusAddresses)
 	applyIfNonZero(&p.BonusDeadlineSeconds, proposal.TargetBonusDeadlineSeconds)
+	applyIfNonZero(&p.ActivationWindowSeconds, proposal.TargetActivationWindowSeconds)
 
 	// Post-application bounds validation (defense-in-depth: rejects proposals
 	// created before bounds were enforced).
@@ -958,9 +957,7 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		req.TargetDecentralizationWeightBPS != 0 ||
 		req.TargetRetrievalRewardPerMiB != 0 ||
 		req.TargetMaxRetrievalRewardPerWindow != 0 ||
-		req.TargetRepairRewardPerShard != 0 ||
-		req.TargetRepairPoolTakeoverBPS != 0 ||
-		req.TargetRepairPoolSubsidyBPS != 0 ||
+		req.TargetPermanentFundTakeoverSeconds != 0 ||
 		req.TargetMinerDegradeThreshold != 0 ||
 		req.TargetStorageProofSamples != 0 ||
 		req.TargetValidatorCommissionBPS != 0 ||
@@ -1072,8 +1069,6 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 		{"block_production_reward_bps", req.TargetBlockProductionRewardBPS},
 		{"availability_threshold_bps", req.TargetAvailabilityThresholdBPS},
 		{"retrieval_weight_bps", req.TargetRetrievalWeightBPS},
-		{"repair_pool_takeover_bps", req.TargetRepairPoolTakeoverBPS},
-		{"repair_pool_subsidy_bps", req.TargetRepairPoolSubsidyBPS},
 	} {
 		if check.value != 0 && check.value > maxWeightBPSSum {
 			return fmt.Errorf("%s exceeds maximum %d BPS", check.name, maxWeightBPSSum)
@@ -1146,9 +1141,7 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetDecentralizationWeightBPS:   p.TargetDecentralizationWeightBPS,
 		TargetRetrievalRewardPerMiB:       p.TargetRetrievalRewardPerMiB,
 		TargetMaxRetrievalRewardPerWindow: p.TargetMaxRetrievalRewardPerWindow,
-		TargetRepairRewardPerShard:        p.TargetRepairRewardPerShard,
-		TargetRepairPoolTakeoverBPS:       p.TargetRepairPoolTakeoverBPS,
-		TargetRepairPoolSubsidyBPS:        p.TargetRepairPoolSubsidyBPS,
+		TargetPermanentFundTakeoverSeconds: p.TargetPermanentFundTakeoverSeconds,
 		TargetMinerDegradeThreshold:       p.TargetMinerDegradeThreshold,
 		TargetStorageProofSamples:         p.TargetStorageProofSamples,
 		TargetValidatorCommissionBPS:      p.TargetValidatorCommissionBPS,
@@ -1176,6 +1169,7 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetMinBonusRetrievalCount:      p.TargetMinBonusRetrievalCount,
 		TargetMaxBonusAddresses:           p.TargetMaxBonusAddresses,
 		TargetBonusDeadlineSeconds:        p.TargetBonusDeadlineSeconds,
+		TargetActivationWindowSeconds:     p.TargetActivationWindowSeconds,
 		Signature:                         p.ProposerSignature,
 		Nonce:                             p.ProposerNonce,
 		CreatedAtUnix:                     p.CreatedAtUnix,

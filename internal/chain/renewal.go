@@ -144,7 +144,7 @@ func (s *Store) estimateRenewalPriceLocked(intent *Intent, duration int64) uint6
 	if err != nil {
 		redundantBytes = uint64(intent.FileSize)
 	}
-	fee, err := quoteTieredFee(redundantBytes, duration, basePrice)
+	fee, err := computeStorageFee(redundantBytes, duration, basePrice)
 	if err != nil || fee == 0 {
 		return defaultStorageMinimumFee
 	}

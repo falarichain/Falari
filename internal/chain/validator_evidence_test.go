@@ -31,8 +31,8 @@ func TestSubmitValidatorEvidenceSlashesLockedStake(t *testing.T) {
 	if validator.Stake != stake-expectedSlash || validator.Slashed != expectedSlash || validator.EvidenceCount != 1 {
 		t.Fatalf("unexpected validator after evidence: %+v", validator)
 	}
-	if store.data.RewardPools == nil || store.data.RewardPools.RepairRemaining != reward.RepairPoolInitial+expectedSlash {
-		t.Fatalf("expected slashed funds in repair pool, pools=%+v", store.data.RewardPools)
+	if store.data.RewardPools == nil || store.data.RewardPools.PermanentFundRemaining != reward.PermanentFundPoolInitial+expectedSlash {
+		t.Fatalf("expected slashed funds in permanent fund pool, pools=%+v", store.data.RewardPools)
 	}
 	if _, ok := store.data.ValidatorEvidence[resp.Evidence.EvidenceID]; !ok {
 		t.Fatal("expected evidence to be stored")

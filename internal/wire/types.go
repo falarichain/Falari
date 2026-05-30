@@ -240,7 +240,7 @@ type ChainStatusResponse struct {
 	StorageRewardPerBlock    uint64         `json:"storage_reward_per_block,omitempty"`
 	AverageAvailabilityBPS   uint64         `json:"average_availability_bps,omitempty"`
 	ValidatorsBelowThreshold int            `json:"validators_below_threshold,omitempty"`
-	RepairPoolRemaining      uint64         `json:"repair_pool_remaining,omitempty"`
+	PermanentFundRemaining      uint64         `json:"repair_pool_remaining,omitempty"`
 	FoundationPoolRemaining  uint64         `json:"foundation_pool_remaining,omitempty"`
 	FoundationAddress        string         `json:"foundation_address,omitempty"`
 	RetrievalAddress         string         `json:"retrieval_address,omitempty"`
@@ -813,6 +813,18 @@ type RepairTask struct {
 	SourceReceipts      []MinerReceipt    `json:"source_receipts,omitempty"`
 }
 
+// PendingShardRepair tracks a shard that has been missed but has not yet
+// reached the repair delay threshold. Once ConsecutiveMisses >=
+// RepairDelayEpochs the pending entry is promoted to a full RepairTask.
+type PendingShardRepair struct {
+	IntentID              string `json:"intent_id"`
+	SegmentID             int    `json:"segment_id"`
+	ShardIndex            int    `json:"shard_index"`
+	MinerAddress          string `json:"miner_address"`
+	FirstMissedEpochRound uint64 `json:"first_missed_epoch_round"`
+	ConsecutiveMisses     uint64 `json:"consecutive_misses"`
+}
+
 type RepairPlanResponse struct {
 	IntentID string       `json:"intent_id"`
 	Tasks    []RepairTask `json:"tasks"`
@@ -1128,7 +1140,7 @@ const (
 	TokenStoragePoolInitial    uint64 = 6_000_000_000 * TokenUnit
 	TokenRetrievalPoolInitial  uint64 = 1_000_000_000 * TokenUnit
 	TokenValidatorPoolInitial  uint64 = 1_000_000_000 * TokenUnit
-	TokenRepairPoolInitial     uint64 = 1_000_000_000 * TokenUnit
+	TokenPermanentFundPoolInitial uint64 = 1_000_000_000 * TokenUnit
 	TokenFoundationPoolInitial uint64 = 1_000_000_000 * TokenUnit
 
 	MinDelegationAmount    uint64 = 1000 * TokenUnit
@@ -1139,7 +1151,7 @@ type RewardPools struct {
 	StoragePoolRemaining    uint64 `json:"storage_pool_remaining"`
 	RetrievalPoolRemaining  uint64 `json:"retrieval_pool_remaining"`
 	ValidatorPoolRemaining  uint64 `json:"validator_pool_remaining"`
-	RepairPoolRemaining     uint64 `json:"repair_pool_remaining"`
+	PermanentFundRemaining     uint64 `json:"repair_pool_remaining"`
 	FoundationPoolRemaining uint64 `json:"foundation_pool_remaining"`
 	TokensReleased          uint64 `json:"tokens_released"`
 }
@@ -1187,6 +1199,14 @@ type MinerStats struct {
 	BonusReleased           bool   `json:"bonus_released,omitempty"`
 	BonusExpired            bool   `json:"bonus_expired,omitempty"`
 	LockedBonus             uint64 `json:"locked_bonus,omitempty"`
+}
+
+// MinerShardsResponse lists all shard hashes currently assigned to a miner
+// across all committed intent receipts.
+type MinerShardsResponse struct {
+	MinerAddress string   `json:"miner_address"`
+	ShardHashes  []string `json:"shard_hashes"`
+	ShardCount   int      `json:"shard_count"`
 }
 
 type RetrievalRateWindow struct {
@@ -1798,9 +1818,7 @@ type GovernanceProposal struct {
 	TargetDecentralizationWeightBPS   uint64 `json:"target_decentralization_weight_bps,omitempty"`
 	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
 	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
-	TargetRepairRewardPerShard        uint64 `json:"target_repair_reward_per_shard,omitempty"`
-	TargetRepairPoolTakeoverBPS       uint64 `json:"target_repair_pool_takeover_bps,omitempty"`
-	TargetRepairPoolSubsidyBPS        uint64 `json:"target_repair_pool_subsidy_bps,omitempty"`
+	TargetPermanentFundTakeoverSeconds int64  `json:"target_repair_pool_takeover_seconds,omitempty"`
 	TargetMinerDegradeThreshold       uint64 `json:"target_miner_degrade_threshold,omitempty"`
 	TargetStorageProofSamples         int    `json:"target_storage_proof_samples,omitempty"`
 	TargetValidatorCommissionBPS      uint64 `json:"target_validator_commission_bps,omitempty"`
@@ -1828,6 +1846,7 @@ type GovernanceProposal struct {
 	TargetMinBonusRetrievalCount      uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
 	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
 	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
+	TargetActivationWindowSeconds     uint64 `json:"target_activation_window_seconds,omitempty"`
 	ChainID                           string `json:"chain_id"`
 	ProposerNonce                     uint64 `json:"proposer_nonce"`
 	Status                            string `json:"status"`
@@ -1869,9 +1888,7 @@ type CreateGovernanceProposalRequest struct {
 	TargetDecentralizationWeightBPS   uint64 `json:"target_decentralization_weight_bps,omitempty"`
 	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
 	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
-	TargetRepairRewardPerShard        uint64 `json:"target_repair_reward_per_shard,omitempty"`
-	TargetRepairPoolTakeoverBPS       uint64 `json:"target_repair_pool_takeover_bps,omitempty"`
-	TargetRepairPoolSubsidyBPS        uint64 `json:"target_repair_pool_subsidy_bps,omitempty"`
+	TargetPermanentFundTakeoverSeconds int64  `json:"target_repair_pool_takeover_seconds,omitempty"`
 	TargetMinerDegradeThreshold       uint64 `json:"target_miner_degrade_threshold,omitempty"`
 	TargetStorageProofSamples         int    `json:"target_storage_proof_samples,omitempty"`
 	TargetValidatorCommissionBPS      uint64 `json:"target_validator_commission_bps,omitempty"`
@@ -1899,6 +1916,7 @@ type CreateGovernanceProposalRequest struct {
 	TargetMinBonusRetrievalCount      uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
 	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
 	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
+	TargetActivationWindowSeconds     uint64 `json:"target_activation_window_seconds,omitempty"`
 	Signature                         string `json:"signature"`
 	Nonce                             uint64 `json:"nonce"`
 	CreatedAtUnix                     int64  `json:"created_at_unix"`
