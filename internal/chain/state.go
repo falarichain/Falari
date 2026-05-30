@@ -26,12 +26,12 @@ var levelDBStateKey = []byte("state:snapshot")
 
 const defaultBaseFee uint64 = 100_000_000
 const defaultTargetBlockTxs = 10
-const defaultStorageBasePrice uint64 = 100_000_000
+const defaultStorageBasePrice uint64 = 10_000_000 // 0.01 Token/MiB/30天 = 0.12 Token/MiB/年
 const defaultStorageMinimumFee uint64 = 1_000_000 // 0.01 Token
 const defaultStorageBurnBPS uint64 = 300
 const defaultStorageRetrievalBPS uint64 = 300
 const defaultStorageFoundationBPS uint64 = 300
-const defaultPermanentStorageDuration = int64(100 * 365 * 24 * 60 * 60)
+const defaultPermanentStorageDuration = int64(50 * 365 * 24 * 60 * 60) // 50年
 
 const defaultRetrievalAbuseSpeedMultiplier uint64 = 10
 const miningRewardVestingDays = int64(30)
