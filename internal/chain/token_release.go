@@ -303,8 +303,8 @@ func (s *Store) distributeValidatorRewardLocked(validatorAddress string, amount 
 	if commissionBPS == 0 {
 		commissionBPS = s.miningParamsLocked().ValidatorCommissionBPS
 	}
-	commission := amount * commissionBPS / 10000
-	selfReward := amount * selfStake / totalPower
+	commission := mulDivUint64(amount, commissionBPS, 1, 10000)
+	selfReward := mulDivUint64(amount, selfStake, 1, totalPower)
 	validatorReward := saturatingAdd(commission, selfReward)
 	if validatorReward > amount {
 		validatorReward = amount
@@ -318,7 +318,7 @@ func (s *Store) distributeValidatorRewardLocked(validatorAddress string, amount 
 	for i, delegation := range delegations {
 		share := uint64(0)
 		if validator.DelegatedStake > 0 {
-			share = delegatorPool * delegation.Amount / validator.DelegatedStake
+			share = mulDivUint64(delegatorPool, delegation.Amount, 1, validator.DelegatedStake)
 		}
 		if i == len(delegations)-1 && delegatedPaid < delegatorPool {
 			share = delegatorPool - delegatedPaid

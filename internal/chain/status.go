@@ -159,6 +159,9 @@ func (s *Store) Status() wire.ChainStatusResponse {
 		resp.StakePerTiB = params.StakePerTiB
 		resp.MinCapacityBytes = params.MinCapacityBytes
 	}
+	resp.MinerNFTTemplate = s.data.MinerNFTTemplate
+	resp.MinerNFTContentType = s.data.MinerNFTContentType
+	resp.MinerNFTTemplateHash = s.data.MinerNFTTemplateHash
 	return resp
 }
 

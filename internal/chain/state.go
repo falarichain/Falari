@@ -3,6 +3,7 @@ package chain
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -141,6 +142,13 @@ type State struct {
 	// Pending shard repairs: tracks missed proofs that haven't yet reached the
 	// repair delay threshold. Key format: intentID:segmentID:shardIndex:minerAddress.
 	PendingShardRepairs map[string]wire.PendingShardRepair `json:"pending_shard_repairs,omitempty"`
+
+	// Miner NFT template: shared badge image for all miners.
+	// Generated as SVG placeholder when miner #1 registers;
+	// can be replaced by miner #1 uploading a custom design.
+	MinerNFTTemplate     string `json:"miner_nft_template,omitempty"`
+	MinerNFTContentType  string `json:"miner_nft_content_type,omitempty"`
+	MinerNFTTemplateHash string `json:"miner_nft_template_hash,omitempty"`
 }
 
 type Store struct {
@@ -1751,6 +1759,15 @@ func (s *Store) RegisterMiner(req wire.RegisterMinerRequest) (wire.RegisterMiner
 	s.data.NextMinerID++
 	minerID := s.data.NextMinerID
 
+	// Generate default NFT template on first miner registration.
+	if s.data.MinerNFTTemplate == "" {
+		template := GenerateDefaultNFTTemplate()
+		s.data.MinerNFTTemplate = template
+		s.data.MinerNFTContentType = "image/svg+xml"
+		hash := sha256.Sum256([]byte(template))
+		s.data.MinerNFTTemplateHash = hex.EncodeToString(hash[:])
+	}
+
 	now := time.Now().Unix()
 	stats := wire.MinerStats{
 		MinerAddress:           req.MinerAddress,
@@ -1811,6 +1828,75 @@ func (s *Store) DeregisterMiner(req wire.DeregisterMinerRequest) error {
 		ExitedAtUnix: exitedAt,
 	})
 	return s.saveLocked()
+}
+
+// maxNFTTemplateBytes is the maximum allowed size for an uploaded NFT template (512 KB).
+const maxNFTTemplateBytes = 512 * 1024
+
+func (s *Store) UploadNFTTemplate(req wire.UploadNFTTemplateRequest) error {
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyUploadNFTTemplate(req)
+	}); err != nil {
+		return err
+	}
+
+	// Only miner #1 is allowed to upload the NFT template.
+	var minerOneAddress string
+	for addr, m := range s.data.Miners {
+		if m.MinerID == 1 {
+			minerOneAddress = addr
+			break
+		}
+	}
+	if minerOneAddress == "" || req.MinerAddress != minerOneAddress {
+		return errors.New("only miner #1 can upload the NFT template")
+	}
+
+	// Validate content type.
+	if req.ContentType != "image/svg+xml" && req.ContentType != "image/png" {
+		return errors.New("content type must be image/svg+xml or image/png")
+	}
+
+	// Decode base64 content.
+	raw, err := base64.StdEncoding.DecodeString(req.Content)
+	if err != nil {
+		return fmt.Errorf("invalid base64 content: %w", err)
+	}
+	if len(raw) == 0 {
+		return errors.New("empty content")
+	}
+	if len(raw) > maxNFTTemplateBytes {
+		return fmt.Errorf("content too large: %d bytes (max %d)", len(raw), maxNFTTemplateBytes)
+	}
+
+	// SVG must contain placeholders.
+	if req.ContentType == "image/svg+xml" {
+		svgStr := string(raw)
+		if !strings.Contains(svgStr, "{{MINER_ID}}") || !strings.Contains(svgStr, "{{MINER_ADDR}}") {
+			return errors.New("SVG template must contain {{MINER_ID}} and {{MINER_ADDR}} placeholders")
+		}
+	}
+
+	hash := sha256.Sum256(raw)
+	s.data.MinerNFTTemplate = req.Content
+	s.data.MinerNFTContentType = req.ContentType
+	s.data.MinerNFTTemplateHash = hex.EncodeToString(hash[:])
+
+	s.consumeAccountNonceLocked(req.MinerAddress)
+	s.recordTxLocked("upload_nft_template", req.MinerAddress, req)
+	return s.saveLocked()
+}
+
+// GetNFTTemplate returns the current NFT template and its content type.
+func (s *Store) GetNFTTemplate() (template string, contentType string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.MinerNFTTemplate, s.data.MinerNFTContentType
 }
 
 func (s *Store) AdjustCapacity(req wire.AdjustCapacityRequest) (wire.AdjustCapacityResponse, error) {

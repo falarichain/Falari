@@ -1,6 +1,9 @@
 package chain
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -212,6 +215,12 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyClaimMiningRewardsRequestLocked(req, tx.CreatedAtUnix)
+	case "upload_nft_template":
+		var req wire.UploadNFTTemplateRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return err
+		}
+		return s.applyUploadNFTTemplateLocked(req)
 	case "create_intent":
 		var payload createIntentTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -678,6 +687,16 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 	s.consumeAccountNonceLocked(req.MinerAddress)
 	s.data.Accounts[req.MinerAddress] = account
 	s.data.Miners[req.MinerAddress] = existing
+
+	// Generate default NFT template on first miner registration (deterministic).
+	if s.data.MinerNFTTemplate == "" {
+		template := GenerateDefaultNFTTemplate()
+		s.data.MinerNFTTemplate = template
+		s.data.MinerNFTContentType = "image/svg+xml"
+		hash := sha256.Sum256([]byte(template))
+		s.data.MinerNFTTemplateHash = hex.EncodeToString(hash[:])
+	}
+
 	return nil
 }
 
@@ -1811,5 +1830,45 @@ func (s *Store) applyDirectActionReviewVoteLocked(payload directActionReviewVote
 	if resp.Rejected != payload.Response.Rejected {
 		return errors.New("replay direct action review vote: rejected mismatch")
 	}
+	return nil
+}
+
+func (s *Store) applyUploadNFTTemplateLocked(req wire.UploadNFTTemplateRequest) error {
+	req.MinerAddress = wire.NormalizeAddress(req.MinerAddress)
+
+	if err := s.verifyAccountRequestLocked(req.ChainID, req.MinerAddress, req.Nonce, func() error {
+		return wire.VerifyUploadNFTTemplate(req)
+	}); err != nil {
+		return err
+	}
+
+	// Only miner #1 can upload.
+	var minerOneAddress string
+	for addr, m := range s.data.Miners {
+		if m.MinerID == 1 {
+			minerOneAddress = addr
+			break
+		}
+	}
+	if minerOneAddress == "" || req.MinerAddress != minerOneAddress {
+		return errors.New("replay upload_nft_template: only miner #1 can upload")
+	}
+
+	if req.ContentType != "image/svg+xml" && req.ContentType != "image/png" {
+		return errors.New("replay upload_nft_template: invalid content type")
+	}
+
+	s.data.MinerNFTTemplate = req.Content
+	s.data.MinerNFTContentType = req.ContentType
+
+	// Recompute hash from base64 content for consistency.
+	raw, err := base64.StdEncoding.DecodeString(req.Content)
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256(raw)
+	s.data.MinerNFTTemplateHash = hex.EncodeToString(hash[:])
+
+	s.consumeAccountNonceLocked(req.MinerAddress)
 	return nil
 }

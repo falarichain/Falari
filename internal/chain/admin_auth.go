@@ -106,8 +106,9 @@ func (s *Server) requireOperator(next http.HandlerFunc) http.HandlerFunc {
 
 func hasAdminPermission(permissions []string) bool {
 	if len(permissions) == 0 {
-		// No permissions specified means all allowed (per existing governance logic)
-		return true
+		// No permissions specified — deny by default (principle of least privilege).
+		// Operators must be explicitly granted "admin" or "all" permission.
+		return false
 	}
 	for _, p := range permissions {
 		if p == "admin" || p == "upgrade" || p == "all" {

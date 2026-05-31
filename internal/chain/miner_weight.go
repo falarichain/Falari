@@ -153,16 +153,19 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats, ipDispe
 	}
 
 	params := s.miningParamsLocked()
-	weight := storedBytes * proofScore / 10000 * params.StoredBytesWeightBPS / 10000
-	weight += storedBytes * proofScore / 10000 * params.ProofScoreWeightBPS / 10000
-	weight += storedBytes * availabilityScore / 10000 * params.AvailabilityWeightBPS / 10000
-	weight += storedBytes * retrievalSpeedScore / 10000 * params.RetrievalSpeedWeightBPS / 10000
-	weight += storedBytes * ipDispersionScore / 10000 * params.IPDispersionWeightBPS / 10000
+	// Use mulDivUint64 (big.Int) to avoid uint64 overflow when
+	// storedBytes * score exceeds ~1.8×10¹⁹ (e.g. 10 PB × 10 000).
+	const bpsSquare = uint64(10000) * 10000 // 100_000_000
+	weight := mulDivUint64(storedBytes, proofScore, params.StoredBytesWeightBPS, bpsSquare)
+	weight += mulDivUint64(storedBytes, proofScore, params.ProofScoreWeightBPS, bpsSquare)
+	weight += mulDivUint64(storedBytes, availabilityScore, params.AvailabilityWeightBPS, bpsSquare)
+	weight += mulDivUint64(storedBytes, retrievalSpeedScore, params.RetrievalSpeedWeightBPS, bpsSquare)
+	weight += mulDivUint64(storedBytes, ipDispersionScore, params.IPDispersionWeightBPS, bpsSquare)
 
 	// Retrieval obligation penalty: miners who don't participate in
 	// retrieval+DHT lose a portion of their weight.
 	if !stats.RetrievalObligMet && stats.DHTLastPublishUnix > 0 && params.RetrievalWeightBPS > 0 {
-		weight = weight * (10000 - params.RetrievalWeightBPS) / 10000
+		weight = mulDivUint64(weight, 10000-params.RetrievalWeightBPS, 1, 10000)
 	}
 
 	return weight

@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -89,6 +90,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /miners/adjust-capacity", s.adjustCapacity)
 	mux.HandleFunc("GET /miners/{address}/shards", s.getMinerShards)
 	mux.HandleFunc("GET /miners/", s.getMinerStats)
+	mux.HandleFunc("GET /nft-template", s.getNFTTemplate)
+	mux.HandleFunc("POST /nft-template", s.uploadNFTTemplate)
 	mux.HandleFunc("POST /validators", s.registerValidator)
 	mux.HandleFunc("GET /validators", s.listValidators)
 	mux.HandleFunc("GET /validators/delegations", s.listDelegationsByDelegator)
@@ -678,6 +681,38 @@ func (s *Server) adjustCapacity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) getNFTTemplate(w http.ResponseWriter, r *http.Request) {
+	template, contentType := s.store.GetNFTTemplate()
+	if template == "" {
+		writeError(w, http.StatusNotFound, errors.New("no NFT template available"))
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Content-Type", contentType)
+	if contentType == "image/svg+xml" {
+		_, _ = w.Write([]byte(template))
+	} else {
+		raw, err := base64.StdEncoding.DecodeString(template)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		_, _ = w.Write(raw)
+	}
+}
+
+func (s *Server) uploadNFTTemplate(w http.ResponseWriter, r *http.Request) {
+	var req wire.UploadNFTTemplateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.store.UploadNFTTemplate(req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) registerValidator(w http.ResponseWriter, r *http.Request) {

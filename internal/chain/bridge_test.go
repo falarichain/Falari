@@ -75,9 +75,10 @@ func addGovernanceOperator(t *testing.T, store *Store, u testUser) {
 	t.Helper()
 	pubHex := wire.EncodeHex(ethcrypto.FromECDSAPub(&u.Key.PublicKey))
 	store.data.GovernanceOperators[wire.NormalizeAddress(u.Addr)] = wire.GovernanceOperator{
-		Operator:  u.Addr,
-		PublicKey: pubHex,
-		Enabled:   true,
+		Operator:    u.Addr,
+		PublicKey:   pubHex,
+		Permissions: []string{"admin"},
+		Enabled:     true,
 	}
 }
 

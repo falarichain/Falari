@@ -2,6 +2,8 @@ package wire
 
 import (
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 )
 
@@ -165,4 +167,51 @@ func VerifyAdjustCapacity(req AdjustCapacityRequest) error {
 		Nonce:            req.Nonce,
 	}
 	return verifyInfraSignature(req.MinerAddress, req.Signature, payload)
+}
+
+type uploadNFTTemplatePayload struct {
+	Action       string `json:"action"`
+	ChainID      string `json:"chain_id"`
+	MinerAddress string `json:"miner_address"`
+	ContentType  string `json:"content_type"`
+	ContentHash  string `json:"content_hash"`
+	Nonce        uint64 `json:"nonce"`
+}
+
+func SignUploadNFTTemplate(req *UploadNFTTemplateRequest, privateKey *ecdsa.PrivateKey) error {
+	contentHash := contentHashForSigning(req.Content)
+	payload := uploadNFTTemplatePayload{
+		Action:       "upload_nft_template",
+		ChainID:      req.ChainID,
+		MinerAddress: req.MinerAddress,
+		ContentType:  req.ContentType,
+		ContentHash:  contentHash,
+		Nonce:        req.Nonce,
+	}
+	sig, _, err := signInfraPayload(payload, privateKey)
+	if err != nil {
+		return err
+	}
+	req.Signature = sig
+	return nil
+}
+
+func VerifyUploadNFTTemplate(req UploadNFTTemplateRequest) error {
+	contentHash := contentHashForSigning(req.Content)
+	payload := uploadNFTTemplatePayload{
+		Action:       "upload_nft_template",
+		ChainID:      req.ChainID,
+		MinerAddress: req.MinerAddress,
+		ContentType:  req.ContentType,
+		ContentHash:  contentHash,
+		Nonce:        req.Nonce,
+	}
+	return verifyInfraSignature(req.MinerAddress, req.Signature, payload)
+}
+
+// contentHashForSigning computes a SHA-256 hash of the base64 content for signing,
+// avoiding the need to sign potentially large binary data directly.
+func contentHashForSigning(base64Content string) string {
+	h := sha256.Sum256([]byte(base64Content))
+	return hex.EncodeToString(h[:])
 }

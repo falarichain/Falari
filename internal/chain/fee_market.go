@@ -85,7 +85,30 @@ func (s *Store) adjustFeeMarketAfterBlockLocked(block wire.Block) {
 }
 
 func transactionRequiresBaseFee(tx wire.Transaction) bool {
-	return tx.Type == "transfer" || tx.Type == "multisig_exec"
+	switch tx.Type {
+	// Types that already have Fee fields in their request structs
+	// and are properly handled by enrichTransactionMetadata.
+	case "transfer", "multisig_exec", "bridge_out":
+		return true
+	}
+	// TODO(H-04): The following transaction types SHOULD also require a base
+	// fee to prevent fee-less DoS, but their request structs currently lack a
+	// Fee field.  Adding fee support requires:
+	//   1. Add a `Fee uint64` field to each request struct in wire/types.go
+	//   2. Add a case in enrichTransactionMetadata to extract Fee from payload
+	//   3. Add the type to the switch above
+	//
+	// Pending types:
+	//   create_intent, batch_commit, finalize_deal, settle_intent,
+	//   renew_deal, terminate_deal, set_access_policy,
+	//   register_miner, deregister_miner, adjust_capacity,
+	//   register_validator, deregister_validator,
+	//   delegate_stake, undelegate_stake,
+	//   governance_create_proposal, governance_cast_vote, governance_execute_proposal,
+	//   create_collection, append_record,
+	//   register_agent_key, revoke_agent_key, extend_agent_key, topup_agent_key,
+	//   create_key_envelope, create_share, revoke_share
+	return false
 }
 
 func transferTotalCost(amount uint64, fee uint64) (uint64, error) {

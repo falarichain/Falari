@@ -259,6 +259,9 @@ type ChainStatusResponse struct {
 	RegistrationBonusAmount  uint64         `json:"registration_bonus_amount,omitempty"`
 	StakePerTiB              uint64         `json:"stake_per_tib,omitempty"`
 	MinCapacityBytes         uint64         `json:"min_capacity_bytes,omitempty"`
+	MinerNFTTemplate         string         `json:"miner_nft_template,omitempty"`
+	MinerNFTContentType      string         `json:"miner_nft_content_type,omitempty"`
+	MinerNFTTemplateHash     string         `json:"miner_nft_template_hash,omitempty"`
 }
 
 type StorageNodeStatusResponse struct {
@@ -1258,6 +1261,15 @@ type AdjustCapacityResponse struct {
 
 type ClaimMiningRewardsRequest struct {
 	MinerAddress string `json:"miner_address"`
+	ChainID      string `json:"chain_id"`
+	Nonce        uint64 `json:"nonce,omitempty"`
+	Signature    string `json:"signature"`
+}
+
+type UploadNFTTemplateRequest struct {
+	MinerAddress string `json:"miner_address"`
+	ContentType  string `json:"content_type"`
+	Content      string `json:"content"`
 	ChainID      string `json:"chain_id"`
 	Nonce        uint64 `json:"nonce,omitempty"`
 	Signature    string `json:"signature"`
