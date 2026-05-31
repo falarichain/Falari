@@ -107,6 +107,11 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 		if err := validateMiningParamsChangeFields(req, s.miningParamsLocked()); err != nil {
 			return wire.CreateGovernanceProposalResponse{}, err
 		}
+	} else if isFeeMarketAction(req.Action) {
+		// Validate fee market change fields.
+		if err := validateFeeMarketChangeFields(req); err != nil {
+			return wire.CreateGovernanceProposalResponse{}, err
+		}
 	} else {
 		// Validate intent exists for deal actions.
 		if _, ok := s.data.Intents[req.IntentID]; !ok {
@@ -194,6 +199,13 @@ func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, pro
 		TargetMinBonusRetrievalCount:      req.TargetMinBonusRetrievalCount,
 		TargetMaxBonusAddresses:           req.TargetMaxBonusAddresses,
 		TargetBonusDeadlineSeconds:        req.TargetBonusDeadlineSeconds,
+		TargetFeeMarketBaseFee:            req.TargetFeeMarketBaseFee,
+		TargetFeeMarketTargetBlockTxs:     req.TargetFeeMarketTargetBlockTxs,
+		TargetFeeMultiplierBridgeOut:      req.TargetFeeMultiplierBridgeOut,
+		TargetFeeMultiplierCreateIntent:   req.TargetFeeMultiplierCreateIntent,
+		TargetFeeMultiplierUploadNFT:      req.TargetFeeMultiplierUploadNFT,
+		TargetFeeMultiplierRegisterVal:    req.TargetFeeMultiplierRegisterVal,
+		TargetFeeMultiplierBatchCommit:    req.TargetFeeMultiplierBatchCommit,
 		ChainID:                           req.ChainID,
 		ProposerNonce:                     req.Nonce,
 		Status:                            wire.GovProposalPending,
@@ -438,6 +450,11 @@ func (s *Store) executeGovernanceProposalLocked(proposal wire.GovernanceProposal
 		return s.executeMiningParamsChangeLocked(proposal, now)
 	}
 
+	// Route fee market change actions to dedicated handler.
+	if isFeeMarketAction(proposal.Action) {
+		return s.executeFeeMarketChangeLocked(proposal, now)
+	}
+
 	// Execute the deal action using the existing internal engine.
 	govReq := wire.GovernanceDealActionRequest{
 		IntentID:           proposal.IntentID,
@@ -629,6 +646,39 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	}, nil
 }
 
+// executeFeeMarketChangeLocked handles update_fee_market actions.
+func (s *Store) executeFeeMarketChangeLocked(proposal wire.GovernanceProposal, now int64) (wire.GovernanceDealActionResponse, error) {
+	if s.data.FeeMarket.BaseFee == 0 {
+		s.data.FeeMarket = defaultFeeMarket()
+	}
+	if proposal.TargetFeeMarketBaseFee > 0 {
+		s.data.FeeMarket.BaseFee = proposal.TargetFeeMarketBaseFee
+	}
+	if proposal.TargetFeeMarketTargetBlockTxs > 0 {
+		s.data.FeeMarket.TargetBlockTxs = proposal.TargetFeeMarketTargetBlockTxs
+	}
+	m := &s.data.FeeMarket.Multipliers
+	if proposal.TargetFeeMultiplierBridgeOut > 0 {
+		m.BridgeOut = proposal.TargetFeeMultiplierBridgeOut
+	}
+	if proposal.TargetFeeMultiplierCreateIntent > 0 {
+		m.CreateIntent = proposal.TargetFeeMultiplierCreateIntent
+	}
+	if proposal.TargetFeeMultiplierUploadNFT > 0 {
+		m.UploadNFTTemplate = proposal.TargetFeeMultiplierUploadNFT
+	}
+	if proposal.TargetFeeMultiplierRegisterVal > 0 {
+		m.RegisterValidator = proposal.TargetFeeMultiplierRegisterVal
+	}
+	if proposal.TargetFeeMultiplierBatchCommit > 0 {
+		m.BatchCommit = proposal.TargetFeeMultiplierBatchCommit
+	}
+	return wire.GovernanceDealActionResponse{
+		GovernanceType: "governance_update_fee_market",
+		UpdatedAtUnix:  now,
+	}, nil
+}
+
 // CancelGovernanceProposal allows the proposer to cancel their own pending proposal.
 func (s *Store) CancelGovernanceProposal(req wire.CreateGovernanceProposalRequest) (wire.CreateGovernanceProposalResponse, error) {
 	s.mu.Lock()
@@ -654,8 +704,8 @@ func (s *Store) CancelGovernanceProposal(req wire.CreateGovernanceProposalReques
 				proposalID = id
 				break
 			}
-		} else if isConfigAction(p.Action) || isMiningParamsAction(p.Action) {
-			// Config and mining params proposals have no intent_id; match by action.
+		} else if isConfigAction(p.Action) || isMiningParamsAction(p.Action) || isFeeMarketAction(p.Action) {
+			// Config, mining params, and fee market proposals have no intent_id; match by action.
 			proposalID = id
 			break
 		} else {
@@ -822,7 +872,7 @@ func (s *Store) governanceThresholdLocked(action string) int {
 	}
 	num := s.data.DataModerationThresholdNum
 	den := s.data.DataModerationThresholdDen
-	if isOperatorManagementAction(action) || isConfigAction(action) || isMiningParamsAction(action) {
+	if isOperatorManagementAction(action) || isConfigAction(action) || isMiningParamsAction(action) || isFeeMarketAction(action) {
 		num = s.data.OperatorChangeThresholdNum
 		den = s.data.OperatorChangeThresholdDen
 	}
@@ -838,7 +888,7 @@ func validGovernanceAction(action string) bool {
 	switch action {
 	case "freeze", "block", "legal_hold", "appeal",
 		"add_operator", "remove_operator", "update_operator",
-		"update_config", "update_mining_params":
+		"update_config", "update_mining_params", "update_fee_market":
 		return true
 	}
 	return false
@@ -861,6 +911,11 @@ func isConfigAction(action string) bool {
 // isMiningParamsAction returns true for actions that change mining parameters.
 func isMiningParamsAction(action string) bool {
 	return action == "update_mining_params"
+}
+
+// isFeeMarketAction returns true for actions that change fee market parameters.
+func isFeeMarketAction(action string) bool {
+	return action == "update_fee_market"
 }
 
 // validateGovernanceActionFields validates action-specific fields.
@@ -1001,6 +1056,38 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		return validateMiningParamBounds(req, currentParams)
 	}
 	return errors.New("update_mining_params requires at least one non-zero target field")
+}
+
+// validateFeeMarketChangeFields validates fields for update_fee_market proposals.
+func validateFeeMarketChangeFields(req wire.CreateGovernanceProposalRequest) error {
+	hasAny := req.TargetFeeMarketBaseFee > 0 ||
+		req.TargetFeeMarketTargetBlockTxs > 0 ||
+		req.TargetFeeMultiplierBridgeOut > 0 ||
+		req.TargetFeeMultiplierCreateIntent > 0 ||
+		req.TargetFeeMultiplierUploadNFT > 0 ||
+		req.TargetFeeMultiplierRegisterVal > 0 ||
+		req.TargetFeeMultiplierBatchCommit > 0
+	if !hasAny {
+		return errors.New("update_fee_market requires at least one non-zero target field")
+	}
+	if req.TargetFeeMarketTargetBlockTxs < 0 {
+		return errors.New("target_fee_market_target_block_txs must be > 0")
+	}
+	for _, check := range []struct {
+		name string
+		val  uint64
+	}{
+		{"bridge_out", req.TargetFeeMultiplierBridgeOut},
+		{"create_intent", req.TargetFeeMultiplierCreateIntent},
+		{"upload_nft_template", req.TargetFeeMultiplierUploadNFT},
+		{"register_validator", req.TargetFeeMultiplierRegisterVal},
+		{"batch_commit", req.TargetFeeMultiplierBatchCommit},
+	} {
+		if check.val > 0 && (check.val < 1000 || check.val > 100000) {
+			return fmt.Errorf("fee multiplier %s %d out of range [1000, 100000]", check.name, check.val)
+		}
+	}
+	return nil
 }
 
 func validateMiningParamSizeTargets(req wire.CreateGovernanceProposalRequest) error {
@@ -1197,6 +1284,13 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetMaxBonusAddresses:           p.TargetMaxBonusAddresses,
 		TargetBonusDeadlineSeconds:        p.TargetBonusDeadlineSeconds,
 		TargetActivationWindowSeconds:     p.TargetActivationWindowSeconds,
+		TargetFeeMarketBaseFee:            p.TargetFeeMarketBaseFee,
+		TargetFeeMarketTargetBlockTxs:     p.TargetFeeMarketTargetBlockTxs,
+		TargetFeeMultiplierBridgeOut:      p.TargetFeeMultiplierBridgeOut,
+		TargetFeeMultiplierCreateIntent:   p.TargetFeeMultiplierCreateIntent,
+		TargetFeeMultiplierUploadNFT:      p.TargetFeeMultiplierUploadNFT,
+		TargetFeeMultiplierRegisterVal:    p.TargetFeeMultiplierRegisterVal,
+		TargetFeeMultiplierBatchCommit:    p.TargetFeeMultiplierBatchCommit,
 		Signature:                         p.ProposerSignature,
 		Nonce:                             p.ProposerNonce,
 		CreatedAtUnix:                     p.CreatedAtUnix,

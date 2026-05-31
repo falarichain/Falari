@@ -44,6 +44,15 @@ func (s *Store) recordTxLocked(txType, from string, payload any) string {
 		CreatedAtUnix: time.Now().Unix(),
 	}
 	enrichTransactionMetadata(&tx)
+	// For locally-created transactions, ensure a minimum gas fee is set.
+	// Types like transfer/multisig_exec/bridge_out already have Fee set from
+	// their payload by enrichTransactionMetadata.  For all other types, apply
+	// the current base fee (adjusted by per-type multiplier) so the transaction
+	// passes fee validation.
+	if tx.Fee == 0 && transactionRequiresBaseFee(tx) {
+		multiplierBPS := s.transactionFeeMultiplierBPS(tx.Type)
+		tx.Fee = s.data.FeeMarket.BaseFee * multiplierBPS / 10000
+	}
 	accepted, err := s.enqueuePendingTxLocked(tx)
 	if err != nil || !accepted {
 		return txID
@@ -629,7 +638,8 @@ func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction
 		"settle_intent", "permanent_fund_topup", "renew_deal", "terminate_deal",
 		"set_access_policy", "delegate_stake", "undelegate_stake",
 		"deregister_miner", "create_collection", "append_record", "create_key_envelope",
-		"create_share", "revoke_share":
+		"create_share", "revoke_share",
+		"register_agent_key", "revoke_agent_key", "extend_agent_key", "topup_agent_key":
 		return wire.NormalizeAddress(tx.From) == normalized.From &&
 			tx.Fee == normalized.Fee &&
 			tx.Nonce == normalized.Nonce &&
@@ -642,16 +652,20 @@ func transactionMetadataMatches(tx wire.Transaction, normalized wire.Transaction
 			tx.Nonce == normalized.Nonce &&
 			tx.NonceProtected == normalized.NonceProtected
 	case "bridge_in_claim":
-		return tx.Nonce == normalized.Nonce &&
+		return tx.Fee == normalized.Fee &&
+			tx.Nonce == normalized.Nonce &&
 			tx.NonceProtected == normalized.NonceProtected
 	case "claim_mining_rewards":
 		return wire.NormalizeAddress(tx.From) == normalized.From &&
+			tx.Fee == normalized.Fee &&
 			tx.Nonce == normalized.Nonce &&
 			tx.NonceProtected == normalized.NonceProtected
 	case "bridge_set_config":
 		return true
-	case "governance_create_proposal", "governance_cast_vote", "governance_execute_proposal":
+	case "governance_create_proposal", "governance_cast_vote", "governance_execute_proposal",
+		"register_validator", "register_miner", "upload_nft_template", "create_multisig":
 		return wire.NormalizeAddress(tx.From) == normalized.From &&
+			tx.Fee == normalized.Fee &&
 			tx.Nonce == normalized.Nonce &&
 			tx.NonceProtected == normalized.NonceProtected
 	default:
@@ -1139,73 +1153,73 @@ func enrichTransactionMetadata(tx *wire.Transaction) {
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, payload.Request.LockedFee, payload.Request.AgentKeyID, payload.Request.AgentNonce)
+		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, payload.Request.AgentKeyID, payload.Request.AgentNonce)
 	case "batch_commit":
 		var payload batchCommitTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, 0, payload.Request.AgentKeyID, payload.Request.AgentNonce)
+		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, payload.Request.AgentKeyID, payload.Request.AgentNonce)
 	case "finalize_deal":
 		var payload finalizeDealTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, 0, payload.Request.AgentKeyID, payload.Request.AgentNonce)
+		enrichAccountOrAgentMetadata(tx, payload.Request.User, payload.Request.Nonce, payload.Request.AgentKeyID, payload.Request.AgentNonce)
 	case "settle_intent":
 		var payload settleIntentTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce)
 	case "permanent_fund_topup":
 		var payload permanentFundTopUpTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce)
 	case "renew_deal":
 		var payload renewDealTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce)
 	case "terminate_deal":
 		var payload terminateDealTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce)
 	case "set_access_policy":
 		var payload setAccessPolicyTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce)
 	case "delegate_stake":
 		var payload delegateStakeTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.Delegator, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.Delegator, payload.Request.Nonce)
 	case "undelegate_stake":
 		var payload undelegateStakeTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.Delegator, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.Delegator, payload.Request.Nonce)
 	case "create_collection":
 		var payload createCollectionTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce)
 	case "append_record":
 		var payload appendRecordTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce, 0)
+		enrichAccountMetadata(tx, payload.Request.User, payload.Request.Nonce)
 	case "create_key_envelope", "create_share":
 		var payload createShareTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
@@ -1213,16 +1227,16 @@ func enrichTransactionMetadata(tx *wire.Transaction) {
 			if err := json.Unmarshal(tx.Payload, &envelopePayload); err != nil {
 				return
 			}
-			enrichAccountMetadata(tx, envelopePayload.Request.Owner, envelopePayload.Request.AccountNonce, 0)
+			enrichAccountMetadata(tx, envelopePayload.Request.Owner, envelopePayload.Request.AccountNonce)
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.Owner, payload.Request.AccountNonce, 0)
+		enrichAccountMetadata(tx, payload.Request.Owner, payload.Request.AccountNonce)
 	case "revoke_share":
 		var payload revokeShareTxPayload
 		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
 			return
 		}
-		enrichAccountMetadata(tx, payload.Request.Owner, payload.Request.AccountNonce, 0)
+		enrichAccountMetadata(tx, payload.Request.Owner, payload.Request.AccountNonce)
 	case "bridge_out":
 		var req wire.BridgeOutRequest
 		if err := json.Unmarshal(tx.Payload, &req); err != nil {
@@ -1281,19 +1295,75 @@ func enrichTransactionMetadata(tx *wire.Transaction) {
 		tx.From = wire.NormalizeAddress(payload.Request.Executor)
 		tx.Nonce = payload.Request.Nonce
 		tx.NonceProtected = true
+	case "register_validator":
+		var req wire.RegisterValidatorRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(req.OwnerAddress)
+		tx.Nonce = req.Nonce
+		tx.NonceProtected = true
+	case "register_miner":
+		var req wire.RegisterMinerRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(req.MinerAddress)
+		tx.Nonce = req.Nonce
+		tx.NonceProtected = true
+	case "upload_nft_template":
+		var req wire.UploadNFTTemplateRequest
+		if err := json.Unmarshal(tx.Payload, &req); err != nil {
+			return
+		}
+		tx.From = wire.NormalizeAddress(req.MinerAddress)
+		tx.Nonce = req.Nonce
+		tx.NonceProtected = true
+	case "register_agent_key":
+		var payload registerAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Master, payload.Request.Nonce)
+	case "revoke_agent_key":
+		var payload revokeAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Master, payload.Request.Nonce)
+	case "extend_agent_key":
+		var payload extendAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Master, payload.Request.Nonce)
+	case "topup_agent_key":
+		var payload topupAgentKeyTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		enrichAccountMetadata(tx, payload.Request.Master, payload.Request.Nonce)
+	case "create_multisig":
+		var payload createMultisigTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return
+		}
+		if len(payload.Request.Signers) > 0 {
+			tx.From = wire.NormalizeAddress(payload.Request.Signers[0])
+		}
 	}
 }
 
-func enrichAccountMetadata(tx *wire.Transaction, from string, nonce uint64, fee uint64) {
+func enrichAccountMetadata(tx *wire.Transaction, from string, nonce uint64) {
 	tx.From = wire.NormalizeAddress(from)
 	tx.Nonce = nonce
-	tx.Fee = fee
+	// tx.Fee is preserved from the outer transaction envelope (gas fee).
 	tx.NonceProtected = true
 }
 
-func enrichAccountOrAgentMetadata(tx *wire.Transaction, from string, nonce uint64, fee uint64, agentKeyID string, agentNonce uint64) {
+func enrichAccountOrAgentMetadata(tx *wire.Transaction, from string, nonce uint64, agentKeyID string, agentNonce uint64) {
 	tx.From = wire.NormalizeAddress(from)
-	tx.Fee = fee
+	// tx.Fee is preserved from the outer transaction envelope (gas fee).
 	tx.AgentKeyID = agentKeyID
 	tx.AgentNonce = agentNonce
 	if agentKeyID != "" {

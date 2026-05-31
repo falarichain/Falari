@@ -481,6 +481,9 @@ func normalizeState(state *State) {
 	if state.FeeMarket.TargetBlockTxs <= 0 {
 		state.FeeMarket.TargetBlockTxs = defaultTargetBlockTxs
 	}
+	if state.FeeMarket.Multipliers == (wire.FeeMultipliers{}) {
+		state.FeeMarket.Multipliers = defaultFeeMultipliers()
+	}
 	if state.FeeChargedTxs == nil {
 		state.FeeChargedTxs = map[string]bool{}
 	}
@@ -688,10 +691,21 @@ func normalizeState(state *State) {
 	}
 }
 
+func defaultFeeMultipliers() wire.FeeMultipliers {
+	return wire.FeeMultipliers{
+		BridgeOut:         20000, // 2.0x
+		CreateIntent:      15000, // 1.5x
+		UploadNFTTemplate: 15000, // 1.5x
+		RegisterValidator: 15000, // 1.5x
+		BatchCommit:       15000, // 1.5x
+	}
+}
+
 func defaultFeeMarket() wire.FeeMarket {
 	return wire.FeeMarket{
 		BaseFee:        defaultBaseFee,
 		TargetBlockTxs: defaultTargetBlockTxs,
+		Multipliers:    defaultFeeMultipliers(),
 	}
 }
 

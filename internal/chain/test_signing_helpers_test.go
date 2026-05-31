@@ -16,7 +16,10 @@ func gfTokens(n uint64) uint64 { return n * wire.TokenUnit }
 
 func fundValidatorForTest(t *testing.T, store *Store, identity *OperatorIdentity, stake uint64) {
 	t.Helper()
-	store.data.Accounts[identity.OwnerAddress] = wire.Account{Address: identity.OwnerAddress, Balance: stake}
+	// Extra balance for gas fees (10 tokens). Stake is deducted from balance,
+	// and the remaining balance is needed to pay transaction gas fees.
+	gasBuffer := 10 * wire.TokenUnit
+	store.data.Accounts[identity.OwnerAddress] = wire.Account{Address: identity.OwnerAddress, Balance: stake + gasBuffer}
 }
 
 // testUser holds an ECDSA key pair and the derived account address for tests.

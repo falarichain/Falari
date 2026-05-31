@@ -32,6 +32,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /upgrade", s.requireOperator(s.setUpgrade))
 	mux.HandleFunc("GET /upgrade", s.getUpgrade)
 	mux.HandleFunc("GET /admin/mining-params", s.requireOperator(s.getMiningParams))
+	mux.HandleFunc("POST /fee-market", s.requireOperator(s.setFeeMarket))
+	mux.HandleFunc("GET /fee-market", s.getFeeMarket)
 	mux.HandleFunc("GET /intents/{id}/health", s.intentHealth)
 	mux.HandleFunc("GET /intents/health", s.allDealHealth)
 	mux.HandleFunc("POST /storage/quote", s.storageQuote)
@@ -159,6 +161,23 @@ func (s *Server) setUpgrade(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getUpgrade(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.UpgradePlan())
+}
+
+func (s *Server) setFeeMarket(w http.ResponseWriter, r *http.Request) {
+	var req wire.SetFeeMarketRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.store.SetFeeMarket(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) getFeeMarket(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.GetFeeMarket())
 }
 
 func (s *Server) intentHealth(w http.ResponseWriter, r *http.Request) {

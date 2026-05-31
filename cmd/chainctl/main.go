@@ -143,6 +143,8 @@ func main() {
 		garbageCollect(os.Args[2:])
 	case "genesis":
 		genesisCommand(os.Args[2:])
+	case "fee-market":
+		feeMarketCommand(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -3225,6 +3227,80 @@ func parseMetadata(raw string) map[string]string {
 		log.Fatalf("invalid metadata JSON object: %v", err)
 	}
 	return metadata
+}
+
+func feeMarketCommand(args []string) {
+	if len(args) < 1 {
+		log.Fatal("fee-market requires a subcommand: set, get")
+	}
+	switch args[0] {
+	case "set":
+		setFeeMarketCmd(args[1:])
+	case "get":
+		getFeeMarketCmd(args[1:])
+	default:
+		log.Fatalf("unknown fee-market subcommand: %s", args[0])
+	}
+}
+
+func setFeeMarketCmd(args []string) {
+	fs := flag.NewFlagSet("fee-market set", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	keyPath := fs.String("key", "", "path to governance operator key file (required)")
+	baseFee := fs.Uint64("base-fee", 0, "new base fee in base units")
+	targetBlockTxs := fs.Int("target-block-txs", 0, "target transactions per block")
+	multBridgeOut := fs.Uint64("mult-bridge-out", 0, "bridge_out multiplier (BPS, 10000=1.0x)")
+	multCreateIntent := fs.Uint64("mult-create-intent", 0, "create_intent multiplier (BPS)")
+	multUploadNFT := fs.Uint64("mult-upload-nft", 0, "upload_nft_template multiplier (BPS)")
+	multRegisterVal := fs.Uint64("mult-register-validator", 0, "register_validator multiplier (BPS)")
+	multBatchCommit := fs.Uint64("mult-batch-commit", 0, "batch_commit multiplier (BPS)")
+	fs.Parse(args)
+	if *keyPath == "" {
+		log.Fatal("-key is required")
+	}
+	req := wire.SetFeeMarketRequest{}
+	if *baseFee > 0 {
+		req.BaseFee = baseFee
+	}
+	if *targetBlockTxs > 0 {
+		req.TargetBlockTxs = targetBlockTxs
+	}
+	if *multBridgeOut > 0 || *multCreateIntent > 0 || *multUploadNFT > 0 || *multRegisterVal > 0 || *multBatchCommit > 0 {
+		req.Multipliers = &wire.FeeMultipliers{
+			BridgeOut:         *multBridgeOut,
+			CreateIntent:      *multCreateIntent,
+			UploadNFTTemplate: *multUploadNFT,
+			RegisterValidator: *multRegisterVal,
+			BatchCommit:       *multBatchCommit,
+		}
+	}
+	var resp wire.FeeMarket
+	if err := postOperator(*chainURL, "/fee-market", req, &resp, *keyPath); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("fee market updated: base_fee=%s target_block_txs=%d\n",
+		formatGF(resp.BaseFee), resp.TargetBlockTxs)
+}
+
+func getFeeMarketCmd(args []string) {
+	fs := flag.NewFlagSet("fee-market get", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	fs.Parse(args)
+	var resp wire.FeeMarket
+	if err := client.NewHTTP(*chainURL).Get("/fee-market", &resp); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("fee_market:\n")
+	fmt.Printf("  base_fee:          %s\n", formatGF(resp.BaseFee))
+	fmt.Printf("  target_block_txs:  %d\n", resp.TargetBlockTxs)
+	fmt.Printf("  last_block_txs:    %d\n", resp.LastBlockTxs)
+	fmt.Printf("  updated_at_height: %d\n", resp.UpdatedAtHeight)
+	fmt.Printf("  multipliers:\n")
+	fmt.Printf("    bridge_out:          %d (%.1fx)\n", resp.Multipliers.BridgeOut, float64(resp.Multipliers.BridgeOut)/10000)
+	fmt.Printf("    create_intent:       %d (%.1fx)\n", resp.Multipliers.CreateIntent, float64(resp.Multipliers.CreateIntent)/10000)
+	fmt.Printf("    upload_nft_template: %d (%.1fx)\n", resp.Multipliers.UploadNFTTemplate, float64(resp.Multipliers.UploadNFTTemplate)/10000)
+	fmt.Printf("    register_validator:  %d (%.1fx)\n", resp.Multipliers.RegisterValidator, float64(resp.Multipliers.RegisterValidator)/10000)
+	fmt.Printf("    batch_commit:        %d (%.1fx)\n", resp.Multipliers.BatchCommit, float64(resp.Multipliers.BatchCommit)/10000)
 }
 
 func formatGF(amount uint64) string {

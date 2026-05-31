@@ -43,7 +43,7 @@ func TestStorageTransactionMetadataMustMatchPayload(t *testing.T) {
 		From:           req.User,
 		Nonce:          req.Nonce,
 		NonceProtected: true,
-		Fee:            req.LockedFee,
+		Fee:            100,
 		Payload:        raw,
 		PayloadHash:    chaincrypto.HashBytes(raw),
 		CreatedAtUnix:  1,
@@ -52,7 +52,8 @@ func TestStorageTransactionMetadataMustMatchPayload(t *testing.T) {
 	if err := validateTransactionShape(tx); err != nil {
 		t.Fatal(err)
 	}
-	tx.Fee = 0
+	// Tamper with nonce — must be rejected since it no longer matches the payload.
+	tx.Nonce = 0
 	if err := validateTransactionShape(tx); err == nil {
 		t.Fatal("expected mismatched storage transaction metadata to be rejected")
 	}

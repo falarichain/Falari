@@ -60,6 +60,13 @@ type governanceProposalSigningPayload struct {
 	TargetMaxBlockTxs                 uint64   `json:"target_max_block_txs,omitempty"`
 	TargetMaxTxBytes                  uint64   `json:"target_max_tx_bytes,omitempty"`
 	TargetMaxStorageTxBytes           uint64   `json:"target_max_storage_tx_bytes,omitempty"`
+	TargetFeeMarketBaseFee            uint64   `json:"target_fee_market_base_fee,omitempty"`
+	TargetFeeMarketTargetBlockTxs     int      `json:"target_fee_market_target_block_txs,omitempty"`
+	TargetFeeMultiplierBridgeOut      uint64   `json:"target_fee_multiplier_bridge_out,omitempty"`
+	TargetFeeMultiplierCreateIntent   uint64   `json:"target_fee_multiplier_create_intent,omitempty"`
+	TargetFeeMultiplierUploadNFT      uint64   `json:"target_fee_multiplier_upload_nft_template,omitempty"`
+	TargetFeeMultiplierRegisterVal    uint64   `json:"target_fee_multiplier_register_validator,omitempty"`
+	TargetFeeMultiplierBatchCommit    uint64   `json:"target_fee_multiplier_batch_commit,omitempty"`
 	Nonce                             uint64   `json:"nonce"`
 	CreatedAtUnix                     int64    `json:"created_at_unix"`
 }
@@ -125,6 +132,13 @@ func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, err
 		TargetMaxBlockTxs:                 req.TargetMaxBlockTxs,
 		TargetMaxTxBytes:                  req.TargetMaxTxBytes,
 		TargetMaxStorageTxBytes:           req.TargetMaxStorageTxBytes,
+		TargetFeeMarketBaseFee:            req.TargetFeeMarketBaseFee,
+		TargetFeeMarketTargetBlockTxs:     req.TargetFeeMarketTargetBlockTxs,
+		TargetFeeMultiplierBridgeOut:      req.TargetFeeMultiplierBridgeOut,
+		TargetFeeMultiplierCreateIntent:   req.TargetFeeMultiplierCreateIntent,
+		TargetFeeMultiplierUploadNFT:      req.TargetFeeMultiplierUploadNFT,
+		TargetFeeMultiplierRegisterVal:    req.TargetFeeMultiplierRegisterVal,
+		TargetFeeMultiplierBatchCommit:    req.TargetFeeMultiplierBatchCommit,
 		Nonce:                             req.Nonce,
 		CreatedAtUnix:                     req.CreatedAtUnix,
 	}

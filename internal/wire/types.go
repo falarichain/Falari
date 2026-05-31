@@ -1490,11 +1490,31 @@ type ProduceBlockResponse struct {
 	Block    Block `json:"block,omitempty"`
 }
 
+// FeeMultipliers holds per-transaction-type gas fee multipliers in BPS
+// (basis points). 10000 = 1.0x (no multiplier). Applied at validation:
+// tx.Fee must be >= BaseFee * multiplier / 10000.
+type FeeMultipliers struct {
+	BridgeOut         uint64 `json:"bridge_out,omitempty"`
+	CreateIntent      uint64 `json:"create_intent,omitempty"`
+	UploadNFTTemplate uint64 `json:"upload_nft_template,omitempty"`
+	RegisterValidator uint64 `json:"register_validator,omitempty"`
+	BatchCommit       uint64 `json:"batch_commit,omitempty"`
+}
+
 type FeeMarket struct {
-	BaseFee         uint64 `json:"base_fee"`
-	TargetBlockTxs  int    `json:"target_block_txs"`
-	LastBlockTxs    int    `json:"last_block_txs"`
-	UpdatedAtHeight uint64 `json:"updated_at_height"`
+	BaseFee         uint64         `json:"base_fee"`
+	TargetBlockTxs  int            `json:"target_block_txs"`
+	LastBlockTxs    int            `json:"last_block_txs"`
+	UpdatedAtHeight uint64         `json:"updated_at_height"`
+	Multipliers     FeeMultipliers `json:"multipliers"`
+}
+
+// SetFeeMarketRequest is the operator-authenticated request to update fee
+// market parameters. Pointer fields distinguish "not set" from zero.
+type SetFeeMarketRequest struct {
+	BaseFee        *uint64         `json:"base_fee,omitempty"`
+	TargetBlockTxs *int            `json:"target_block_txs,omitempty"`
+	Multipliers    *FeeMultipliers `json:"multipliers,omitempty"`
 }
 
 type MempoolResponse struct {
@@ -1910,6 +1930,13 @@ type GovernanceProposal struct {
 	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
 	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
 	TargetActivationWindowSeconds     uint64 `json:"target_activation_window_seconds,omitempty"`
+	TargetFeeMarketBaseFee            uint64 `json:"target_fee_market_base_fee,omitempty"`
+	TargetFeeMarketTargetBlockTxs     int    `json:"target_fee_market_target_block_txs,omitempty"`
+	TargetFeeMultiplierBridgeOut      uint64 `json:"target_fee_multiplier_bridge_out,omitempty"`
+	TargetFeeMultiplierCreateIntent   uint64 `json:"target_fee_multiplier_create_intent,omitempty"`
+	TargetFeeMultiplierUploadNFT      uint64 `json:"target_fee_multiplier_upload_nft_template,omitempty"`
+	TargetFeeMultiplierRegisterVal    uint64 `json:"target_fee_multiplier_register_validator,omitempty"`
+	TargetFeeMultiplierBatchCommit    uint64 `json:"target_fee_multiplier_batch_commit,omitempty"`
 	ChainID                           string `json:"chain_id"`
 	ProposerNonce                     uint64 `json:"proposer_nonce"`
 	Status                            string `json:"status"`
@@ -1983,6 +2010,13 @@ type CreateGovernanceProposalRequest struct {
 	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
 	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
 	TargetActivationWindowSeconds     uint64 `json:"target_activation_window_seconds,omitempty"`
+	TargetFeeMarketBaseFee            uint64 `json:"target_fee_market_base_fee,omitempty"`
+	TargetFeeMarketTargetBlockTxs     int    `json:"target_fee_market_target_block_txs,omitempty"`
+	TargetFeeMultiplierBridgeOut      uint64 `json:"target_fee_multiplier_bridge_out,omitempty"`
+	TargetFeeMultiplierCreateIntent   uint64 `json:"target_fee_multiplier_create_intent,omitempty"`
+	TargetFeeMultiplierUploadNFT      uint64 `json:"target_fee_multiplier_upload_nft_template,omitempty"`
+	TargetFeeMultiplierRegisterVal    uint64 `json:"target_fee_multiplier_register_validator,omitempty"`
+	TargetFeeMultiplierBatchCommit    uint64 `json:"target_fee_multiplier_batch_commit,omitempty"`
 	Signature                         string `json:"signature"`
 	Nonce                             uint64 `json:"nonce"`
 	CreatedAtUnix                     int64  `json:"created_at_unix"`

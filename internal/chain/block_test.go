@@ -401,6 +401,10 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 		t.Fatalf("expected tx accepted, accepted=%t err=%v", accepted, err)
 	}
 
+	// Producer receives the transaction fees PLUS the block production reward.
+	// The producer (validator owner) also retains any remaining balance after
+	// staking. Capture balance before block production to measure the delta.
+	producerBalBefore := store.accountLocked(identity.OwnerAddress).Balance
 	produced, err := store.ProduceBlock()
 	if err != nil {
 		t.Fatal(err)
@@ -417,8 +421,7 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 	if toAccount.Balance != gfTokens(25) {
 		t.Fatalf("unexpected recipient balance: %d", toAccount.Balance)
 	}
-	// Producer receives the transaction fee PLUS the block production reward
-	// (BlockProductionRewardBPS% of ValidatorRewardPerBlock, no vesting).
+	// Producer balance must increase by at least the transfer fee + block reward.
 	params := store.miningParamsLocked()
 	perBlock := params.ValidatorRewardPerBlock
 	productionBPS := params.BlockProductionRewardBPS
@@ -426,10 +429,70 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 		productionBPS = 3000
 	}
 	blockReward := perBlock * productionBPS / 10000
-	expectedProducerBal := gfTokens(5) + blockReward
-	if producerAccount.Balance != expectedProducerBal {
-		t.Fatalf("unexpected producer balance: expected %d (fee %d + block reward %d), got %d",
-			expectedProducerBal, gfTokens(5), blockReward, producerAccount.Balance)
+	minExpectedGain := gfTokens(5) + blockReward
+	actualGain := producerAccount.Balance - producerBalBefore
+	if actualGain < minExpectedGain {
+		t.Fatalf("producer gain %d less than expected minimum %d (fee %d + block reward %d)",
+			actualGain, minExpectedGain, gfTokens(5), blockReward)
+	}
+}
+
+func TestChargeFeePayerEqualsProducerIsNoOp(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := wire.NormalizeAddress("0x00000000000000000000000000000000000000aa")
+	initialBal := uint64(1_000_000_000)
+	store.data.Accounts[addr] = wire.Account{Address: addr, Balance: initialBal}
+
+	tx := wire.Transaction{
+		TxID: "self-charge-test",
+		From: addr,
+		Fee:  100_000_000,
+	}
+	store.mu.Lock()
+	err = store.chargeTransactionFeeLocked(tx, addr)
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := store.accountLocked(addr).Balance
+	if got != initialBal {
+		t.Fatalf("self-charge must be no-op: want balance %d, got %d (delta %d)",
+			initialBal, got, int64(got)-int64(initialBal))
+	}
+}
+
+func TestChargeFeePayerDiffersFromProducer(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payer := wire.NormalizeAddress("0x00000000000000000000000000000000000000aa")
+	producer := wire.NormalizeAddress("0x00000000000000000000000000000000000000bb")
+	payerBal := uint64(1_000_000_000)
+	producerBal := uint64(500_000_000)
+	fee := uint64(100_000_000)
+	store.data.Accounts[payer] = wire.Account{Address: payer, Balance: payerBal}
+	store.data.Accounts[producer] = wire.Account{Address: producer, Balance: producerBal}
+
+	tx := wire.Transaction{
+		TxID: "normal-charge-test",
+		From: payer,
+		Fee:  fee,
+	}
+	store.mu.Lock()
+	err = store.chargeTransactionFeeLocked(tx, producer)
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := store.accountLocked(payer).Balance; got != payerBal-fee {
+		t.Fatalf("payer balance: want %d, got %d", payerBal-fee, got)
+	}
+	if got := store.accountLocked(producer).Balance; got != producerBal+fee {
+		t.Fatalf("producer balance: want %d, got %d", producerBal+fee, got)
 	}
 }
 

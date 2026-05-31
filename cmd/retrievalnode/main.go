@@ -46,7 +46,7 @@ func main() {
 	segmentSize := flag.Int64("gateway-segment-size", 4<<20, "segment size in bytes (default 4 MiB)")
 	gatewayMaxUploadBytes := flag.Int64("gateway-max-upload-bytes", 1<<30, "maximum HTTP upload request size in bytes")
 	gatewayAgentKeyFile := flag.String("gateway-agent-key-file", "", "JSON map of agent key id to private key for gateway-side signing")
-	gatewayAllowPrivateKeyAPIKeys := flag.Bool("gateway-allow-private-key-api-keys", true, "allow legacy API keys that include private keys in request headers")
+	gatewayAllowPrivateKeyAPIKeys := flag.Bool("gateway-allow-private-key-api-keys", false, "allow legacy API keys that include private keys in request headers")
 	corsOrigins := flag.String("cors-origins", "", "comma-separated allowed CORS origins (empty disables CORS)")
 	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "per-IP request rate limit (requests/sec, 0 disables)")
 	rateLimitBurst := flag.Int("rate-limit-burst", 0, "rate limit burst size (default: rps+1)")
