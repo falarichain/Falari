@@ -214,6 +214,7 @@ func (s *Store) slashVestingBucketsLocked(address string, amount uint64) uint64 
 	if amount == 0 {
 		return 0
 	}
+	address = wire.NormalizeAddress(address)
 	account := s.accountLocked(address)
 	if amount > account.PendingMiningRewards {
 		amount = account.PendingMiningRewards

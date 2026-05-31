@@ -49,6 +49,53 @@ func (s *Store) buildStorageAssignmentsLocked(req wire.CreateIntentRequest) ([]w
 			})
 		}
 	}
+
+	// Assign cross-parity shards for each repair pool. Within a pool the
+	// same shard position j across paired segments must land on different
+	// miners, and the cross-parity shard[j] must avoid both.
+	for _, pool := range req.RepairPools {
+		crossSegID := -(pool.PoolID + 1)
+		shardSize := pool.CrossParity.ShardSize
+		if shardSize <= 0 && len(req.Segments) > pool.SegmentIDs[0] {
+			shardSize, _ = plannedShardSize(req, pool.SegmentIDs[0])
+		}
+		for shardIndex := 0; shardIndex < totalShards; shardIndex++ {
+			// Collect miners already holding this shard position in the
+			// paired segments so the cross-parity shard avoids them.
+			usedInPool := map[string]bool{}
+			for _, segID := range pool.SegmentIDs {
+				if a, ok := assignmentForShard(assignments, segID, shardIndex); ok {
+					usedInPool[a.MinerAddress] = true
+				}
+			}
+			shardHash := ""
+			shardCID := ""
+			if shardIndex < len(pool.CrossParity.ShardHashes) {
+				shardHash = pool.CrossParity.ShardHashes[shardIndex]
+			}
+			if shardIndex < len(pool.CrossParity.ShardCIDs) {
+				shardCID = pool.CrossParity.ShardCIDs[shardIndex]
+			}
+			if shardCID == "" && shardHash != "" {
+				shardCID, _ = wire.RawCIDForHash(shardHash)
+			}
+			miner, ok := chooseAssignmentMiner(miners, available, usedInPool, req.FileRoot, crossSegID, shardIndex, uint64(shardSize))
+			if !ok {
+				return nil, errors.New("insufficient active miner capacity for cross-parity assignments")
+			}
+			available[miner.MinerAddress] -= uint64(shardSize)
+			assignments = append(assignments, wire.StorageAssignment{
+				SegmentID:    crossSegID,
+				ShardIndex:   shardIndex,
+				MinerAddress: miner.MinerAddress,
+				Endpoint:     miner.Endpoint,
+				ShardHash:    shardHash,
+				ShardCID:     shardCID,
+				ShardSize:    shardSize,
+			})
+		}
+	}
+
 	return assignments, nil
 }
 

@@ -146,7 +146,10 @@ func TestLevelDBBlkStoreAllKeys(t *testing.T) {
 }
 
 func TestMemoryBlkStoreSmoke(t *testing.T) {
-	store := NewMemoryBlkStore()
+	store, err := NewMemoryBlkStore()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer store.Close()
 
 	ctx := context.Background()

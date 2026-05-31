@@ -15,58 +15,58 @@ func (s *Store) initRewardPoolsLocked() {
 	}
 }
 
-func (s *Store) releaseEpochRewardsLocked(now int64) {
+// releaseFoundationPerBlockLocked releases a fixed FoundationRewardPerBlock from
+// the FoundationPool on every block. The reward is sent directly to the
+// FoundationAddress (no vesting).
+func (s *Store) releaseFoundationPerBlockLocked(now int64) {
 	s.initRewardPoolsLocked()
 	params := s.miningParamsLocked()
 
-	lastRelease := s.data.LastReleaseAtUnix
-	if lastRelease == 0 {
-		lastRelease = now
-		s.data.LastReleaseAtUnix = now
+	perBlock := params.FoundationRewardPerBlock
+	if perBlock == 0 {
+		perBlock = 16 * reward.TokenUnit
+	}
+	if s.data.RewardPools.FoundationRemaining == 0 {
 		return
 	}
-	elapsed := now - lastRelease
-	if elapsed <= 0 {
-		return
+	amount := perBlock
+	if amount > s.data.RewardPools.FoundationRemaining {
+		amount = s.data.RewardPools.FoundationRemaining
 	}
-	s.data.LastReleaseAtUnix = now
+	s.data.RewardPools.FoundationRemaining -= amount
+	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, amount)
 
-	const secondsPerYear int64 = 365 * 86400
-
-	// Storage: released per-block, not per-epoch (see releaseStoragePerBlockLocked).
-
-	// Foundation: linear release (initialAmount × rate).
-	foundationRelease := releaseProportionalLocked(&s.data.RewardPools.FoundationRemaining, reward.FoundationPoolInitial, params.FoundationAnnualRateBPS, elapsed, secondsPerYear)
-
-	// Retrieval: linear release (initialAmount × rate).
-	retrievalRelease := releaseProportionalLocked(&s.data.RewardPools.RetrievalRemaining, reward.RetrievalPoolInitial, params.RetrievalAnnualRateBPS, elapsed, secondsPerYear)
-
-	// Validator: released per-block, not per-epoch (see releaseValidatorPerBlockLocked).
-
-	totalRelease := saturatingAdd(retrievalRelease, foundationRelease)
-	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, totalRelease)
-	s.distributeRetrievalPoolRewardsLocked(retrievalRelease)
-	s.distributeFoundationPoolRewardsLocked(foundationRelease)
-	if retrievalRelease > 0 || foundationRelease > 0 {
-		log.Printf("token release epoch=%d elapsed=%ds retrieval=%d foundation=%d total=%d",
-			s.data.EpochRound, elapsed, retrievalRelease, foundationRelease,
-			retrievalRelease+foundationRelease)
+	s.distributeFoundationPoolRewardsLocked(amount)
+	if amount > 0 {
+		log.Printf("foundation per-block release total=%d time=%d", amount, now)
 	}
 }
 
-func releaseProportionalLocked(pool *uint64, baseAmount uint64, annualRateBPS uint64, elapsed int64, secondsPerYear int64) uint64 {
-	if pool == nil || *pool == 0 || baseAmount == 0 || annualRateBPS == 0 || elapsed <= 0 || secondsPerYear <= 0 {
-		return 0
+// releaseRetrievalPerBlockLocked releases a fixed RetrievalRewardPerBlock from
+// the RetrievalPool on every block. The reward is sent directly to the
+// RetrievalAddress (no vesting).
+func (s *Store) releaseRetrievalPerBlockLocked(now int64) {
+	s.initRewardPoolsLocked()
+	params := s.miningParamsLocked()
+
+	perBlock := params.RetrievalRewardPerBlock
+	if perBlock == 0 {
+		perBlock = 10 * reward.TokenUnit
 	}
-	amount := mulDivUint64(baseAmount, annualRateBPS, uint64(elapsed), uint64(secondsPerYear)*10000)
-	if amount > *pool {
-		amount = *pool
+	if s.data.RewardPools.RetrievalRemaining == 0 {
+		return
 	}
-	if amount == 0 {
-		return 0
+	amount := perBlock
+	if amount > s.data.RewardPools.RetrievalRemaining {
+		amount = s.data.RewardPools.RetrievalRemaining
 	}
-	*pool -= amount
-	return amount
+	s.data.RewardPools.RetrievalRemaining -= amount
+	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, amount)
+
+	s.distributeRetrievalPoolRewardsLocked(amount)
+	if amount > 0 {
+		log.Printf("retrieval per-block release total=%d time=%d", amount, now)
+	}
 }
 
 func mulDivUint64(a, b, c, denominator uint64) uint64 {
@@ -201,8 +201,13 @@ func (s *Store) distributeStoragePoolRewardsLocked(amount uint64, now int64) {
 	if totalWeight == 0 || len(entries) == 0 {
 		return
 	}
-	for _, entry := range entries {
+	var distributed uint64
+	for i, entry := range entries {
 		reward := amount * entry.weight / totalWeight
+		// Give integer-division remainder to the last entry to avoid token dust loss.
+		if i == len(entries)-1 && distributed+reward < amount {
+			reward = amount - distributed
+		}
 		if reward == 0 {
 			continue
 		}
@@ -211,6 +216,7 @@ func (s *Store) distributeStoragePoolRewardsLocked(amount uint64, now int64) {
 		stats.StorageRewards = saturatingAdd(stats.StorageRewards, reward)
 		stats.Rewards = saturatingAdd(stats.Rewards, reward)
 		s.data.Miners[entry.address] = stats
+		distributed += reward
 	}
 }
 

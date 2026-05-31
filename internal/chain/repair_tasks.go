@@ -47,6 +47,37 @@ func (s *Store) CreateRepairTasks(req wire.CreateRepairRequest) (wire.CreateRepa
 	return wire.CreateRepairResponse{IntentID: req.IntentID, Tasks: tasks}, nil
 }
 
+// findPoolForSegment returns the RepairPool containing the given segmentID
+// and the index (0 or 1) of segmentID within that pool. Returns nil, -1 when
+// the segment is not part of any pool.
+func findPoolForSegment(pools []wire.RepairPool, segmentID int) (*wire.RepairPool, int) {
+	for i := range pools {
+		if pools[i].SegmentIDs[0] == segmentID {
+			return &pools[i], 0
+		}
+		if pools[i].SegmentIDs[1] == segmentID {
+			return &pools[i], 1
+		}
+	}
+	return nil, -1
+}
+
+// crossParityReceiptsAvailable checks whether both the peer segment's shard
+// and the cross-parity shard are available (have receipts from online miners).
+func crossParityReceiptsAvailable(intent *Intent, peerSegID, paritySegID, shardIndex int, unavailable map[string]bool) bool {
+	peerReceipts := intent.Receipts[peerSegID]
+	peerReceipt, hasPeer := peerReceipts[shardIndex]
+	if !hasPeer || unavailable[peerReceipt.MinerAddress] {
+		return false
+	}
+	parityReceipts := intent.Receipts[paritySegID]
+	parityReceipt, hasParity := parityReceipts[shardIndex]
+	if !hasParity || unavailable[parityReceipt.MinerAddress] {
+		return false
+	}
+	return true
+}
+
 func (s *Store) buildRepairTasksLocked(req wire.CreateRepairRequest) ([]wire.RepairTask, error) {
 	intent, ok := s.data.Intents[req.IntentID]
 	if !ok {
@@ -66,6 +97,8 @@ func (s *Store) buildRepairTasksLocked(req wire.CreateRepairRequest) ([]wire.Rep
 		return nil, errors.New("invalid erasure policy")
 	}
 	tasks := make([]wire.RepairTask, 0)
+
+	// Phase A: regular segment shards — prefer cross-parity when available.
 	for segmentID := range intent.SegmentRoots {
 		receipts := intent.Receipts[segmentID]
 		for shardIndex := 0; shardIndex < totalShards; shardIndex++ {
@@ -84,6 +117,21 @@ func (s *Store) buildRepairTasksLocked(req wire.CreateRepairRequest) ([]wire.Rep
 			if _, exists := s.pendingRepairTaskForShardLocked(intent.IntentID, segmentID, shardIndex, ""); exists {
 				continue
 			}
+
+			// Try cross-parity repair first (only needs 2 downloads).
+			if pool, posInPool := findPoolForSegment(intent.RepairPools, segmentID); pool != nil {
+				peerSegID := pool.SegmentIDs[1-posInPool]
+				paritySegID := -(pool.PoolID + 1)
+				if crossParityReceiptsAvailable(intent, peerSegID, paritySegID, shardIndex, unavailable) {
+					task, err := s.buildCrossParityRepairTaskLocked(intent, pool, segmentID, peerSegID, paritySegID, shardIndex, oldMiner, reason)
+					if err == nil {
+						tasks = append(tasks, task)
+						continue
+					}
+					// Fall through to RS repair on error.
+				}
+			}
+
 			task, err := s.buildRepairTaskForShardLocked(intent, segmentID, shardIndex, oldMiner, reason, unavailable)
 			if err != nil {
 				return nil, err
@@ -91,6 +139,35 @@ func (s *Store) buildRepairTasksLocked(req wire.CreateRepairRequest) ([]wire.Rep
 			tasks = append(tasks, task)
 		}
 	}
+
+	// Phase B: cross-parity shard repair (negative segmentIDs).
+	for _, pool := range intent.RepairPools {
+		paritySegID := -(pool.PoolID + 1)
+		parityReceipts := intent.Receipts[paritySegID]
+		for shardIndex := 0; shardIndex < totalShards; shardIndex++ {
+			receipt, hasReceipt := parityReceipts[shardIndex]
+			reason := ""
+			oldMiner := ""
+			switch {
+			case hasReceipt && unavailable[receipt.MinerAddress]:
+				reason = "unavailable_miner"
+				oldMiner = receipt.MinerAddress
+			case !hasReceipt && req.IncludeMissing:
+				reason = "missing_shard"
+			default:
+				continue
+			}
+			if _, exists := s.pendingRepairTaskForShardLocked(intent.IntentID, paritySegID, shardIndex, ""); exists {
+				continue
+			}
+			task, err := s.buildCrossParityRebuildTaskLocked(intent, &pool, paritySegID, shardIndex, oldMiner, reason, unavailable)
+			if err != nil {
+				continue // skip if insufficient sources; may recover later
+			}
+			tasks = append(tasks, task)
+		}
+	}
+
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].SegmentID != tasks[j].SegmentID {
 			return tasks[i].SegmentID < tasks[j].SegmentID
@@ -174,6 +251,151 @@ func (s *Store) buildRepairAssignmentLocked(intent *Intent, segmentID int, shard
 		ShardHash:    shardHash,
 		ShardSize:    shardSize,
 	}, nil
+}
+
+// buildCrossParityRepairTaskLocked creates a repair task that recovers a lost
+// segment shard using the cross-parity path: download the peer segment's shard
+// and the cross-parity shard, then XOR them. This requires only 2 downloads
+// instead of k (DataShards).
+func (s *Store) buildCrossParityRepairTaskLocked(intent *Intent, pool *wire.RepairPool, segmentID, peerSegID, paritySegID, shardIndex int, oldMiner string, reason string) (wire.RepairTask, error) {
+	totalShards := intent.Erasure.DataShards + intent.Erasure.ParityShards
+	assignment, err := s.buildCrossParityAssignmentLocked(intent, pool, segmentID, shardIndex, oldMiner)
+	if err != nil {
+		return wire.RepairTask{}, err
+	}
+	// The rebuilt shard must match the original segment shard hash, not the
+	// cross-parity hash. Override with the segment plan's hash.
+	if segmentID >= 0 && segmentID < len(intent.Segments) && shardIndex >= 0 && shardIndex < len(intent.Segments[segmentID].ShardHashes) {
+		assignment.ShardHash = intent.Segments[segmentID].ShardHashes[shardIndex]
+	}
+	sourceReceipts := crossParityRepairSources(intent, peerSegID, paritySegID, shardIndex, oldMiner)
+	return wire.RepairTask{
+		RepairID:            repairTaskID(intent.IntentID, segmentID, shardIndex, assignment.MinerAddress),
+		IntentID:            intent.IntentID,
+		SegmentID:           segmentID,
+		ShardIndex:          shardIndex,
+		OldMinerAddress:     oldMiner,
+		Reason:              reason,
+		Status:              repairStatusPending,
+		AvailableShards:     availableShardCount(intent.Receipts[segmentID], nil),
+		RequiredShards:      2,
+		TargetShards:        totalShards,
+		MissingShardIndexes: []int{shardIndex},
+		Assignment:          assignment,
+		SourceReceipts:      sourceReceipts,
+		RepairMode:          "cross_parity",
+		PoolID:              pool.PoolID,
+		PeerSegmentID:       peerSegID,
+	}, nil
+}
+
+// buildCrossParityRebuildTaskLocked creates a repair task that rebuilds a lost
+// cross-parity shard from the two source segments' shards. The prover will
+// download segA.shard[j] and segB.shard[j], then XOR them.
+func (s *Store) buildCrossParityRebuildTaskLocked(intent *Intent, pool *wire.RepairPool, paritySegID, shardIndex int, oldMiner string, reason string, unavailable map[string]bool) (wire.RepairTask, error) {
+	totalShards := intent.Erasure.DataShards + intent.Erasure.ParityShards
+	assignment, err := s.buildCrossParityAssignmentLocked(intent, pool, paritySegID, shardIndex, oldMiner)
+	if err != nil {
+		return wire.RepairTask{}, err
+	}
+	// Collect one source receipt from each segment in the pool.
+	var sourceReceipts []wire.MinerReceipt
+	for _, segID := range pool.SegmentIDs {
+		segReceipts := intent.Receipts[segID]
+		if segReceipts == nil {
+			continue
+		}
+		receipt, ok := segReceipts[shardIndex]
+		if !ok || unavailable[receipt.MinerAddress] {
+			continue
+		}
+		sourceReceipts = append(sourceReceipts, receipt)
+	}
+	if len(sourceReceipts) < 2 {
+		return wire.RepairTask{}, errors.New("insufficient source receipts for cross-parity rebuild")
+	}
+	return wire.RepairTask{
+		RepairID:            repairTaskID(intent.IntentID, paritySegID, shardIndex, assignment.MinerAddress),
+		IntentID:            intent.IntentID,
+		SegmentID:           paritySegID,
+		ShardIndex:          shardIndex,
+		OldMinerAddress:     oldMiner,
+		Reason:              reason,
+		Status:              repairStatusPending,
+		AvailableShards:     availableShardCount(intent.Receipts[paritySegID], unavailable),
+		RequiredShards:      2,
+		TargetShards:        totalShards,
+		MissingShardIndexes: []int{shardIndex},
+		Assignment:          assignment,
+		SourceReceipts:      sourceReceipts,
+		RepairMode:          "cross_parity_rebuild",
+		PoolID:              pool.PoolID,
+	}, nil
+}
+
+// buildCrossParityAssignmentLocked assigns a new miner for a cross-parity
+// repair or cross-parity rebuild task, using the pool's cross-parity shard
+// size and hash.
+func (s *Store) buildCrossParityAssignmentLocked(intent *Intent, pool *wire.RepairPool, segmentID, shardIndex int, oldMiner string) (wire.StorageAssignment, error) {
+	miners := s.assignableMinersLocked()
+	if len(miners) == 0 {
+		return wire.StorageAssignment{}, errors.New("no active miner capacity for repair")
+	}
+	used := map[string]bool{}
+	if oldMiner != "" {
+		used[oldMiner] = true
+	}
+	if receipts := intent.Receipts[segmentID]; receipts != nil {
+		for index, receipt := range receipts {
+			if index != shardIndex {
+				used[receipt.MinerAddress] = true
+			}
+		}
+	}
+	available := make(map[string]uint64, len(miners))
+	for _, miner := range miners {
+		available[miner.MinerAddress] = minerAvailableBytes(miner)
+	}
+	if oldMiner != "" {
+		available[oldMiner] = 0
+	}
+	miner, ok := chooseAssignmentMiner(miners, available, used, "repair:"+intent.FileRoot, segmentID, shardIndex, uint64(pool.CrossParity.ShardSize))
+	if !ok {
+		return wire.StorageAssignment{}, errors.New("insufficient active miner capacity for repair")
+	}
+	shardHash := ""
+	if shardIndex >= 0 && shardIndex < len(pool.CrossParity.ShardHashes) {
+		shardHash = pool.CrossParity.ShardHashes[shardIndex]
+	}
+	return wire.StorageAssignment{
+		SegmentID:    segmentID,
+		ShardIndex:   shardIndex,
+		MinerAddress: miner.MinerAddress,
+		Endpoint:     miner.Endpoint,
+		ShardHash:    shardHash,
+		ShardSize:    pool.CrossParity.ShardSize,
+	}, nil
+}
+
+// crossParityRepairSources returns the two source receipts needed for a
+// cross-parity repair: the peer segment's shard and the cross-parity shard.
+func crossParityRepairSources(intent *Intent, peerSegID, paritySegID, shardIndex int, oldMiner string) []wire.MinerReceipt {
+	var receipts []wire.MinerReceipt
+	if peerReceipts := intent.Receipts[peerSegID]; peerReceipts != nil {
+		if r, ok := peerReceipts[shardIndex]; ok {
+			if oldMiner == "" || r.MinerAddress != oldMiner {
+				receipts = append(receipts, r)
+			}
+		}
+	}
+	if parityReceipts := intent.Receipts[paritySegID]; parityReceipts != nil {
+		if r, ok := parityReceipts[shardIndex]; ok {
+			if oldMiner == "" || r.MinerAddress != oldMiner {
+				receipts = append(receipts, r)
+			}
+		}
+	}
+	return receipts
 }
 
 func (s *Store) applyRepairTasksLocked(tasks []wire.RepairTask) error {

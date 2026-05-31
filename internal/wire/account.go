@@ -86,14 +86,11 @@ func recoverTransferSigner(req TransferRequest, chainID string) (*ecdsa.PublicKe
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid transfer signature size")
-	}
 	hash, err := TransferHash(req, chainID)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
 		return nil, "", err
 	}

@@ -175,6 +175,8 @@ func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, pro
 		TargetStorageRewardPerBlock:       req.TargetStorageRewardPerBlock,
 		TargetRetrievalAnnualRateBPS:      req.TargetRetrievalAnnualRateBPS,
 		TargetFoundationAnnualRateBPS:     req.TargetFoundationAnnualRateBPS,
+		TargetRetrievalRewardPerBlock:     req.TargetRetrievalRewardPerBlock,
+		TargetFoundationRewardPerBlock:    req.TargetFoundationRewardPerBlock,
 		TargetAvailabilityWindowSize:      req.TargetAvailabilityWindowSize,
 		TargetAvailabilityThresholdBPS:    req.TargetAvailabilityThresholdBPS,
 		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
@@ -571,6 +573,8 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.StorageRewardPerBlock, proposal.TargetStorageRewardPerBlock)
 	applyIfNonZero(&p.RetrievalAnnualRateBPS, proposal.TargetRetrievalAnnualRateBPS)
 	applyIfNonZero(&p.FoundationAnnualRateBPS, proposal.TargetFoundationAnnualRateBPS)
+	applyIfNonZero(&p.RetrievalRewardPerBlock, proposal.TargetRetrievalRewardPerBlock)
+	applyIfNonZero(&p.FoundationRewardPerBlock, proposal.TargetFoundationRewardPerBlock)
 	applyIfNonZero(&p.AvailabilityWindowSize, proposal.TargetAvailabilityWindowSize)
 	applyIfNonZero(&p.AvailabilityThresholdBPS, proposal.TargetAvailabilityThresholdBPS)
 	applyIfNonZero(&p.BlockProductionRewardBPS, proposal.TargetBlockProductionRewardBPS)
@@ -602,8 +606,8 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 		max   uint64
 	}{
 		{"storage_reward_per_block", p.StorageRewardPerBlock, maxStorageRewardPerBlock},
-		{"retrieval_annual_rate_bps", p.RetrievalAnnualRateBPS, maxAnnualReleaseRateBPS},
-		{"foundation_annual_rate_bps", p.FoundationAnnualRateBPS, maxAnnualReleaseRateBPS},
+		{"retrieval_reward_per_block", p.RetrievalRewardPerBlock, maxRetrievalRewardPerBlock},
+		{"foundation_reward_per_block", p.FoundationRewardPerBlock, maxFoundationRewardPerBlock},
 	} {
 		if check.value > check.max {
 			return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: %s %d exceeds maximum %d", check.name, check.value, check.max)
@@ -675,6 +679,13 @@ func (s *Store) CancelGovernanceProposal(req wire.CreateGovernanceProposalReques
 	if err := wire.VerifyGovernanceProposal(req, proposer); err != nil {
 		return wire.CreateGovernanceProposalResponse{}, err
 	}
+
+	// Verify nonce for replay protection (same as CreateGovernanceProposal).
+	expectedNonce := s.data.OperatorNonces[proposer]
+	if req.Nonce != expectedNonce {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("invalid proposer nonce")
+	}
+	s.data.OperatorNonces[proposer] = expectedNonce + 1
 
 	proposal.Status = wire.GovProposalCancelled
 	s.data.GovernanceProposals[proposalID] = proposal
@@ -968,6 +979,8 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		req.TargetStorageRewardPerBlock != 0 ||
 		req.TargetRetrievalAnnualRateBPS != 0 ||
 		req.TargetFoundationAnnualRateBPS != 0 ||
+		req.TargetRetrievalRewardPerBlock != 0 ||
+		req.TargetFoundationRewardPerBlock != 0 ||
 		req.TargetAvailabilityWindowSize != 0 ||
 		req.TargetAvailabilityThresholdBPS != 0 ||
 		req.TargetBlockProductionRewardBPS != 0 ||
@@ -1028,23 +1041,29 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 		return err
 	}
 
-	// Annual release rates: each non-zero rate must be <= maxAnnualReleaseRateBPS.
+	// Per-block rewards: each non-zero value must be <= respective max.
 	for _, check := range []struct {
 		name  string
 		value uint64
 	}{
 		{"storage_reward_per_block", req.TargetStorageRewardPerBlock},
-		{"retrieval_annual_rate_bps", req.TargetRetrievalAnnualRateBPS},
-		{"foundation_annual_rate_bps", req.TargetFoundationAnnualRateBPS},
 	} {
 		if check.value != 0 && check.value > maxAnnualReleaseRateBPS {
-			return fmt.Errorf("%s exceeds maximum %d BPS", check.name, maxAnnualReleaseRateBPS)
+			return fmt.Errorf("%s exceeds maximum %d", check.name, maxAnnualReleaseRateBPS)
 		}
 	}
 
 	// Validator reward per block: if non-zero, must be <= max.
 	if req.TargetValidatorRewardPerBlock != 0 && req.TargetValidatorRewardPerBlock > maxValidatorRewardPerBlock {
 		return fmt.Errorf("validator_reward_per_block must be <= %d", maxValidatorRewardPerBlock)
+	}
+
+	// Foundation and Retrieval reward per block: if non-zero, must be <= max.
+	if req.TargetFoundationRewardPerBlock != 0 && req.TargetFoundationRewardPerBlock > maxFoundationRewardPerBlock {
+		return fmt.Errorf("foundation_reward_per_block must be <= %d", maxFoundationRewardPerBlock)
+	}
+	if req.TargetRetrievalRewardPerBlock != 0 && req.TargetRetrievalRewardPerBlock > maxRetrievalRewardPerBlock {
+		return fmt.Errorf("retrieval_reward_per_block must be <= %d", maxRetrievalRewardPerBlock)
 	}
 
 	// Weight BPS sum: use proposed values where non-zero, fall back to current.
@@ -1158,6 +1177,8 @@ func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernancePro
 		TargetStorageRewardPerBlock:       p.TargetStorageRewardPerBlock,
 		TargetRetrievalAnnualRateBPS:      p.TargetRetrievalAnnualRateBPS,
 		TargetFoundationAnnualRateBPS:     p.TargetFoundationAnnualRateBPS,
+		TargetRetrievalRewardPerBlock:     p.TargetRetrievalRewardPerBlock,
+		TargetFoundationRewardPerBlock:    p.TargetFoundationRewardPerBlock,
 		TargetAvailabilityWindowSize:      p.TargetAvailabilityWindowSize,
 		TargetAvailabilityThresholdBPS:    p.TargetAvailabilityThresholdBPS,
 		TargetBlockProductionRewardBPS:    p.TargetBlockProductionRewardBPS,

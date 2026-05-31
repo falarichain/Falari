@@ -3,8 +3,12 @@ package chain
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
+	"math/big"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"chain/internal/consensus"
@@ -20,6 +24,8 @@ const (
 	defaultMaxStorageTxBytes = 128 * 1024
 	defaultBlockSizeHeadroom = 8 * 1024
 	maxFutureBlockTimeSkew   = 30 * time.Second
+	maxMempoolTxs            = 10_000 // prevents unbounded mempool growth / OOM
+	maxMempoolTxsPerSender   = 512   // prevents single-sender mempool spam
 )
 
 func (s *Store) recordTxLocked(txType, from string, payload any) string {
@@ -188,11 +194,20 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	if err := s.applyBlockTransactionsLocked(block); err != nil {
 		return false, err
 	}
+	// P5-C01: Snapshot state before post-application validation so we can
+	// restore if StateRoot or ReceiptsRoot checks fail.  Without this,
+	// transactions would be applied to state even though the block is rejected.
+	postTxSnapshot, snapErr := cloneStateForRollback(s.data)
+	if snapErr != nil {
+		return false, snapErr
+	}
 	if block.StateRoot != "" && block.StateRoot != s.stateRootLocked() {
+		s.data = postTxSnapshot
 		return false, errors.New("block state root mismatch")
 	}
 	s.prepareReceiptsForBlockLocked(&block)
 	if block.ReceiptsRoot != "" && block.ReceiptsRoot != s.receiptsRootForBlockLocked(block) {
+		s.data = postTxSnapshot
 		return false, errors.New("block receipts root mismatch")
 	}
 	validator = s.validatorLocked(ownerAddr)
@@ -212,7 +227,8 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	s.recordProposerTurnLocked(ownerAddr, true)
 	s.releaseValidatorPerBlockLocked(block.TimeUnix, ownerAddr)
 	s.releaseStoragePerBlockLocked(block.TimeUnix)
-	s.releaseEpochRewardsLocked(block.TimeUnix)
+	s.releaseFoundationPerBlockLocked(block.TimeUnix)
+	s.releaseRetrievalPerBlockLocked(block.TimeUnix)
 	s.removePendingTxsLocked(block.Transactions)
 	if err := s.saveLocked(); err != nil {
 		return false, err
@@ -283,7 +299,8 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	s.recordProposerTurnLocked(s.operatorIdentity.OwnerAddress, true)
 	s.releaseValidatorPerBlockLocked(block.TimeUnix, s.operatorIdentity.OwnerAddress)
 	s.releaseStoragePerBlockLocked(block.TimeUnix)
-	s.releaseEpochRewardsLocked(block.TimeUnix)
+	s.releaseFoundationPerBlockLocked(block.TimeUnix)
+	s.releaseRetrievalPerBlockLocked(block.TimeUnix)
 	s.removePendingTxsLocked(appliedTxs)
 	for _, tx := range appliedTxs {
 		s.data.ConfirmedTxs[tx.TxID] = true
@@ -378,6 +395,18 @@ func (s *Store) SubmitConsensusVote(req wire.SubmitConsensusVoteRequest) (wire.S
 	if err := s.validateConsensusVoteLocked(block, vote); err != nil {
 		return wire.SubmitConsensusVoteResponse{}, err
 	}
+
+	// P2-C05: Detect cross-round equivocation — a validator must not vote for
+	// different block hashes at the same height with the same vote type.
+	for _, existing := range s.data.ConsensusVotes {
+		if existing.Height == vote.Height &&
+			existing.Type == vote.Type &&
+			existing.ValidatorAddress == vote.ValidatorAddress &&
+			existing.BlockHash != vote.BlockHash {
+			return wire.SubmitConsensusVoteResponse{}, errors.New("equivocation: validator voted for conflicting blocks at same height")
+		}
+	}
+
 	key := consensusVoteKey(vote)
 	if existing, ok := s.data.ConsensusVotes[key]; ok {
 		if existing.BlockHash != vote.BlockHash || existing.Signature != vote.Signature {
@@ -719,7 +748,7 @@ func (s *Store) blockFinalityLocked(block wire.Block, votes []wire.BlockVote) wi
 		normalized := vote
 		normalized.Power = power
 		acceptedVotes = append(acceptedVotes, normalized)
-		votingPower += power
+		votingPower = saturatingAdd(votingPower, power)
 	}
 	sort.SliceStable(acceptedVotes, func(i, j int) bool {
 		return acceptedVotes[i].ValidatorAddress < acceptedVotes[j].ValidatorAddress
@@ -789,14 +818,19 @@ func (s *Store) consensusVoteFinalityLocked(block wire.Block, round uint64, vote
 	totalPower := s.totalVotingPowerLocked(block)
 	thresholdPower := bftThreshold(totalPower)
 	var votingPower uint64
+	seen := make(map[string]bool) // P2-H03: Deduplicate validator votes.
 	for _, vote := range s.data.ConsensusVotes {
 		if vote.Height != block.Height || vote.Round != round || vote.Type != voteType || vote.BlockHash != block.Hash {
+			continue
+		}
+		if seen[vote.ValidatorAddress] {
 			continue
 		}
 		if s.validateConsensusVoteLocked(block, vote) != nil {
 			continue
 		}
-		votingPower += s.validatorPowerForBlockLocked(block, vote.ValidatorAddress, vote.ValidatorPublicKey)
+		seen[vote.ValidatorAddress] = true
+		votingPower = saturatingAdd(votingPower, s.validatorPowerForBlockLocked(block, vote.ValidatorAddress, vote.ValidatorPublicKey))
 	}
 	return wire.BlockFinality{
 		Round:          round,
@@ -817,7 +851,7 @@ func consensusVoteKey(vote wire.ConsensusVote) string {
 func (s *Store) totalVotingPowerLocked(block wire.Block) uint64 {
 	var total uint64
 	for _, address := range s.consensusValidatorAddressesLocked() {
-		total += s.validatorPowerLocked(address)
+		total = saturatingAdd(total, s.validatorPowerLocked(address))
 	}
 	if total == 0 {
 		return validatorRegistrationPowerFromTx(block.Transactions, block.ProducerAddress, block.ProducerPublicKey)
@@ -846,7 +880,7 @@ func validatorPower(validator wire.ValidatorInfo) uint64 {
 	if selfStake == 0 {
 		selfStake = validator.Stake
 	}
-	total := selfStake + validator.DelegatedStake
+	total := saturatingAdd(selfStake, validator.DelegatedStake)
 	if total > 0 {
 		return total
 	}
@@ -857,7 +891,15 @@ func bftThreshold(totalPower uint64) uint64 {
 	if totalPower == 0 {
 		return 0
 	}
-	return (totalPower*2)/3 + 1
+	// P5-C02: Use big.Int to avoid overflow when totalPower is near uint64 max.
+	p := new(big.Int).SetUint64(totalPower)
+	p.Mul(p, big.NewInt(2))
+	p.Div(p, big.NewInt(3))
+	p.Add(p, big.NewInt(1))
+	if !p.IsUint64() {
+		return math.MaxUint64
+	}
+	return p.Uint64()
 }
 
 func (s *Store) consensusValidatorAddressesLocked() []string {
@@ -956,6 +998,20 @@ func (s *Store) enqueuePendingTxLocked(tx wire.Transaction) (bool, error) {
 		}
 		s.data.PendingTxs[i] = tx
 		return true, nil
+	}
+	// Enforce mempool size bounds to prevent OOM from transaction flooding.
+	if len(s.data.PendingTxs) >= maxMempoolTxs {
+		return false, fmt.Errorf("mempool full: %d transactions (max %d)", len(s.data.PendingTxs), maxMempoolTxs)
+	}
+	senderCount := 0
+	txFromLower := strings.ToLower(tx.From)
+	for _, pending := range s.data.PendingTxs {
+		if strings.ToLower(pending.From) == txFromLower {
+			senderCount++
+		}
+	}
+	if senderCount >= maxMempoolTxsPerSender {
+		return false, fmt.Errorf("mempool per-sender limit: %d transactions from %s (max %d)", senderCount, tx.From, maxMempoolTxsPerSender)
 	}
 	s.data.PendingTxs = append(s.data.PendingTxs, tx)
 	return true, nil

@@ -7,7 +7,6 @@ import (
 	chaincrypto "chain/internal/crypto"
 	"chain/internal/wire"
 )
-
 func ComputeSegmentRoots(path string, segmentSize int64) (int64, []string, string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -143,4 +142,159 @@ func ComputeEncryptedErasurePlan(path string, plaintextSegmentSize int64, dataSh
 		storedSize += int64(len(ciphertext))
 	}
 	return storedSize, storedSegmentSize, meta, segments, segmentRoots, chaincrypto.MerkleRoot(segmentRoots), nil
+}
+
+// ComputeRepairPools computes cross-parity repair pools for consecutive segment
+// pairs. Each pool pairs two segments and computes XOR cross-parity shards,
+// enabling single-shard repair with only 2 downloads instead of k.
+// Segments that don't have a pair (odd count) are skipped.
+func ComputeRepairPools(path string, segmentSize int64, segments []wire.SegmentPlan, dataShards, parityShards int) ([]wire.RepairPool, error) {
+	if len(segments) < 2 {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var pools []wire.RepairPool
+	for poolID := 0; poolID+1 < len(segments); poolID += 2 {
+		segA := segments[poolID]
+		segB := segments[poolID+1]
+
+		shardsA, err := encodeSegmentFromFile(file, int64(segA.SegmentID)*segmentSize, segmentSize, dataShards, parityShards)
+		if err != nil {
+			return nil, err
+		}
+		shardsB, err := encodeSegmentFromFile(file, int64(segB.SegmentID)*segmentSize, segmentSize, dataShards, parityShards)
+		if err != nil {
+			return nil, err
+		}
+
+		crossShards, err := ComputeCrossParityShards(shardsA, shardsB)
+		if err != nil {
+			return nil, err
+		}
+
+		crossHashes := make([]string, len(crossShards))
+		crossCIDs := make([]string, len(crossShards))
+		var shardSize int64
+		for i, shard := range crossShards {
+			crossHashes[i] = chaincrypto.HashBytes(shard)
+			crossCIDs[i], err = wire.RawCIDForHash(crossHashes[i])
+			if err != nil {
+				return nil, err
+			}
+			shardSize = int64(len(shard))
+		}
+
+		pools = append(pools, wire.RepairPool{
+			PoolID:     poolID / 2,
+			SegmentIDs: [2]int{segA.SegmentID, segB.SegmentID},
+			CrossParity: wire.CrossParityPlan{
+				ShardHashes: crossHashes,
+				ShardCIDs:   crossCIDs,
+				ShardSize:   shardSize,
+			},
+		})
+	}
+	return pools, nil
+}
+
+// ComputeRepairPoolsEncrypted computes cross-parity repair pools for encrypted
+// uploads. Each segment is encrypted then RS-encoded before XOR cross-parity
+// is computed, so the cross-parity shards operate on ciphertext shards.
+func ComputeRepairPoolsEncrypted(path string, plaintextSegmentSize int64, key []byte, meta wire.EncryptionMetadata, segments []wire.SegmentPlan, dataShards, parityShards int) ([]wire.RepairPool, error) {
+	if len(segments) < 2 {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var pools []wire.RepairPool
+	for poolID := 0; poolID+1 < len(segments); poolID += 2 {
+		segA := segments[poolID]
+		segB := segments[poolID+1]
+
+		shardsA, err := encryptAndEncodeSegment(file, int64(segA.SegmentID)*plaintextSegmentSize, plaintextSegmentSize, key, meta, segA.SegmentID, dataShards, parityShards)
+		if err != nil {
+			return nil, err
+		}
+		shardsB, err := encryptAndEncodeSegment(file, int64(segB.SegmentID)*plaintextSegmentSize, plaintextSegmentSize, key, meta, segB.SegmentID, dataShards, parityShards)
+		if err != nil {
+			return nil, err
+		}
+
+		crossShards, err := ComputeCrossParityShards(shardsA, shardsB)
+		if err != nil {
+			return nil, err
+		}
+
+		crossHashes := make([]string, len(crossShards))
+		crossCIDs := make([]string, len(crossShards))
+		var shardSize int64
+		for i, shard := range crossShards {
+			crossHashes[i] = chaincrypto.HashBytes(shard)
+			crossCIDs[i], err = wire.RawCIDForHash(crossHashes[i])
+			if err != nil {
+				return nil, err
+			}
+			shardSize = int64(len(shard))
+		}
+
+		pools = append(pools, wire.RepairPool{
+			PoolID:     poolID / 2,
+			SegmentIDs: [2]int{segA.SegmentID, segB.SegmentID},
+			CrossParity: wire.CrossParityPlan{
+				ShardHashes: crossHashes,
+				ShardCIDs:   crossCIDs,
+				ShardSize:   shardSize,
+			},
+		})
+	}
+	return pools, nil
+}
+
+// encryptAndEncodeSegment reads plaintext from the file, encrypts it, and
+// RS-encodes the ciphertext into shards.
+func encryptAndEncodeSegment(file *os.File, offset, plaintextSegmentSize int64, key []byte, meta wire.EncryptionMetadata, segmentID, dataShards, parityShards int) ([][]byte, error) {
+	plain := make([]byte, plaintextSegmentSize)
+	if _, err := file.ReadAt(plain, offset); err != nil && err != io.EOF {
+		return nil, err
+	}
+	// Trim to actual remaining bytes (last segment may be shorter).
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if remaining := info.Size() - offset; remaining < plaintextSegmentSize {
+		plain = plain[:remaining]
+	}
+	ciphertext, err := EncryptSegment(plain, key, meta, segmentID)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeShards(ciphertext, dataShards, parityShards)
+}
+
+// encodeSegmentFromFile reads a segment from the file and encodes it into shards.
+// The data buffer is trimmed to the actual remaining bytes for the last segment,
+// ensuring consistency with ComputeErasurePlan.
+func encodeSegmentFromFile(file *os.File, offset, size int64, dataShards, parityShards int) ([][]byte, error) {
+	data := make([]byte, size)
+	if _, err := file.ReadAt(data, offset); err != nil && err != io.EOF {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if remaining := info.Size() - offset; remaining < size {
+		data = data[:remaining]
+	}
+	return EncodeShards(data, dataShards, parityShards)
 }

@@ -159,14 +159,11 @@ func recoverCreateCollectionSigner(req CreateCollectionRequest) (*ecdsa.PublicKe
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid collection signature size")
-	}
 	hash, err := CreateCollectionHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
 		return nil, "", err
 	}
@@ -178,14 +175,11 @@ func recoverAppendRecordSigner(req AppendRecordRequest) (*ecdsa.PublicKey, strin
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid record signature size")
-	}
 	hash, err := AppendRecordHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
 		return nil, "", err
 	}

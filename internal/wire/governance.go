@@ -45,8 +45,10 @@ type governanceProposalSigningPayload struct {
 	TargetFoundationAddress           string   `json:"target_foundation_address,omitempty"`
 	TargetRetrievalAddress            string   `json:"target_retrieval_address,omitempty"`
 	TargetStorageRewardPerBlock       uint64   `json:"target_storage_reward_per_block,omitempty"`
-	TargetRetrievalAnnualRateBPS      uint64   `json:"target_retrieval_annual_rate_bps,omitempty"`
-	TargetFoundationAnnualRateBPS     uint64   `json:"target_foundation_annual_rate_bps,omitempty"`
+	TargetRetrievalAnnualRateBPS      uint64   `json:"target_retrieval_annual_rate_bps,omitempty"`      // deprecated
+	TargetFoundationAnnualRateBPS     uint64   `json:"target_foundation_annual_rate_bps,omitempty"`     // deprecated
+	TargetRetrievalRewardPerBlock     uint64   `json:"target_retrieval_reward_per_block,omitempty"`
+	TargetFoundationRewardPerBlock    uint64   `json:"target_foundation_reward_per_block,omitempty"`
 	TargetAvailabilityWindowSize      uint64   `json:"target_availability_window_size,omitempty"`
 	TargetAvailabilityThresholdBPS    uint64   `json:"target_availability_threshold_bps,omitempty"`
 	TargetBlockProductionRewardBPS    uint64   `json:"target_block_production_reward_bps,omitempty"`
@@ -110,6 +112,8 @@ func GovernanceProposalPayload(req CreateGovernanceProposalRequest) ([]byte, err
 		TargetStorageRewardPerBlock:       req.TargetStorageRewardPerBlock,
 		TargetRetrievalAnnualRateBPS:      req.TargetRetrievalAnnualRateBPS,
 		TargetFoundationAnnualRateBPS:     req.TargetFoundationAnnualRateBPS,
+		TargetRetrievalRewardPerBlock:     req.TargetRetrievalRewardPerBlock,
+		TargetFoundationRewardPerBlock:    req.TargetFoundationRewardPerBlock,
 		TargetAvailabilityWindowSize:      req.TargetAvailabilityWindowSize,
 		TargetAvailabilityThresholdBPS:    req.TargetAvailabilityThresholdBPS,
 		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
@@ -156,16 +160,13 @@ func recoverGovernanceProposalSigner(req CreateGovernanceProposalRequest) (*ecds
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid governance proposal signature size")
-	}
 	hash, err := GovernanceProposalHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
-		return nil, "", err
+		return nil, "", errors.New("failed to recover proposal signer: " + err.Error())
 	}
 	return publicKey, AccountAddress(publicKey), nil
 }
@@ -248,16 +249,13 @@ func recoverGovernanceVoteSigner(req CastGovernanceVoteRequest) (*ecdsa.PublicKe
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid governance vote signature size")
-	}
 	hash, err := GovernanceVoteHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
-		return nil, "", err
+		return nil, "", errors.New("failed to recover vote signer: " + err.Error())
 	}
 	return publicKey, AccountAddress(publicKey), nil
 }
@@ -329,16 +327,13 @@ func VerifyGovernanceExecute(req ExecuteGovernanceProposalRequest, expectedAddre
 	if err != nil {
 		return err
 	}
-	if len(signature) != 65 {
-		return errors.New("invalid governance execute signature size")
-	}
 	hash, err := GovernanceExecuteHash(req)
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(hash, signature)
+	pub, err := recoverSigner(hash, signature)
 	if err != nil {
-		return err
+		return errors.New("failed to recover executor signer: " + err.Error())
 	}
 	addr := AccountAddress(pub)
 	if !strings.EqualFold(addr, expectedAddress) {
@@ -405,16 +400,13 @@ func VerifyDirectGovernanceAction(req DirectGovernanceActionRequest, expectedAdd
 	if err != nil {
 		return err
 	}
-	if len(signature) != 65 {
-		return errors.New("invalid direct governance action signature size")
-	}
 	hash, err := DirectGovernanceActionHash(req)
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(hash, signature)
+	pub, err := recoverSigner(hash, signature)
 	if err != nil {
-		return err
+		return errors.New("failed to recover operator signer: " + err.Error())
 	}
 	addr := AccountAddress(pub)
 	if !strings.EqualFold(addr, expectedAddress) {
@@ -473,16 +465,13 @@ func VerifyDirectActionReviewVote(req DirectActionReviewVoteRequest, expectedAdd
 	if err != nil {
 		return err
 	}
-	if len(signature) != 65 {
-		return errors.New("invalid direct action review vote signature size")
-	}
 	hash, err := DirectActionReviewVoteHash(req)
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(hash, signature)
+	pub, err := recoverSigner(hash, signature)
 	if err != nil {
-		return err
+		return errors.New("failed to recover voter signer: " + err.Error())
 	}
 	addr := AccountAddress(pub)
 	if !strings.EqualFold(addr, expectedAddress) {
@@ -515,16 +504,13 @@ func VerifyDirectGovernanceActionAgent(req DirectGovernanceActionRequest, agentP
 	if err != nil {
 		return err
 	}
-	if len(signature) != 65 {
-		return errors.New("invalid agent direct action signature size")
-	}
 	hash, err := DirectGovernanceActionHash(req)
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(hash, signature)
+	pub, err := recoverSigner(hash, signature)
 	if err != nil {
-		return err
+		return errors.New("failed to recover agent signer: " + err.Error())
 	}
 	recoveredPub := encodeHex(ethcrypto.FromECDSAPub(pub))
 	if !strings.EqualFold(recoveredPub, agentPub) {
@@ -555,16 +541,13 @@ func VerifyDirectActionReviewVoteAgent(req DirectActionReviewVoteRequest, agentP
 	if err != nil {
 		return err
 	}
-	if len(signature) != 65 {
-		return errors.New("invalid agent review vote signature size")
-	}
 	hash, err := DirectActionReviewVoteHash(req)
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(hash, signature)
+	pub, err := recoverSigner(hash, signature)
 	if err != nil {
-		return err
+		return errors.New("failed to recover agent signer: " + err.Error())
 	}
 	recoveredPub := encodeHex(ethcrypto.FromECDSAPub(pub))
 	if !strings.EqualFold(recoveredPub, agentPub) {

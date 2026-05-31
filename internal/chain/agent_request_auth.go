@@ -67,8 +67,17 @@ func (s *Store) consumeAgentRequestLocked(keyID string, spend uint64) error {
 		return errors.New("agent key total limit exceeded")
 	}
 	key.Nonce++
-	key.UsedToday += spend
-	key.UsedTotal += spend
+	// P2-H07: Saturating addition to prevent uint64 overflow on limit counters.
+	if key.UsedToday > ^uint64(0)-spend {
+		key.UsedToday = ^uint64(0)
+	} else {
+		key.UsedToday += spend
+	}
+	if key.UsedTotal > ^uint64(0)-spend {
+		key.UsedTotal = ^uint64(0)
+	} else {
+		key.UsedTotal += spend
+	}
 	return nil
 }
 

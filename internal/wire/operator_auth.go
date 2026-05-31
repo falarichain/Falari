@@ -53,16 +53,13 @@ func VerifyOperatorRequestSignature(chainID string, method string, path string, 
 	if err != nil {
 		return errors.New("invalid signature encoding")
 	}
-	if len(signature) != 65 {
-		return errors.New("invalid signature length")
-	}
 	hash, err := OperatorRequestHash(chainID, method, path, body, nonce, timestampUnix)
 	if err != nil {
 		return err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
-		return errors.New("failed to recover signer")
+		return errors.New("failed to recover signer: " + err.Error())
 	}
 	recovered := AccountAddress(publicKey)
 	if !strings.EqualFold(recovered, expectedAddress) {

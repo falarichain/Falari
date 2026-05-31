@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -462,8 +463,11 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 			return err
 		}
 		return s.applyBridgeSetConfigLocked(req)
-	default:
+	case "validator_rotation":
+		// System-generated during block production; state already applied.
 		return nil
+	default:
+		return fmt.Errorf("unknown transaction type: %s", tx.Type)
 	}
 }
 

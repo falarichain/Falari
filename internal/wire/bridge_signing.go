@@ -66,14 +66,11 @@ func VerifyBridgeOutSignature(req BridgeOutRequest, chainID string) error {
 	if err != nil {
 		return err
 	}
-	if len(sig) != 65 {
-		return errors.New("invalid bridge_out signature size")
-	}
 	hash, err := bridgeOutHash(req, chainID)
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(hash, sig)
+	pub, err := recoverSigner(hash, sig)
 	if err != nil {
 		return err
 	}
@@ -138,14 +135,11 @@ func VerifyBridgeInClaimSignature(req BridgeInClaimRequest, chainID string) erro
 	if err != nil {
 		return err
 	}
-	if len(sig) != 65 {
-		return errors.New("invalid bridge_in_claim signature size")
-	}
 	hash, err := bridgeInClaimHash(req, chainID)
 	if err != nil {
 		return err
 	}
-	_, err = ethcrypto.SigToPub(hash, sig)
+	_, err = recoverSigner(hash, sig)
 	return err
 }
 
@@ -155,14 +149,11 @@ func RecoverBridgeInClaimSigner(req BridgeInClaimRequest, chainID string) (strin
 	if err != nil {
 		return "", err
 	}
-	if len(sig) != 65 {
-		return "", errors.New("invalid bridge_in_claim signature size")
-	}
 	hash, err := bridgeInClaimHash(req, chainID)
 	if err != nil {
 		return "", err
 	}
-	pub, err := ethcrypto.SigToPub(hash, sig)
+	pub, err := recoverSigner(hash, sig)
 	if err != nil {
 		return "", err
 	}
@@ -223,14 +214,11 @@ func VerifyBridgeSetConfigSignature(req BridgeSetConfigRequest, chainID string) 
 	if err != nil {
 		return err
 	}
-	if len(sig) != 65 {
-		return errors.New("invalid bridge_set_config signature size")
-	}
 	hash, err := bridgeSetConfigHash(req, chainID)
 	if err != nil {
 		return err
 	}
-	_, err = ethcrypto.SigToPub(hash, sig)
+	_, err = recoverSigner(hash, sig)
 	return err
 }
 
@@ -240,14 +228,11 @@ func RecoverBridgeSetConfigSigner(req BridgeSetConfigRequest, chainID string) (s
 	if err != nil {
 		return "", err
 	}
-	if len(sig) != 65 {
-		return "", errors.New("invalid bridge_set_config signature size")
-	}
 	hash, err := bridgeSetConfigHash(req, chainID)
 	if err != nil {
 		return "", err
 	}
-	pub, err := ethcrypto.SigToPub(hash, sig)
+	pub, err := recoverSigner(hash, sig)
 	if err != nil {
 		return "", err
 	}

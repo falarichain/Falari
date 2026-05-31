@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -58,18 +59,20 @@ func NewLevelDBBlkStore(path string) (*CIDBlkStore, error) {
 	return &CIDBlkStore{db: db}, nil
 }
 
-func NewMemoryBlkStore() *CIDBlkStore {
+// NewMemoryBlkStore creates a temporary LevelDB-backed block store.
+// P2-H11: Returns error instead of panic on failure.
+func NewMemoryBlkStore() (*CIDBlkStore, error) {
 	dir, err := os.MkdirTemp("", "falari-blockstore-*")
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
 	store, err := NewLevelDBBlkStore(dir)
 	if err != nil {
 		_ = os.RemoveAll(dir)
-		panic(err)
+		return nil, fmt.Errorf("open temp leveldb: %w", err)
 	}
 	store.tempPath = dir
-	return store
+	return store, nil
 }
 
 func (s *CIDBlkStore) Close() error {

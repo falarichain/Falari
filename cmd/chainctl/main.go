@@ -158,7 +158,7 @@ func createIntent(args []string) {
 	accountKeyPath := fs.String("account-key", "", "account key file used to sign the intent")
 	segmentSize := fs.Int64("segment-size", 4*1024*1024, "segment size in bytes")
 	dataShards := fs.Int("data-shards", 4, "erasure data shard count")
-	parityShards := fs.Int("parity-shards", 3, "erasure parity shard count")
+	parityShards := fs.Int("parity-shards", 2, "erasure parity shard count")
 	storageClass := fs.String("class", "permanent", "storage class")
 	lockedFee := fs.Uint64("fee", 0, "locked storage fee")
 	encrypt := fs.Bool("encrypt", false, "encrypt file locally before erasure coding and upload")
@@ -188,6 +188,7 @@ func createIntent(args []string) {
 	var fileRoot string
 	var encryption *wire.EncryptionMetadata
 	var generatedKey []byte
+	var encKey []byte
 	if *encrypt {
 		key := []byte(nil)
 		if *encryptionKey != "" {
@@ -202,6 +203,7 @@ func createIntent(args []string) {
 			}
 			generatedKey = key
 		}
+		encKey = key
 		nonce, err := client.GenerateEncryptionNonce()
 		if err != nil {
 			log.Fatal(err)
@@ -221,6 +223,18 @@ func createIntent(args []string) {
 	erasure := wire.ErasurePolicy{
 		DataShards:   *dataShards,
 		ParityShards: *parityShards,
+	}
+	// Compute cross-parity repair pools.
+	var repairPools []wire.RepairPool
+	if len(segments) >= 2 {
+		if *encrypt {
+			repairPools, err = client.ComputeRepairPoolsEncrypted(*filePath, *segmentSize, encKey, *encryption, segments, *dataShards, *parityShards)
+		} else {
+			repairPools, err = client.ComputeRepairPools(*filePath, planSegmentSize, segments, *dataShards, *parityShards)
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	policy := wire.StoragePolicy{
 		Class:      *storageClass,
@@ -252,6 +266,7 @@ func createIntent(args []string) {
 		FileRoot:     fileRoot,
 		SegmentRoots: roots,
 		Segments:     segments,
+		RepairPools:  repairPools,
 		Erasure:      erasure,
 		Encryption:   encryption,
 		Policy:       policy,
@@ -277,6 +292,7 @@ func createIntent(args []string) {
 		FileRoot:     fileRoot,
 		SegmentRoots: roots,
 		Segments:     segments,
+		RepairPools:  repairPools,
 		Assignments:  resp.Assignments,
 		Erasure:      erasure,
 		Encryption:   encryption,
@@ -1312,6 +1328,8 @@ func governancePropose(args []string) {
 	// Mining params flags.
 	storageReleaseRateBPS := fs.Uint64("storage-release-rate-bps", 0, "storage pool release rate BPS (for update_mining_params)")
 	storageRewardPerBlock := fs.Uint64("storage-reward-per-block", 0, "storage pool per-block reward in smallest units (for update_mining_params)")
+	foundationRewardPerBlock := fs.Uint64("foundation-reward-per-block", 0, "foundation pool per-block reward in smallest units (for update_mining_params)")
+	retrievalRewardPerBlock := fs.Uint64("retrieval-reward-per-block", 0, "retrieval pool per-block reward in smallest units (for update_mining_params)")
 	retrievalReleaseRateBPS := fs.Uint64("retrieval-release-rate-bps", 0, "retrieval pool release rate BPS (for update_mining_params)")
 	storedBytesWeightBPS := fs.Uint64("stored-bytes-weight-bps", 0, "stored bytes weight factor BPS (for update_mining_params)")
 	proofScoreWeightBPS := fs.Uint64("proof-score-weight-bps", 0, "proof score weight factor BPS (for update_mining_params)")
@@ -1380,6 +1398,8 @@ func governancePropose(args []string) {
 		TargetOperatorChangeThresholdDen:  *opChangeThresholdDen,
 		TargetStorageReleaseRateBPS:       *storageReleaseRateBPS,
 		TargetStorageRewardPerBlock:       *storageRewardPerBlock,
+		TargetFoundationRewardPerBlock:    *foundationRewardPerBlock,
+		TargetRetrievalRewardPerBlock:     *retrievalRewardPerBlock,
 		TargetRetrievalReleaseRateBPS:     *retrievalReleaseRateBPS,
 		TargetStoredBytesWeightBPS:        *storedBytesWeightBPS,
 		TargetProofScoreWeightBPS:         *proofScoreWeightBPS,

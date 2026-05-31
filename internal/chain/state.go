@@ -36,7 +36,7 @@ const defaultStorageFoundationBPS uint64 = 300
 const defaultPermanentStorageDuration = int64(50 * 365 * 24 * 60 * 60) // 50年
 
 const defaultRetrievalAbuseSpeedMultiplier uint64 = 10
-const miningRewardVestingDays = int64(30)
+const miningRewardVestingDays = int64(90)
 const miningRewardVestingDaySeconds = int64(24 * 60 * 60)
 const defaultPermanentFundAnnualSpendBPS uint64 = 200
 
@@ -810,6 +810,7 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 			FileRoot:         req.FileRoot,
 			SegmentRoots:     req.SegmentRoots,
 			Segments:         req.Segments,
+			RepairPools:      req.RepairPools,
 			Assignments:      assignments,
 			Erasure:          req.Erasure,
 			Encryption:       req.Encryption,
@@ -1547,6 +1548,35 @@ func (s *Store) repairTaskForMissedChallengeLocked(challenge wire.StorageChallen
 		return wire.RepairTask{}, false
 	}
 	unavailable := map[string]bool{challenge.MinerAddress: true}
+
+	// Cross-parity shard itself lost → rebuild from both segments.
+	if challenge.SegmentID < 0 {
+		poolID := -(challenge.SegmentID + 1)
+		for _, pool := range intent.RepairPools {
+			if pool.PoolID == poolID {
+				task, err := s.buildCrossParityRebuildTaskLocked(intent, &pool, challenge.SegmentID, challenge.ShardIndex, challenge.MinerAddress, "missed_proof", unavailable)
+				if err == nil {
+					return task, true
+				}
+				break
+			}
+		}
+		return wire.RepairTask{}, false
+	}
+
+	// Regular segment shard lost → try cross-parity repair first.
+	if pool, posInPool := findPoolForSegment(intent.RepairPools, challenge.SegmentID); pool != nil {
+		peerSegID := pool.SegmentIDs[1-posInPool]
+		paritySegID := -(pool.PoolID + 1)
+		if crossParityReceiptsAvailable(intent, peerSegID, paritySegID, challenge.ShardIndex, unavailable) {
+			task, err := s.buildCrossParityRepairTaskLocked(intent, pool, challenge.SegmentID, peerSegID, paritySegID, challenge.ShardIndex, challenge.MinerAddress, "missed_proof")
+			if err == nil {
+				return task, true
+			}
+		}
+	}
+
+	// Fallback to RS repair.
 	task, err := s.buildRepairTaskForShardLocked(intent, challenge.SegmentID, challenge.ShardIndex, challenge.MinerAddress, "missed_proof", unavailable)
 	if err != nil {
 		return wire.RepairTask{}, false
@@ -2406,8 +2436,13 @@ func (s *Store) SubmitProof(req wire.SubmitProofRequest) (wire.SubmitProofRespon
 		return wire.SubmitProofResponse{}, err
 	}
 
-	_, alreadyRewarded := s.data.Proofs[req.Proof.ChallengeID]
-	s.data.Proofs[req.Proof.ChallengeID] = req.Proof
+	existingProof, alreadyRewarded := s.data.Proofs[req.Proof.ChallengeID]
+	if alreadyRewarded {
+		// Do not overwrite existing proof data — preserve audit trail.
+		_ = existingProof
+	} else {
+		s.data.Proofs[req.Proof.ChallengeID] = req.Proof
+	}
 	stats := s.minerStatsLocked(req.Proof.MinerAddress)
 	reward := uint64(0)
 	settledStoragePoolReward := uint64(0)
@@ -2509,17 +2544,38 @@ func validateReceipt(intent *Intent, receipt wire.MinerReceipt) error {
 	if receipt.FileRoot != intent.FileRoot {
 		return errors.New("receipt file root mismatch")
 	}
-	if receipt.SegmentID < 0 || receipt.SegmentID >= len(intent.SegmentRoots) {
-		return errors.New("receipt segment out of range")
-	}
-	if receipt.SegmentRoot != intent.SegmentRoots[receipt.SegmentID] {
-		return errors.New("receipt segment root mismatch")
-	}
-	if receipt.ShardIndex < 0 || receipt.ShardIndex >= len(intent.Segments[receipt.SegmentID].ShardHashes) {
-		return errors.New("receipt shard index out of range")
-	}
-	if receipt.ShardHash != intent.Segments[receipt.SegmentID].ShardHashes[receipt.ShardIndex] {
-		return errors.New("receipt shard hash does not match segment plan")
+	if receipt.SegmentID < 0 {
+		// Cross-parity receipt: validate against RepairPool.
+		poolID := -(receipt.SegmentID + 1)
+		var pool *wire.RepairPool
+		for i := range intent.RepairPools {
+			if intent.RepairPools[i].PoolID == poolID {
+				pool = &intent.RepairPools[i]
+				break
+			}
+		}
+		if pool == nil {
+			return errors.New("receipt segment out of range")
+		}
+		if receipt.ShardIndex < 0 || receipt.ShardIndex >= len(pool.CrossParity.ShardHashes) {
+			return errors.New("receipt shard index out of range")
+		}
+		if receipt.ShardHash != pool.CrossParity.ShardHashes[receipt.ShardIndex] {
+			return errors.New("receipt shard hash does not match cross-parity plan")
+		}
+	} else {
+		if receipt.SegmentID >= len(intent.SegmentRoots) {
+			return errors.New("receipt segment out of range")
+		}
+		if receipt.SegmentRoot != intent.SegmentRoots[receipt.SegmentID] {
+			return errors.New("receipt segment root mismatch")
+		}
+		if receipt.ShardIndex < 0 || receipt.ShardIndex >= len(intent.Segments[receipt.SegmentID].ShardHashes) {
+			return errors.New("receipt shard index out of range")
+		}
+		if receipt.ShardHash != intent.Segments[receipt.SegmentID].ShardHashes[receipt.ShardIndex] {
+			return errors.New("receipt shard hash does not match segment plan")
+		}
 	}
 	if time.Now().Unix() > receipt.ExpiresAtUnix {
 		return errors.New("receipt expired")
@@ -2866,7 +2922,12 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o644)
+	// Atomic write: write to temp file then rename to prevent corruption on crash.
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
 }
 
 func (s *Store) Close() error {

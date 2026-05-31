@@ -94,9 +94,19 @@ func (n *Node) StartProviderReporter(chainURL string, endpoint string, capacityB
 	}()
 }
 
+func timedGet(url string) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return http.DefaultClient.Do(req)
+}
+
 func (n *Node) provePendingChallenges(chainURL string) error {
 	endpoint := strings.TrimRight(chainURL, "/") + "/challenges?pending=true&miner=" + url.QueryEscape(n.address)
-	resp, err := http.Get(endpoint)
+	resp, err := timedGet(endpoint)
 	if err != nil {
 		return err
 	}
@@ -125,7 +135,7 @@ func (n *Node) provePendingChallenges(chainURL string) error {
 
 func (n *Node) repairPendingTasks(chainURL string) error {
 	endpoint := strings.TrimRight(chainURL, "/") + "/repairs?miner=" + url.QueryEscape(n.address)
-	resp, err := http.Get(endpoint)
+	resp, err := timedGet(endpoint)
 	if err != nil {
 		return err
 	}
@@ -164,7 +174,7 @@ func (n *Node) deletePendingTasks(chainURL string) error {
 	query.Set("miner", n.address)
 	query.Set("status", "pending")
 	endpoint := strings.TrimRight(chainURL, "/") + "/intents/delete-tasks?" + query.Encode()
-	resp, err := http.Get(endpoint)
+	resp, err := timedGet(endpoint)
 	if err != nil {
 		return err
 	}
@@ -214,6 +224,11 @@ func (n *Node) repairTask(chainURL string, task wire.RepairTask) (wire.MinerRece
 	}
 	if len(task.SourceReceipts) < task.RequiredShards {
 		return wire.MinerReceipt{}, errors.New("not enough source receipts for repair")
+	}
+	// Cross-parity repair: XOR two source shards (peer + cross-parity, or
+	// segA + segB) to recover the lost shard. Only 2 downloads needed.
+	if task.RepairMode == "cross_parity" || task.RepairMode == "cross_parity_rebuild" {
+		return n.repairTaskCrossParity(chainURL, task)
 	}
 	totalShards := task.TargetShards
 	if totalShards <= 0 {
@@ -275,6 +290,66 @@ func (n *Node) repairTask(chainURL string, task wire.RepairTask) (wire.MinerRece
 		SegmentRoot: segmentRoot,
 		ShardIndex:  task.ShardIndex,
 		ShardID:     fmt.Sprintf("%s:%d:%d:auto-repair:%s", task.IntentID, task.SegmentID, task.ShardIndex, task.RepairID),
+		ShardHash:   shardHash,
+		ShardCID:    task.Assignment.ShardCID,
+		ShardSize:   int64(len(shard)),
+		DataBase64:  base64.StdEncoding.EncodeToString(shard),
+	})
+	if err != nil {
+		return wire.MinerReceipt{}, err
+	}
+	return receipt, nil
+}
+
+// repairTaskCrossParity recovers a lost shard by XORing two source shards.
+// For "cross_parity" mode: lost = peer_shard XOR cross_parity_shard.
+// For "cross_parity_rebuild" mode: cross_parity = segA_shard XOR segB_shard.
+func (n *Node) repairTaskCrossParity(chainURL string, task wire.RepairTask) (wire.MinerReceipt, error) {
+	if len(task.SourceReceipts) < 2 {
+		return wire.MinerReceipt{}, errors.New("cross-parity repair requires exactly 2 source receipts")
+	}
+	src0 := task.SourceReceipts[0]
+	src1 := task.SourceReceipts[1]
+
+	data0, err := downloadSourceShard(n, chainURL, src0)
+	if err != nil {
+		return wire.MinerReceipt{}, fmt.Errorf("cross-parity: download source 0 (segment=%d): %w", src0.SegmentID, err)
+	}
+	if chaincrypto.HashBytes(data0) != src0.ShardHash {
+		return wire.MinerReceipt{}, fmt.Errorf("cross-parity: source 0 hash mismatch segment=%d", src0.SegmentID)
+	}
+
+	data1, err := downloadSourceShard(n, chainURL, src1)
+	if err != nil {
+		return wire.MinerReceipt{}, fmt.Errorf("cross-parity: download source 1 (segment=%d): %w", src1.SegmentID, err)
+	}
+	if chaincrypto.HashBytes(data1) != src1.ShardHash {
+		return wire.MinerReceipt{}, fmt.Errorf("cross-parity: source 1 hash mismatch segment=%d", src1.SegmentID)
+	}
+
+	shard, err := client.RepairFromCrossParity(data0, data1)
+	if err != nil {
+		return wire.MinerReceipt{}, err
+	}
+
+	shardHash := chaincrypto.HashBytes(shard)
+	if task.Assignment.ShardHash != "" && shardHash != task.Assignment.ShardHash {
+		return wire.MinerReceipt{}, errors.New("cross-parity: rebuilt shard hash mismatch")
+	}
+
+	// Use the file root and user from the first source receipt.
+	user := src0.User
+	fileRoot := src0.FileRoot
+	segmentRoot := src0.SegmentRoot
+
+	receipt, err := n.Store(wire.UploadRequest{
+		IntentID:    task.IntentID,
+		User:        user,
+		FileRoot:    fileRoot,
+		SegmentID:   task.SegmentID,
+		SegmentRoot: segmentRoot,
+		ShardIndex:  task.ShardIndex,
+		ShardID:     fmt.Sprintf("%s:%d:%d:cross-parity-repair:%s", task.IntentID, task.SegmentID, task.ShardIndex, task.RepairID),
 		ShardHash:   shardHash,
 		ShardCID:    task.Assignment.ShardCID,
 		ShardSize:   int64(len(shard)),

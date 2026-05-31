@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const maxResponseBytes = 256 << 20 // 256 MB — prevents OOM from malicious nodes
+
 type HTTP struct {
 	base   string
 	client *http.Client
@@ -48,10 +50,10 @@ func (h *HTTP) GetBytes(path string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := limitedReadBody(resp)
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return io.ReadAll(resp.Body)
+	return limitedReadBody(resp)
 }
 
 func (h *HTTP) Post(path string, in any, out any) error {
@@ -73,7 +75,7 @@ func (h *HTTP) Post(path string, in any, out any) error {
 }
 
 func decodeResponse(resp *http.Response, out any) error {
-	body, err := io.ReadAll(resp.Body)
+	body, err := limitedReadBody(resp)
 	if err != nil {
 		return err
 	}
@@ -84,4 +86,18 @@ func decodeResponse(resp *http.Response, out any) error {
 		return nil
 	}
 	return json.Unmarshal(body, out)
+}
+
+// limitedReadBody reads up to maxResponseBytes from the response body.
+// Error responses are capped at 4 KB to keep error messages readable.
+func limitedReadBody(resp *http.Response) ([]byte, error) {
+	limit := int64(maxResponseBytes)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limit = 4096
+	}
+	n, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if int64(len(n)) > limit {
+		return nil, fmt.Errorf("http response exceeds %d bytes", limit)
+	}
+	return n, err
 }

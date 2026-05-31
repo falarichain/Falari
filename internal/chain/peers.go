@@ -14,6 +14,7 @@ import (
 	"chain/internal/wire"
 
 	libp2p "github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	host "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -252,12 +253,17 @@ func (p *PeerNetwork) startLibP2P(listenAddrs string, rawPeers string) error {
 	if len(addrs) == 0 {
 		addrs = []string{"/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"}
 	}
+	cm, err := connmgr.NewConnManager(100, 200, connmgr.WithGracePeriod(30*time.Second))
+	if err != nil {
+		return fmt.Errorf("create connection manager: %w", err)
+	}
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(addrs...),
 		libp2p.Transport(tcp.NewTCPTransport),
 		libp2p.Transport(libp2pquic.NewTransport),
 		libp2p.EnableHolePunching(),
 		libp2p.EnableNATService(),
+		libp2p.ConnectionManager(cm),
 	)
 	if err != nil {
 		return err
@@ -356,6 +362,8 @@ func (p *PeerNetwork) publishGossip(messageType string, value any) {
 	}
 }
 
+const maxGossipBytes = 4 << 20 // 4 MiB – reject oversized messages before deserialization
+
 func (p *PeerNetwork) readGossip() {
 	for {
 		msg, err := p.sub.Next(p.ctx)
@@ -363,6 +371,10 @@ func (p *PeerNetwork) readGossip() {
 			return
 		}
 		if p.host != nil && msg.ReceivedFrom == p.host.ID() {
+			continue
+		}
+		if len(msg.Data) > maxGossipBytes {
+			log.Printf("drop oversized gossip message: %d bytes (max %d)", len(msg.Data), maxGossipBytes)
 			continue
 		}
 		var envelope gossipEnvelope

@@ -31,19 +31,16 @@ func verifyRequestSig(expectedAddr, sigHex string, hashFunc func() ([]byte, erro
 	if err != nil {
 		return errors.New("invalid signature encoding")
 	}
-	if len(sigBytes) != 65 {
-		return errors.New("invalid signature length")
-	}
 	h, err := hashFunc()
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(h, sigBytes)
+	pub, err := recoverSigner(h, sigBytes)
 	if err != nil {
-		return errors.New("failed to recover signer")
+		return errors.New("failed to recover signer: " + err.Error())
 	}
 	addr := AccountAddress(pub)
-	if !strings.EqualFold(addr, expectedAddr) {
+	if addr != NormalizeAddress(expectedAddr) {
 		return errors.New("signature does not match expected address: recovered=" + addr + " expected=" + expectedAddr + " hash=" + encodeHex(h))
 	}
 	return nil
@@ -57,20 +54,18 @@ func verifyAgentRequestSig(expectedAgentPub, sigHex string, hashFunc func() ([]b
 	if err != nil {
 		return errors.New("invalid agent signature encoding")
 	}
-	if len(sigBytes) != 65 {
-		return errors.New("invalid agent signature length")
-	}
 	h, err := hashFunc()
 	if err != nil {
 		return err
 	}
-	pub, err := ethcrypto.SigToPub(h, sigBytes)
+	pub, err := recoverSigner(h, sigBytes)
 	if err != nil {
-		return errors.New("failed to recover agent signer")
+		return errors.New("failed to recover agent signer: " + err.Error())
 	}
 	recoveredUncompressed := encodeHex(ethcrypto.FromECDSAPub(pub))
 	recoveredCompressed := encodeHex(ethcrypto.CompressPubkey(pub))
-	if !strings.EqualFold(recoveredUncompressed, expectedAgentPub) && !strings.EqualFold(recoveredCompressed, expectedAgentPub) {
+	expectedLower := strings.ToLower(expectedAgentPub)
+	if recoveredUncompressed != expectedLower && recoveredCompressed != expectedLower {
 		return errors.New("agent signature does not match registered public key")
 	}
 	return nil
@@ -88,6 +83,7 @@ type createIntentSigningPayload struct {
 	FileRoot     string              `json:"file_root"`
 	SegmentRoots []string            `json:"segment_roots"`
 	Segments     []SegmentPlan       `json:"segments"`
+	RepairPools  []RepairPool        `json:"repair_pools,omitempty"`
 	Erasure      ErasurePolicy       `json:"erasure"`
 	Encryption   *EncryptionMetadata `json:"encryption,omitempty"`
 	LockedFee    uint64              `json:"locked_fee"`
@@ -109,6 +105,7 @@ func CreateIntentHash(req CreateIntentRequest) ([]byte, error) {
 		FileRoot:     req.FileRoot,
 		SegmentRoots: req.SegmentRoots,
 		Segments:     req.Segments,
+		RepairPools:  req.RepairPools,
 		Erasure:      req.Erasure,
 		Encryption:   req.Encryption,
 		LockedFee:    req.LockedFee,

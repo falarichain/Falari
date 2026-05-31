@@ -26,22 +26,22 @@ func TestMiningRewardVestingAggregatesByDayAndReleasesLinearly(t *testing.T) {
 		t.Fatalf("unexpected account after vesting: %+v", account)
 	}
 	pending, vesting, claimable := store.miningRewardVestingSummaryLocked("miner_a", day+miningRewardVestingDaySeconds)
-	if pending != 270 || vesting != 261 || claimable != 9 {
+	if pending != 270 || vesting != 267 || claimable != 3 {
 		t.Fatalf("unexpected vesting summary pending=%d vesting=%d claimable=%d", pending, vesting, claimable)
 	}
 
 	released, total := store.releaseVestedMiningRewardsLocked(day + miningRewardVestingDaySeconds)
-	if released != 1 || total != 9 {
-		t.Fatalf("expected day-one release of 9, got buckets=%d total=%d", released, total)
+	if released != 1 || total != 3 {
+		t.Fatalf("expected day-one release of 3, got buckets=%d total=%d", released, total)
 	}
 	account = store.accountLocked("miner_a")
-	if account.Balance != 9 || account.PendingMiningRewards != 261 {
+	if account.Balance != 3 || account.PendingMiningRewards != 267 {
 		t.Fatalf("unexpected account after day-one release: %+v", account)
 	}
 
-	released, total = store.releaseVestedMiningRewardsLocked(day + 30*miningRewardVestingDaySeconds)
-	if released != 1 || total != 261 {
-		t.Fatalf("expected final release of 261, got buckets=%d total=%d", released, total)
+	released, total = store.releaseVestedMiningRewardsLocked(day + 90*miningRewardVestingDaySeconds)
+	if released != 1 || total != 267 {
+		t.Fatalf("expected final release of 267, got buckets=%d total=%d", released, total)
 	}
 	account = store.accountLocked("miner_a")
 	if account.Balance != 270 || account.PendingMiningRewards != 0 {
@@ -91,7 +91,7 @@ func TestClaimMiningRewardsRequiresSignedActiveClaim(t *testing.T) {
 	store.data.MiningRewardVestings[miningRewardVestingBucketID(miner.Addr, miningRewardVestingDayStart(now))] = wire.MiningRewardVestingBucket{
 		BucketID:      miningRewardVestingBucketID(miner.Addr, miningRewardVestingDayStart(now)),
 		Address:       miner.Addr,
-		DayUnix:       miningRewardVestingDayStart(now) - 30*miningRewardVestingDaySeconds,
+		DayUnix:       miningRewardVestingDayStart(now) - 90*miningRewardVestingDaySeconds,
 		CreatedAtUnix: now,
 		Total:         300,
 		Sources:       map[string]uint64{miningRewardSourceStoragePool: 300},

@@ -164,14 +164,11 @@ func VerifyRetrievalClientReceipt(r RetrievalReceipt) error {
 	if err != nil {
 		return err
 	}
-	if len(signature) != 65 {
-		return errors.New("invalid retrieval client signature size")
-	}
 	payload, err := RetrievalClientPayload(r)
 	if err != nil {
 		return err
 	}
-	publicKey, err := ethcrypto.SigToPub(ethcrypto.Keccak256(payload), signature)
+	publicKey, err := recoverSigner(ethcrypto.Keccak256(payload), signature)
 	if err != nil {
 		return err
 	}

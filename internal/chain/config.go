@@ -9,7 +9,7 @@ import (
 // Epoch timing defaults — single source of truth for all epoch-derived values.
 // Change these to adjust the epoch cycle across the entire system.
 const (
-	EpochIntervalDefault = 30 * time.Minute // epoch trigger interval
+	EpochIntervalDefault = 60 * time.Minute // epoch trigger interval
 	EpochDurationDefault = 10 * time.Minute // proof submission window per epoch
 )
 
@@ -23,10 +23,11 @@ type MiningParams struct {
 	FoundationReleaseRateBPS uint64 `json:"foundation_release_rate_bps"`
 
 	// ── Annual release rates (BPS per year, time-proportional) ──
-	// effectiveBPS = annualRateBPS * elapsedSeconds / 31_536_000
+	// Deprecated: Foundation and Retrieval pools now use per-block release.
+	// These fields are retained for JSON backward compatibility only.
 	StorageAnnualRateBPS    uint64 `json:"storage_annual_rate_bps"`
-	RetrievalAnnualRateBPS  uint64 `json:"retrieval_annual_rate_bps"`
-	FoundationAnnualRateBPS uint64 `json:"foundation_annual_rate_bps"`
+	RetrievalAnnualRateBPS  uint64 `json:"retrieval_annual_rate_bps"`  // deprecated
+	FoundationAnnualRateBPS uint64 `json:"foundation_annual_rate_bps"` // deprecated
 
 	// ── Storage per-block reward ──
 	// StorageRewardPerBlock: fixed number of smallest-unit tokens released from
@@ -75,6 +76,18 @@ type MiningParams struct {
 	// the ValidatorPool on every block. Default 16 * TokenUnit (16 tokens).
 	// When the pool is depleted, no more validator rewards are emitted.
 	ValidatorRewardPerBlock uint64 `json:"validator_reward_per_block,omitempty"`
+
+	// ── Foundation per-block reward ──
+	// FoundationRewardPerBlock: fixed number of smallest-unit tokens released from
+	// the FoundationPool on every block. Default 16 * TokenUnit (16 tokens).
+	// When the pool is depleted, no more foundation rewards are emitted.
+	FoundationRewardPerBlock uint64 `json:"foundation_reward_per_block,omitempty"`
+
+	// ── Retrieval per-block reward ──
+	// RetrievalRewardPerBlock: fixed number of smallest-unit tokens released from
+	// the RetrievalPool on every block. Default 10 * TokenUnit (10 tokens).
+	// When the pool is depleted, no more retrieval rewards are emitted.
+	RetrievalRewardPerBlock uint64 `json:"retrieval_reward_per_block,omitempty"`
 
 	// ── Consensus validator set limits ──
 	MaxConsensusValidators uint64 `json:"max_consensus_validators,omitempty"`
@@ -138,8 +151,8 @@ func DefaultMiningParams() MiningParams {
 		StorageReleaseRateBPS:       3,
 		RetrievalReleaseRateBPS:     0,
 		FoundationReleaseRateBPS:    1,
-		RetrievalAnnualRateBPS:      1000,
-		FoundationAnnualRateBPS:     1000,
+		RetrievalAnnualRateBPS:      0, // deprecated — use RetrievalRewardPerBlock
+		FoundationAnnualRateBPS:     0, // deprecated — use FoundationRewardPerBlock
 		StorageRewardPerBlock:       50 * reward.TokenUnit,
 		StoredBytesWeightBPS:      4000,
 		ProofScoreWeightBPS:       3000,
@@ -156,6 +169,8 @@ func DefaultMiningParams() MiningParams {
 		AvailabilityThresholdBPS:    6000,
 		BlockProductionRewardBPS:    3000,
 		ValidatorRewardPerBlock:     16 * reward.TokenUnit,
+		FoundationRewardPerBlock:    16 * reward.TokenUnit,
+		RetrievalRewardPerBlock:     10 * reward.TokenUnit,
 		MaxConsensusValidators:      21,
 		MinConsensusValidators:      2,
 		TargetBlockBytes:            defaultTargetBlockBytes,
@@ -207,6 +222,8 @@ const (
 	maxAnnualReleaseRateBPS     = 5000                    // 50%/year
 	maxValidatorRewardPerBlock  = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
 	maxStorageRewardPerBlock    = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
+	maxFoundationRewardPerBlock = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
+	maxRetrievalRewardPerBlock  = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
 	maxWeightBPSSum             = 10000                   // sum of 4 weight BPS must not exceed 100%
 	minStorageProofSamples      = 1
 	maxStorageProofSamples      = 64

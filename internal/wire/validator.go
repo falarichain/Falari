@@ -238,7 +238,7 @@ func BlockPayload(block Block) ([]byte, error) {
 // TransactionLeaf computes the SHA256 hash of a transaction for Merkle tree leaves.
 // This is NOT a signing operation — it is a data hash and intentionally remains SHA256.
 func TransactionLeaf(tx Transaction) string {
-	raw, _ := json.Marshal(struct {
+	raw, err := json.Marshal(struct {
 		TxID           string `json:"tx_id"`
 		Type           string `json:"type"`
 		From           string `json:"from,omitempty"`
@@ -267,6 +267,10 @@ func TransactionLeaf(tx Transaction) string {
 		PublicKey:      tx.PublicKey,
 		DeadlineUnix:   tx.DeadlineUnix,
 	})
+	// P2-L04: Marshal of primitive-only struct cannot fail, but handle defensively.
+	if err != nil {
+		panic("TransactionLeaf: json.Marshal failed: " + err.Error())
+	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }

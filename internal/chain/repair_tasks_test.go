@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -330,4 +331,193 @@ func testRepairIntentRequest(t *testing.T, store *Store, u testUser) wire.Create
 	}
 	signCreateIntent(t, store, &req, u)
 	return req
+}
+
+func TestFindPoolForSegment(t *testing.T) {
+	pools := []wire.RepairPool{
+		{PoolID: 0, SegmentIDs: [2]int{0, 1}},
+		{PoolID: 1, SegmentIDs: [2]int{2, 3}},
+	}
+	pool, pos := findPoolForSegment(pools, 0)
+	if pool == nil || pool.PoolID != 0 || pos != 0 {
+		t.Fatalf("expected pool 0 pos 0, got pool=%v pos=%d", pool, pos)
+	}
+	pool, pos = findPoolForSegment(pools, 1)
+	if pool == nil || pool.PoolID != 0 || pos != 1 {
+		t.Fatalf("expected pool 0 pos 1, got pool=%v pos=%d", pool, pos)
+	}
+	pool, pos = findPoolForSegment(pools, 3)
+	if pool == nil || pool.PoolID != 1 || pos != 1 {
+		t.Fatalf("expected pool 1 pos 1, got pool=%v pos=%d", pool, pos)
+	}
+	pool, pos = findPoolForSegment(pools, 99)
+	if pool != nil || pos != -1 {
+		t.Fatalf("expected nil pool for segment 99, got pool=%v pos=%d", pool, pos)
+	}
+}
+
+func TestCrossParityReceiptsAvailable(t *testing.T) {
+	intent := &Intent{
+		Receipts: map[int]map[int]wire.MinerReceipt{
+			1:  {0: {MinerAddress: "minerA"}},
+			-1: {0: {MinerAddress: "minerB"}},
+		},
+	}
+	if !crossParityReceiptsAvailable(intent, 1, -1, 0, nil) {
+		t.Fatal("expected available when both peer and parity receipts exist")
+	}
+	if crossParityReceiptsAvailable(intent, 1, -1, 0, map[string]bool{"minerA": true}) {
+		t.Fatal("expected unavailable when peer miner is unavailable")
+	}
+	if crossParityReceiptsAvailable(intent, 1, -1, 0, map[string]bool{"minerB": true}) {
+		t.Fatal("expected unavailable when parity miner is unavailable")
+	}
+	if crossParityReceiptsAvailable(intent, 1, -1, 1, nil) {
+		t.Fatal("expected unavailable for missing shard index")
+	}
+}
+
+func TestCrossParityRepairTaskCreatedForPooledSegment(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Register 5 miners for enough diversity.
+	miners := make(map[string]testMinerIdentity)
+	for i := 0; i < 5; i++ {
+		m := registerTestMiner(t, store, "miner", "http://miner", 100)
+		miners[m.Address] = m
+	}
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(100))
+
+	req := wire.CreateIntentRequest{
+		User:         alice.Addr,
+		FileName:     "pooled.bin",
+		FileSize:     12,
+		SegmentSize:  6,
+		FileRoot:     "file-root",
+		SegmentRoots: []string{"seg-root-0", "seg-root-1"},
+		Segments: []wire.SegmentPlan{
+			{SegmentID: 0, SegmentRoot: "seg-root-0", ShardHashes: []string{"s0h0", "s0h1", "s0h2"}},
+			{SegmentID: 1, SegmentRoot: "seg-root-1", ShardHashes: []string{"s1h0", "s1h1", "s1h2"}},
+		},
+		RepairPools: []wire.RepairPool{{
+			PoolID:     0,
+			SegmentIDs: [2]int{0, 1},
+			CrossParity: wire.CrossParityPlan{
+				ShardHashes: []string{"cp-h0", "cp-h1", "cp-h2"},
+				ShardSize:   2,
+			},
+		}},
+		Erasure:      wire.ErasurePolicy{DataShards: 2, ParityShards: 1},
+		Policy:       wire.StoragePolicy{Duration: int64(30 * 24 * time.Hour / time.Second)},
+		DeadlineUnix: time.Now().Add(time.Hour).Unix(),
+	}
+	signCreateIntent(t, store, &req, alice)
+	resp, err := store.CreateIntent(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := store.data.Intents[resp.IntentID]
+
+	// Commit all segment assignments.
+	var receipts []wire.MinerReceipt
+	for _, assignment := range resp.Assignments {
+		m, ok := miners[assignment.MinerAddress]
+		if !ok {
+			t.Fatalf("assignment miner not found: %s", assignment.MinerAddress)
+		}
+		segRoot := ""
+		if assignment.SegmentID >= 0 && assignment.SegmentID < len(intent.Segments) {
+			segRoot = intent.Segments[assignment.SegmentID].SegmentRoot
+		}
+		receipt := wire.MinerReceipt{
+			Version:        1,
+			MinerAddress:   m.Address,
+			MinerPublicKey: m.PublicKey,
+			User:           alice.Addr,
+			IntentID:       resp.IntentID,
+			FileRoot:       "file-root",
+			SegmentID:      assignment.SegmentID,
+			SegmentRoot:    segRoot,
+			ShardIndex:     assignment.ShardIndex,
+			ShardID:        resp.IntentID + ":" + strconv.Itoa(assignment.SegmentID) + ":" + strconv.Itoa(assignment.ShardIndex),
+			ShardHash:      assignment.ShardHash,
+			ShardSize:      assignment.ShardSize,
+			SectorCommitment: "sector-" + assignment.ShardHash,
+			ExpiresAtUnix:  time.Now().Add(time.Hour).Unix(),
+			MinerEndpoint:  m.Endpoint,
+		}
+		if err := wire.SignReceipt(&receipt, m.PrivateKey); err != nil {
+			t.Fatal(err)
+		}
+		receipts = append(receipts, receipt)
+	}
+	bcReq := wire.BatchCommitRequest{IntentID: resp.IntentID, User: alice.Addr, Receipts: receipts}
+	signBatchCommit(t, store, &bcReq, alice)
+	if _, err := store.BatchCommit(bcReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// Manually add cross-parity receipts at segmentID -1.
+	intent = store.data.Intents[resp.IntentID]
+	paritySegID := -1
+	minerList := make([]testMinerIdentity, 0, len(miners))
+	for _, m := range miners {
+		minerList = append(minerList, m)
+	}
+	intent.Receipts[paritySegID] = make(map[int]wire.MinerReceipt)
+	for j := 0; j < 3; j++ {
+		m := minerList[j%len(minerList)]
+		intent.Receipts[paritySegID][j] = wire.MinerReceipt{
+			MinerAddress:   m.Address,
+			MinerPublicKey: m.PublicKey,
+			IntentID:       resp.IntentID,
+			SegmentID:      paritySegID,
+			ShardIndex:     j,
+			ShardHash:      "cp-h" + strconv.Itoa(j),
+			ShardSize:      2,
+			ExpiresAtUnix:  time.Now().Add(time.Hour).Unix(),
+		}
+	}
+
+	// Find which miner holds segment 0, shard 0.
+	seg0Shard0Miner := intent.Receipts[0][0].MinerAddress
+
+	// Create repair tasks with that miner unavailable.
+	repair, err := store.CreateRepairTasks(wire.CreateRepairRequest{
+		IntentID:          resp.IntentID,
+		UnavailableMiners: []string{seg0Shard0Miner},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repair.Tasks) == 0 {
+		t.Fatal("expected at least one repair task")
+	}
+
+	// The repair task for seg 0 shard 0 should use cross-parity mode.
+	var crossParityTask *wire.RepairTask
+	for i := range repair.Tasks {
+		if repair.Tasks[i].SegmentID == 0 && repair.Tasks[i].ShardIndex == 0 {
+			crossParityTask = &repair.Tasks[i]
+			break
+		}
+	}
+	if crossParityTask == nil {
+		t.Fatal("expected repair task for segment 0 shard 0")
+	}
+	if crossParityTask.RepairMode != "cross_parity" {
+		t.Fatalf("expected cross_parity repair mode, got %q", crossParityTask.RepairMode)
+	}
+	if crossParityTask.RequiredShards != 2 {
+		t.Fatalf("expected RequiredShards=2 for cross-parity, got %d", crossParityTask.RequiredShards)
+	}
+	if crossParityTask.PeerSegmentID != 1 {
+		t.Fatalf("expected PeerSegmentID=1, got %d", crossParityTask.PeerSegmentID)
+	}
+	if len(crossParityTask.SourceReceipts) != 2 {
+		t.Fatalf("expected 2 source receipts (peer + parity), got %d", len(crossParityTask.SourceReceipts))
+	}
 }

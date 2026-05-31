@@ -19,9 +19,11 @@ func (s *Store) StorageQuote(req wire.StorageQuoteRequest) (wire.StorageQuoteRes
 
 func (s *Store) storageQuoteForIntentLocked(req wire.CreateIntentRequest) (wire.StorageQuoteResponse, error) {
 	return s.storageQuoteLocked(wire.StorageQuoteRequest{
-		FileSize: req.FileSize,
-		Erasure:  req.Erasure,
-		Policy:   req.Policy,
+		FileSize:    req.FileSize,
+		SegmentSize: req.SegmentSize,
+		Erasure:     req.Erasure,
+		Policy:      req.Policy,
+		RepairPools: req.RepairPools,
 	})
 }
 
@@ -49,6 +51,15 @@ func (s *Store) storageQuoteLocked(req wire.StorageQuoteRequest) (wire.StorageQu
 	redundantBytes, err := redundantStorageBytes(req.FileSize, req.Erasure)
 	if err != nil {
 		return wire.StorageQuoteResponse{}, err
+	}
+	// Cross-parity repair pool overhead: each pool pairs 2 segments and
+	// stores totalShards extra shards of shardSize each.
+	if req.SegmentSize > 0 && req.Erasure.DataShards > 0 && len(req.RepairPools) > 0 {
+		totalShards := req.Erasure.DataShards + req.Erasure.ParityShards
+		numPools := int64(len(req.RepairPools))
+		shardSize := (req.SegmentSize + int64(req.Erasure.DataShards) - 1) / int64(req.Erasure.DataShards)
+		crossParityBytes := uint64(numPools) * uint64(totalShards) * uint64(shardSize)
+		redundantBytes += crossParityBytes
 	}
 	mibDays, err := totalStorageMiBDays(redundantBytes, duration)
 	if err != nil {

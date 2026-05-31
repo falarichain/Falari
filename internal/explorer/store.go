@@ -193,6 +193,27 @@ func (s *Store) refreshIntents(ctx context.Context) {
 				log.Printf("explorer: insert shard error: %v", err)
 			}
 		}
+
+		// repair pools (cross-parity)
+		for _, rp := range intent.RepairPools {
+			hashesJSON, _ := json.Marshal(rp.CrossParity.ShardHashes)
+			cidsJSON, _ := json.Marshal(rp.CrossParity.ShardCIDs)
+			_, err = s.pool.Exec(ctx, `
+				INSERT INTO repair_pools (intent_id, pool_id, segment_id_a, segment_id_b,
+					cross_parity_shard_hashes, cross_parity_shard_cids, cross_parity_shard_size)
+				VALUES ($1,$2,$3,$4,$5,$6,$7)
+				ON CONFLICT (intent_id, pool_id) DO UPDATE SET
+					segment_id_a = EXCLUDED.segment_id_a,
+					segment_id_b = EXCLUDED.segment_id_b,
+					cross_parity_shard_hashes = EXCLUDED.cross_parity_shard_hashes,
+					cross_parity_shard_cids = EXCLUDED.cross_parity_shard_cids,
+					cross_parity_shard_size = EXCLUDED.cross_parity_shard_size
+			`, intent.IntentID, rp.PoolID, rp.SegmentIDs[0], rp.SegmentIDs[1],
+				hashesJSON, cidsJSON, rp.CrossParity.ShardSize)
+			if err != nil {
+				log.Printf("explorer: insert repair pool error: %v", err)
+			}
+		}
 	}
 }
 

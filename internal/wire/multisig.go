@@ -134,14 +134,11 @@ func VerifyMultisigCreateSignature(req MultisigCreateRequest) error {
 	if err != nil {
 		return fmt.Errorf("invalid multisig create signature hex: %w", err)
 	}
-	if len(sigBytes) != 65 {
-		return errors.New("invalid multisig create signature size")
-	}
 	hash, err := MultisigCreateHash(req)
 	if err != nil {
 		return err
 	}
-	pubKey, err := ethcrypto.SigToPub(hash, sigBytes)
+	pubKey, err := recoverSigner(hash, sigBytes)
 	if err != nil {
 		return fmt.Errorf("multisig create signature recovery failed: %w", err)
 	}
@@ -215,16 +212,10 @@ func VerifyMultisigExecSignatures(req MultisigExecRequest, wallet MultisigWallet
 		if err != nil {
 			return fmt.Errorf("signature %d: invalid hex: %w", i, err)
 		}
-		if len(sigBytes) != 65 {
-			return fmt.Errorf("signature %d: invalid size %d", i, len(sigBytes))
-		}
-		if sigBytes[64] > 1 {
-			return fmt.Errorf("signature %d: invalid recovery id %d", i, sigBytes[64])
-		}
 
-		pubKey, err := ethcrypto.SigToPub(hash, sigBytes)
+		pubKey, err := recoverSigner(hash, sigBytes)
 		if err != nil {
-			return fmt.Errorf("signature %d: recovery failed: %w", i, err)
+			return fmt.Errorf("signature %d: %w", i, err)
 		}
 		recovered := AccountAddress(pubKey)
 

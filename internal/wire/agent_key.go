@@ -189,16 +189,13 @@ func recoverRegisterAgentKeySigner(req RegisterAgentKeyRequest) (*ecdsa.PublicKe
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid register agent key signature size")
-	}
 	hash, err := RegisterAgentKeyHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("recover register agent key signer: %w", err)
 	}
 	return publicKey, AccountAddress(publicKey), nil
 }
@@ -208,16 +205,13 @@ func recoverRevokeAgentKeySigner(req RevokeAgentKeyRequest) (*ecdsa.PublicKey, s
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid revoke agent key signature size")
-	}
 	hash, err := RevokeAgentKeyHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("recover revoke agent key signer: %w", err)
 	}
 	return publicKey, AccountAddress(publicKey), nil
 }
@@ -281,16 +275,13 @@ func recoverExtendAgentKeySigner(req ExtendAgentKeyRequest) (*ecdsa.PublicKey, s
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid extend agent key signature size")
-	}
 	hash, err := ExtendAgentKeyHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("recover extend agent key signer: %w", err)
 	}
 	return publicKey, AccountAddress(publicKey), nil
 }
@@ -354,16 +345,13 @@ func recoverTopupAgentKeySigner(req TopupAgentKeyRequest) (*ecdsa.PublicKey, str
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid topup agent key signature size")
-	}
 	hash, err := TopupAgentKeyHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("recover topup agent key signer: %w", err)
 	}
 	return publicKey, AccountAddress(publicKey), nil
 }

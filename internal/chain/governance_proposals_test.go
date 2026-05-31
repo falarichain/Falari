@@ -399,9 +399,11 @@ func TestCancelGovernanceProposal(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// After creating a proposal, the operator nonce has been incremented to 1.
 	cancelReq := wire.CreateGovernanceProposalRequest{
 		Proposer:      addresses[0],
 		ChainID:       store.data.ChainID,
+		Nonce:         store.data.OperatorNonces[addresses[0]],
 		IntentID:      "intent_lifecycle",
 		Action:        "freeze",
 		ReasonHash:    "reason_hash_test",

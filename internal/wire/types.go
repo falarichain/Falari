@@ -83,6 +83,24 @@ type SegmentPlan struct {
 	ShardCIDs   []string `json:"shard_cids,omitempty"`
 }
 
+// RepairPool pairs two consecutive segments and holds their cross-parity
+// shards. Cross-parity shard[j] = segA.shard[j] XOR segB.shard[j], enabling
+// single-shard repair with only 2 downloads instead of k.
+type RepairPool struct {
+	PoolID      int             `json:"pool_id"`
+	SegmentIDs  [2]int          `json:"segment_ids"`
+	CrossParity CrossParityPlan `json:"cross_parity"`
+}
+
+// CrossParityPlan stores the hashes and metadata for cross-parity shards
+// computed from a pair of segments. Cross-parity receipts are stored in
+// Intent.Receipts under negative segment IDs: pool P → segmentID -(P+1).
+type CrossParityPlan struct {
+	ShardHashes []string `json:"shard_hashes"`
+	ShardCIDs   []string `json:"shard_cids,omitempty"`
+	ShardSize   int64    `json:"shard_size"`
+}
+
 type StorageAssignment struct {
 	SegmentID    int    `json:"segment_id"`
 	ShardIndex   int    `json:"shard_index"`
@@ -102,6 +120,7 @@ type CreateIntentRequest struct {
 	FileRoot       string              `json:"file_root"`
 	SegmentRoots   []string            `json:"segment_roots"`
 	Segments       []SegmentPlan       `json:"segments"`
+	RepairPools    []RepairPool        `json:"repair_pools,omitempty"`
 	Erasure        ErasurePolicy       `json:"erasure"`
 	Encryption     *EncryptionMetadata `json:"encryption,omitempty"`
 	Policy         StoragePolicy       `json:"policy"`
@@ -311,9 +330,11 @@ type ProviderTransportMemory struct {
 }
 
 type StorageQuoteRequest struct {
-	FileSize int64         `json:"file_size"`
-	Erasure  ErasurePolicy `json:"erasure"`
-	Policy   StoragePolicy `json:"policy"`
+	FileSize    int64         `json:"file_size"`
+	SegmentSize int64         `json:"segment_size,omitempty"`
+	Erasure     ErasurePolicy `json:"erasure"`
+	Policy      StoragePolicy `json:"policy"`
+	RepairPools []RepairPool  `json:"repair_pools,omitempty"`
 }
 
 type StorageQuoteResponse struct {
@@ -415,6 +436,7 @@ type IntentView struct {
 	FileRoot                string              `json:"file_root"`
 	SegmentRoots            []string            `json:"segment_roots"`
 	Segments                []SegmentPlan       `json:"segments"`
+	RepairPools             []RepairPool        `json:"repair_pools,omitempty"`
 	Assignments             []StorageAssignment `json:"assignments,omitempty"`
 	Erasure                 ErasurePolicy       `json:"erasure"`
 	Encryption              *EncryptionMetadata `json:"encryption,omitempty"`
@@ -672,6 +694,7 @@ type UploadPlan struct {
 	FileRoot          string              `json:"file_root"`
 	SegmentRoots      []string            `json:"segment_roots"`
 	Segments          []SegmentPlan       `json:"segments"`
+	RepairPools       []RepairPool        `json:"repair_pools,omitempty"`
 	Assignments       []StorageAssignment `json:"assignments,omitempty"`
 	Erasure           ErasurePolicy       `json:"erasure"`
 	Encryption        *EncryptionMetadata `json:"encryption,omitempty"`
@@ -819,6 +842,11 @@ type RepairTask struct {
 	MissingShardIndexes []int             `json:"missing_shard_indexes"`
 	Assignment          StorageAssignment `json:"assignment,omitempty"`
 	SourceReceipts      []MinerReceipt    `json:"source_receipts,omitempty"`
+	// RepairMode indicates the repair strategy: "local" (default, RS
+	// reconstruct) or "cross_parity" (XOR from pool peer + cross-parity).
+	RepairMode    string `json:"repair_mode,omitempty"`
+	PoolID        int    `json:"pool_id,omitempty"`
+	PeerSegmentID int    `json:"peer_segment_id,omitempty"`
 }
 
 // PendingShardRepair tracks a shard that has been missed but has not yet
@@ -1860,8 +1888,10 @@ type GovernanceProposal struct {
 	TargetFoundationAddress           string `json:"target_foundation_address,omitempty"`
 	TargetRetrievalAddress            string `json:"target_retrieval_address,omitempty"`
 	TargetStorageRewardPerBlock       uint64 `json:"target_storage_reward_per_block,omitempty"`
-	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`
-	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`
+	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`     // deprecated
+	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`    // deprecated
+	TargetRetrievalRewardPerBlock     uint64 `json:"target_retrieval_reward_per_block,omitempty"`
+	TargetFoundationRewardPerBlock    uint64 `json:"target_foundation_reward_per_block,omitempty"`
 	TargetAvailabilityWindowSize      uint64 `json:"target_availability_window_size,omitempty"`
 	TargetAvailabilityThresholdBPS    uint64 `json:"target_availability_threshold_bps,omitempty"`
 	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
@@ -1931,8 +1961,10 @@ type CreateGovernanceProposalRequest struct {
 	TargetFoundationAddress           string `json:"target_foundation_address,omitempty"`
 	TargetRetrievalAddress            string `json:"target_retrieval_address,omitempty"`
 	TargetStorageRewardPerBlock       uint64 `json:"target_storage_reward_per_block,omitempty"`
-	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`
-	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`
+	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`     // deprecated
+	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`    // deprecated
+	TargetRetrievalRewardPerBlock     uint64 `json:"target_retrieval_reward_per_block,omitempty"`
+	TargetFoundationRewardPerBlock    uint64 `json:"target_foundation_reward_per_block,omitempty"`
 	TargetAvailabilityWindowSize      uint64 `json:"target_availability_window_size,omitempty"`
 	TargetAvailabilityThresholdBPS    uint64 `json:"target_availability_threshold_bps,omitempty"`
 	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
@@ -2095,6 +2127,7 @@ type BridgeConfig struct {
 // BridgeOutbound records a user's bridge-out request (Falari → ETH).
 type BridgeOutbound struct {
 	Nonce          uint64 `json:"nonce"`
+	TxHash         string `json:"tx_hash,omitempty"`
 	TargetChainID  string `json:"target_chain_id"`
 	Sender         string `json:"sender"`
 	Recipient      string `json:"recipient"`

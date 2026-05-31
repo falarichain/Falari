@@ -475,11 +475,16 @@ func (s *Store) BridgeOut(req wire.BridgeOutRequest) (map[string]any, error) {
 		s.removePendingTxLocked(txID)
 		return nil, err
 	}
+	// P2-C07: Store actual tx hash on the outbound for relayer use.
+	if ob, ok := s.data.BridgeOutbounds[s.data.BridgeOutboundNonce]; ok {
+		ob.TxHash = txID
+	}
 	if err := s.saveLocked(); err != nil {
 		return nil, err
 	}
 	return map[string]any{
 		"nonce":     s.data.BridgeOutboundNonce,
+		"tx_hash":   txID,
 		"sender":    req.Sender,
 		"recipient": req.Recipient,
 		"amount":    req.Amount,

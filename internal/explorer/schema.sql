@@ -139,6 +139,22 @@ CREATE INDEX IF NOT EXISTS idx_shards_miner ON shard_assignments(miner_address);
 CREATE INDEX IF NOT EXISTS idx_shards_cid ON shard_assignments(shard_cid);
 
 -- ============================================================
+-- REPAIR POOLS (Cross-Parity)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS repair_pools (
+    id                      SERIAL PRIMARY KEY,
+    intent_id               TEXT NOT NULL REFERENCES intents(intent_id),
+    pool_id                 INT NOT NULL,
+    segment_id_a            INT NOT NULL,
+    segment_id_b            INT NOT NULL,
+    cross_parity_shard_hashes JSONB NOT NULL DEFAULT '[]',
+    cross_parity_shard_cids   JSONB NOT NULL DEFAULT '[]',
+    cross_parity_shard_size BIGINT NOT NULL DEFAULT 0,
+    UNIQUE(intent_id, pool_id)
+);
+CREATE INDEX IF NOT EXISTS idx_repair_pools_intent ON repair_pools(intent_id);
+
+-- ============================================================
 -- MINERS / STORAGE PROVIDERS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS miners (

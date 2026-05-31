@@ -67,6 +67,7 @@ func manifestResponseForIntent(intent *Intent) wire.StorageManifestResponse {
 		FileRoot:          intent.FileRoot,
 		SegmentRoots:      append([]string(nil), intent.SegmentRoots...),
 		Segments:          append([]wire.SegmentPlan(nil), intent.Segments...),
+		RepairPools:       append([]wire.RepairPool(nil), intent.RepairPools...),
 		Assignments:       append([]wire.StorageAssignment(nil), intent.Assignments...),
 		Erasure:           intent.Erasure,
 		Encryption:        intent.Encryption,
@@ -108,6 +109,10 @@ func sortedIntentReceipts(intent *Intent) []wire.MinerReceipt {
 func committedSegmentIDs(intent *Intent) []int {
 	segments := make([]int, 0, len(intent.Receipts))
 	for segmentID, receipts := range intent.Receipts {
+		// Negative segment IDs are cross-parity pools; skip them.
+		if segmentID < 0 {
+			continue
+		}
 		if len(receipts) >= intent.Erasure.DataShards {
 			segments = append(segments, segmentID)
 		}

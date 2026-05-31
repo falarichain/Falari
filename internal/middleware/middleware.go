@@ -104,7 +104,10 @@ func RateLimitWithTrustedProxies(rps float64, burst int, trustedProxies []string
 			ip := clientIP(r, proxies)
 			limiter := l.get(ip)
 			if !limiter.Allow() {
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				// P2-H02: Set proper Content-Type for JSON error response.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Write([]byte(`{"error":"rate limit exceeded"}`))
 				return
 			}
 			next.ServeHTTP(w, r)

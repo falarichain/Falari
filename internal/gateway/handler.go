@@ -42,6 +42,7 @@ type Handler struct {
 	mu         sync.Mutex
 	resumeJobs map[string]*ResumeJob
 	dhtService *falaridht.Service
+	agentMu    sync.Map // per-agent-key mutex: key=AgentKeyID, value=*sync.Mutex
 }
 
 type ResumeJob struct {
@@ -211,6 +212,13 @@ func (h *Handler) runUpload(ak *agentKeyCtx, filePath, fileName string, fileSize
 	if err != nil {
 		return nil, err
 	}
+
+	// Serialize nonce-sensitive operations per agent key to prevent race conditions (P2-C03).
+	agentMuVal, _ := h.agentMu.LoadOrStore(ak.AgentKeyID, &sync.Mutex{})
+	agentLock := agentMuVal.(*sync.Mutex)
+	agentLock.Lock()
+	defer agentLock.Unlock()
+
 	auth, err := h.agentUploadAuth(chainClient, ak, chainID)
 	if err != nil {
 		return nil, err
@@ -510,6 +518,11 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("intent_id is required"))
 		return
 	}
+	// P2-H01: Prevent path traversal in intent IDs.
+	if strings.ContainsAny(intentID, "/\\..") {
+		writeError(w, http.StatusBadRequest, errors.New("invalid intent_id"))
+		return
+	}
 
 	chainClient := client.NewHTTP(h.cfg.ChainURL)
 	var manifest wire.StorageManifestResponse
@@ -596,6 +609,11 @@ func (h *Handler) handleCollectionFiles(w http.ResponseWriter, r *http.Request) 
 	collectionID := r.PathValue("collection_id")
 	if collectionID == "" {
 		writeError(w, http.StatusBadRequest, errors.New("collection_id is required"))
+		return
+	}
+	// P2-H01: Prevent path traversal in collection IDs.
+	if strings.ContainsAny(collectionID, "/\\..") {
+		writeError(w, http.StatusBadRequest, errors.New("invalid collection_id"))
 		return
 	}
 
@@ -706,6 +724,11 @@ func (h *Handler) fetchShard(shardHash, shardCID string) ([]byte, error) {
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	intentID := r.PathValue("intent_id")
+	// P2-H01: Prevent path traversal in intent IDs.
+	if strings.ContainsAny(intentID, "/\\..") {
+		writeError(w, http.StatusBadRequest, errors.New("invalid intent_id"))
+		return
+	}
 	chainClient := client.NewHTTP(h.cfg.ChainURL)
 	var intent wire.IntentView
 	if err := chainClient.Get("/intents/"+intentID, &intent); err != nil {

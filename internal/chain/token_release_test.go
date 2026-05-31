@@ -158,3 +158,85 @@ func TestStoragePerBlockReleaseAccruesEstimatedRewards(t *testing.T) {
 		t.Fatalf("expected settled pending mining rewards %d, got %d", expected, got)
 	}
 }
+
+func TestFoundationPerBlockReleaseReleasesFixedAmount(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.initRewardPoolsLocked()
+	store.data.FoundationAddress = "foundation_addr"
+	now := int64(1_700_000_000)
+
+	store.releaseFoundationPerBlockLocked(now)
+
+	expected := uint64(16) * reward.TokenUnit // default FoundationRewardPerBlock
+	if store.data.RewardPools.FoundationRemaining != reward.FoundationPoolInitial-expected {
+		t.Fatalf("expected foundation pool remaining %d, got %d",
+			reward.FoundationPoolInitial-expected, store.data.RewardPools.FoundationRemaining)
+	}
+	if got := store.data.Accounts["foundation_addr"].Balance; got != expected {
+		t.Fatalf("expected foundation address balance %d, got %d", expected, got)
+	}
+}
+
+func TestRetrievalPerBlockReleaseReleasesFixedAmount(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.initRewardPoolsLocked()
+	store.data.RetrievalAddress = "retrieval_addr"
+	now := int64(1_700_000_000)
+
+	store.releaseRetrievalPerBlockLocked(now)
+
+	expected := uint64(10) * reward.TokenUnit // default RetrievalRewardPerBlock
+	if store.data.RewardPools.RetrievalRemaining != reward.RetrievalPoolInitial-expected {
+		t.Fatalf("expected retrieval pool remaining %d, got %d",
+			reward.RetrievalPoolInitial-expected, store.data.RewardPools.RetrievalRemaining)
+	}
+	if got := store.data.Accounts["retrieval_addr"].Balance; got != expected {
+		t.Fatalf("expected retrieval address balance %d, got %d", expected, got)
+	}
+}
+
+func TestFoundationPerBlockReleaseCapsAtPoolRemaining(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.initRewardPoolsLocked()
+	store.data.FoundationAddress = "foundation_addr"
+	store.data.RewardPools.FoundationRemaining = 100 // nearly depleted
+	now := int64(1_700_000_000)
+
+	store.releaseFoundationPerBlockLocked(now)
+
+	if store.data.RewardPools.FoundationRemaining != 0 {
+		t.Fatalf("expected foundation pool fully depleted, got %d", store.data.RewardPools.FoundationRemaining)
+	}
+	if got := store.data.Accounts["foundation_addr"].Balance; got != 100 {
+		t.Fatalf("expected foundation address balance 100, got %d", got)
+	}
+}
+
+func TestRetrievalPerBlockReleaseCapsAtPoolRemaining(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.initRewardPoolsLocked()
+	store.data.RetrievalAddress = "retrieval_addr"
+	store.data.RewardPools.RetrievalRemaining = 50 // nearly depleted
+	now := int64(1_700_000_000)
+
+	store.releaseRetrievalPerBlockLocked(now)
+
+	if store.data.RewardPools.RetrievalRemaining != 0 {
+		t.Fatalf("expected retrieval pool fully depleted, got %d", store.data.RewardPools.RetrievalRemaining)
+	}
+	if got := store.data.Accounts["retrieval_addr"].Balance; got != 50 {
+		t.Fatalf("expected retrieval address balance 50, got %d", got)
+	}
+}

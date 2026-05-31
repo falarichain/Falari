@@ -90,14 +90,11 @@ func recoverStartEpochSigner(req StartEpochRequest) (*ecdsa.PublicKey, string, e
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid start epoch signature size")
-	}
 	hash, err := StartEpochHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
 		return nil, "", err
 	}
@@ -158,14 +155,11 @@ func recoverFinalizeEpochSigner(req FinalizeEpochRequest) (*ecdsa.PublicKey, str
 	if err != nil {
 		return nil, "", err
 	}
-	if len(signature) != 65 {
-		return nil, "", errors.New("invalid finalize epoch signature size")
-	}
 	hash, err := FinalizeEpochHash(req)
 	if err != nil {
 		return nil, "", err
 	}
-	publicKey, err := ethcrypto.SigToPub(hash, signature)
+	publicKey, err := recoverSigner(hash, signature)
 	if err != nil {
 		return nil, "", err
 	}
