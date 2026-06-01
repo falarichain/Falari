@@ -121,6 +121,7 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 
 	// Expire stale proposals.
 	s.expireGovernanceProposalsLocked(now)
+	s.expireUnreachableProposalsLocked()
 
 	// Generate proposal ID.
 	proposalID, err := randomID("gov_proposal")
@@ -434,6 +435,10 @@ func (s *Store) executeGovernanceProposalLocked(proposal wire.GovernanceProposal
 	// Mark proposal as executed.
 	proposal.Status = wire.GovProposalExecuted
 	s.data.GovernanceProposals[proposal.ProposalID] = proposal
+	s.emitEventWithEmitterLocked(wire.EventGovProposalExecuted, map[string]any{
+		"proposal_id": proposal.ProposalID,
+		"action":      proposal.Action,
+	}, proposal.Proposer, proposal.IntentID, "", s.currentHeightLocked(), "governance")
 
 	// Route operator management actions to dedicated handler.
 	if isOperatorManagementAction(proposal.Action) {
@@ -802,7 +807,8 @@ func (s *Store) GovernanceOperators() wire.GovernanceOperatorListResponse {
 
 	operators := make([]wire.GovernanceOperator, 0, len(s.data.GovernanceOperators))
 	for _, op := range s.data.GovernanceOperators {
-		op.Nonce = s.data.OperatorNonces[normalizeGovernanceOperator(op.Operator)]
+		// Nonce is intentionally omitted from the public listing to prevent
+		// bulk enumeration. Operators query their own nonce via a dedicated endpoint.
 		operators = append(operators, op)
 	}
 	sort.Slice(operators, func(i, j int) bool {
@@ -820,6 +826,19 @@ func (s *Store) GovernanceOperators() wire.GovernanceOperatorListResponse {
 	}
 }
 
+// OperatorNonce returns the current nonce for a specific governance operator.
+// Returns (nonce, true) if found, (0, false) otherwise.
+func (s *Store) OperatorNonce(operatorAddr string) (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	normalized := normalizeGovernanceOperator(operatorAddr)
+	if _, ok := s.data.GovernanceOperators[normalized]; !ok {
+		return 0, false
+	}
+	return s.data.OperatorNonces[normalized], true
+}
+
 // ── Internal helpers ──
 
 // expireGovernanceProposalsLocked marks expired pending proposals.
@@ -828,6 +847,36 @@ func (s *Store) expireGovernanceProposalsLocked(now int64) {
 		if p.Status == wire.GovProposalPending && p.CreatedAtUnix+governanceProposalTTLSeconds < now {
 			p.Status = wire.GovProposalExpired
 			s.data.GovernanceProposals[id] = p
+			s.emitEventWithEmitterLocked(wire.EventGovProposalExpired, map[string]any{
+				"proposal_id": id,
+			}, p.Proposer, p.IntentID, "", s.currentHeightLocked(), "governance")
+		}
+	}
+}
+
+// expireUnreachableProposalsLocked expires pending proposals whose approval
+// threshold can no longer be reached given the current set of enabled operators.
+// This prevents governance deadlocks when operators are disabled after a
+// proposal is created but before enough votes are collected.
+func (s *Store) expireUnreachableProposalsLocked() {
+	for id, p := range s.data.GovernanceProposals {
+		if p.Status != wire.GovProposalPending {
+			continue
+		}
+		approveCount, rejectCount := s.countGovernanceVotesLocked(id)
+		threshold := s.governanceThresholdLocked(p.Action)
+		totalEnabled := s.countEnabledOperatorsLocked()
+		remaining := totalEnabled - approveCount - rejectCount
+		if approveCount+remaining < threshold {
+			p.Status = wire.GovProposalExpired
+			s.data.GovernanceProposals[id] = p
+			s.emitEventWithEmitterLocked(wire.EventGovProposalExpired, map[string]any{
+				"proposal_id": id,
+				"reason":      "threshold_unreachable",
+				"approve":     approveCount,
+				"threshold":   threshold,
+				"enabled":     totalEnabled,
+			}, p.Proposer, p.IntentID, "", s.currentHeightLocked(), "governance")
 		}
 	}
 }

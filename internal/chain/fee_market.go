@@ -51,6 +51,18 @@ func (s *Store) transactionFeeMultiplierBPS(txType string) uint64 {
 		if m.BatchCommit > 0 {
 			return m.BatchCommit
 		}
+	case "deploy_contract":
+		if m.DeployContract > 0 {
+			return m.DeployContract
+		}
+	case "call_contract":
+		if m.CallContract > 0 {
+			return m.CallContract
+		}
+	case "destroy_contract":
+		if m.DestroyContract > 0 {
+			return m.DestroyContract
+		}
 	}
 	return 10000
 }
@@ -117,6 +129,15 @@ func applyFeeMultiplierUpdate(dst *wire.FeeMultipliers, src *wire.FeeMultipliers
 		return err
 	}
 	if err := applyField("batch_commit", src.BatchCommit, &dst.BatchCommit); err != nil {
+		return err
+	}
+	if err := applyField("deploy_contract", src.DeployContract, &dst.DeployContract); err != nil {
+		return err
+	}
+	if err := applyField("call_contract", src.CallContract, &dst.CallContract); err != nil {
+		return err
+	}
+	if err := applyField("destroy_contract", src.DestroyContract, &dst.DestroyContract); err != nil {
 		return err
 	}
 	return nil
@@ -200,7 +221,8 @@ func transactionRequiresBaseFee(tx wire.Transaction) bool {
 		"generate_challenges", "create_repair_tasks",
 		"start_epoch", "finalize_epoch", "validator_evidence",
 		"governance_deal_action", "committee_freeze_deal", "governance_block_deal",
-		"direct_governance_action", "direct_action_review_vote":
+		"direct_governance_action", "direct_action_review_vote",
+		"wasm_cron_exec", "wasm_event_delivery":
 		return false
 	}
 	// All other transaction types are user-submitted and MUST include a gas

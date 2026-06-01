@@ -125,6 +125,12 @@ func (s *Store) applyBridgeOutLocked(req wire.BridgeOutRequest) error {
 	// Update daily counter.
 	cfg.CurrentDayAmount = newDayAmount
 
+	s.emitEventWithEmitterLocked(wire.EventBridgeOut, map[string]any{
+		"amount":          req.Amount,
+		"fee":             req.Fee,
+		"target_chain_id": req.TargetChainID,
+		"nonce":           nonce,
+	}, sender, "", req.Recipient, s.currentHeightLocked(), "bridge")
 	return nil
 }
 
@@ -232,6 +238,11 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 		ConsumedAtUnix: now,
 	}
 
+	s.emitEventWithEmitterLocked(wire.EventBridgeIn, map[string]any{
+		"amount":           inbound.Amount,
+		"source_tx_hash":   req.SourceTxHash,
+		"source_block":     req.SourceBlockNumber,
+	}, recipient, "", "", s.currentHeightLocked(), "bridge")
 	return nil
 }
 

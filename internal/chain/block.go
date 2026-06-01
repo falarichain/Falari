@@ -58,6 +58,7 @@ func (s *Store) recordTxLocked(txType, from string, payload any) string {
 		return txID
 	}
 	s.data.AppliedTxs[tx.TxID] = true
+	s.currentTxHash = txID
 	broadcaster := s.txBroadcaster
 	if broadcaster != nil {
 		go broadcaster.BroadcastTransaction(tx)
@@ -224,6 +225,7 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	validator.ProducedBlocks++
 	s.data.Validators[ownerAddr] = validator
 	s.data.Blocks = append(s.data.Blocks, block)
+	s.backfillBlockMetadataLocked(block)
 	if block.Finality.Finalized {
 		s.finalizeConsensusForBlockLocked(block)
 	} else {
@@ -258,6 +260,11 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	}
 	// Process matured unbonding entries each block.
 	s.processMaturedUnbondingEntriesLocked()
+	// Execute WASM cron jobs and deliver pending events before user txs.
+	blockTime := time.Now().Unix()
+	s.processWasmCronJobsLocked(blockTime)
+	s.deliverWasmPendingEventsLocked(blockTime)
+	s.blockLogIndex = 0
 	txs := s.selectPendingTxsForBlockLocked()
 	appliedTxs, _ := s.applyPendingTransactionsForBlockLocked(txs, s.operatorIdentity.OwnerAddress)
 	txLeaves := make([]string, 0, len(appliedTxs))
@@ -271,7 +278,7 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	block := wire.Block{
 		Height:            uint64(len(s.data.Blocks) + 1),
 		Round:             s.data.ConsensusRound,
-		TimeUnix:          time.Now().Unix(),
+		TimeUnix:          blockTime,
 		PrevHash:          prevHash,
 		TxRoot:            chaincrypto.MerkleRoot(txLeaves),
 		StateRoot:         s.stateRootLocked(),
@@ -282,6 +289,7 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	s.prepareReceiptsForBlockLocked(&block)
 	block.ReceiptsRoot = s.receiptsRootForBlockLocked(block)
 	block.Hash = blockHash(block)
+	s.backfillBlockMetadataLocked(block)
 	s.prepareReceiptsForBlockLocked(&block)
 	if err := wire.SignBlock(&block, s.operatorIdentity.OperatorPrivateKey); err != nil {
 		return wire.Block{}, false, err

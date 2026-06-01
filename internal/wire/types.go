@@ -445,6 +445,7 @@ type IntentView struct {
 	PaidFee                 uint64              `json:"paid_fee,omitempty"`
 	RefundedFee             uint64              `json:"refunded_fee,omitempty"`
 	BurnedFee               uint64              `json:"burned_fee,omitempty"`
+	BurnDeferred            bool                `json:"burn_deferred,omitempty"`
 	PermanentFundBalance    uint64              `json:"permanent_fund_balance,omitempty"`
 	PermanentFundPaid       uint64              `json:"permanent_fund_paid,omitempty"`
 	UploadedSize            int64               `json:"uploaded_size"`
@@ -814,8 +815,13 @@ type ShardRef struct {
 }
 
 type GenerateChallengeRequest struct {
-	IntentID string `json:"intent_id"`
-	Count    int    `json:"count"`
+	ChainID   string `json:"chain_id,omitempty"`
+	IntentID  string `json:"intent_id"`
+	Count     int    `json:"count"`
+	User      string `json:"user,omitempty"`
+	Nonce     uint64 `json:"nonce,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
 type GenerateChallengeResponse struct {
@@ -953,9 +959,14 @@ type StorageRoutesResponse struct {
 }
 
 type CreateRepairRequest struct {
+	ChainID           string   `json:"chain_id,omitempty"`
 	IntentID          string   `json:"intent_id"`
 	UnavailableMiners []string `json:"unavailable_miners,omitempty"`
 	IncludeMissing    bool     `json:"include_missing"`
+	User              string   `json:"user,omitempty"`
+	Nonce             uint64   `json:"nonce,omitempty"`
+	PublicKey         string   `json:"public_key,omitempty"`
+	Signature         string   `json:"signature,omitempty"`
 }
 
 type CreateRepairResponse struct {
@@ -1357,11 +1368,12 @@ type Transaction struct {
 }
 
 type TransactionReceipt struct {
-	TransactionHash  string `json:"transaction_hash"`
-	TransactionIndex uint64 `json:"transaction_index"`
-	BlockHash        string `json:"block_hash,omitempty"`
-	BlockNumber      uint64 `json:"block_number,omitempty"`
-	From             string `json:"from,omitempty"`
+	TransactionHash  string       `json:"transaction_hash"`
+	TransactionIndex uint64       `json:"transaction_index"`
+	BlockHash        string       `json:"block_hash,omitempty"`
+	BlockNumber      uint64       `json:"block_number,omitempty"`
+	From             string       `json:"from,omitempty"`
+	Logs             []ChainEvent `json:"logs,omitempty"`
 }
 
 type Block struct {
@@ -1499,6 +1511,9 @@ type FeeMultipliers struct {
 	UploadNFTTemplate uint64 `json:"upload_nft_template,omitempty"`
 	RegisterValidator uint64 `json:"register_validator,omitempty"`
 	BatchCommit       uint64 `json:"batch_commit,omitempty"`
+	DeployContract    uint64 `json:"deploy_contract,omitempty"`
+	CallContract      uint64 `json:"call_contract,omitempty"`
+	DestroyContract   uint64 `json:"destroy_contract,omitempty"`
 }
 
 type FeeMarket struct {
@@ -2124,10 +2139,34 @@ type MultisigTransferPayload struct {
 	Amount uint64 `json:"amount"`
 }
 
+// MultisigUpdateSignersPayload is the inner payload for an "update_signers" operation.
+type MultisigUpdateSignersPayload struct {
+	NewSigners   []string `json:"new_signers"`
+	NewThreshold uint8    `json:"new_threshold"`
+}
+
+// MultisigUpdateThresholdPayload is the inner payload for an "update_threshold" operation.
+type MultisigUpdateThresholdPayload struct {
+	NewThreshold uint8 `json:"new_threshold"`
+}
+
+// MultisigCreateIntentPayload is the inner payload for a "create_intent" operation.
+type MultisigCreateIntentPayload struct {
+	FileName  string `json:"file_name"`
+	FileSize  int64  `json:"file_size"`
+	LockedFee uint64 `json:"locked_fee"`
+}
+
+// MultisigBatchTransferPayload is the inner payload for a "batch_transfer" operation.
+type MultisigBatchTransferPayload struct {
+	Transfers []MultisigTransferPayload `json:"transfers"`
+}
+
 // MultisigExecResponse is returned after a successful multisig execution.
 type MultisigExecResponse struct {
 	Wallet           MultisigWallet    `json:"wallet"`
 	TransferResponse *TransferResponse `json:"transfer_response,omitempty"`
+	IntentID         string            `json:"intent_id,omitempty"`
 }
 
 // MultisigWalletInfo enriches a wallet with its current balance.
@@ -2334,3 +2373,337 @@ type DirectActionListResponse struct {
 	Records []DirectActionRecord                `json:"records"`
 	Votes   map[string][]DirectActionReviewVote `json:"votes"`
 }
+
+// ---------------------------------------------------------------------------
+// Chain Events — append-only system event log
+// ---------------------------------------------------------------------------
+
+// Event type constants for the on-chain event log.
+const (
+	// Existing
+	EventPermanentFundClosed    = "permanent_fund_closed"
+	EventMinerJailed            = "miner_jailed"
+	EventMinerExiting           = "miner_exiting"
+	EventMinerExited            = "miner_exited"
+	EventGovProposalExecuted    = "governance_proposal_executed"
+	EventGovProposalExpired     = "governance_proposal_expired"
+	EventIntentSettled          = "intent_settled"
+	EventIntentExpired          = "intent_expired"
+
+	// Financial
+	EventTransfer               = "transfer"
+	EventDelegateStake          = "delegate_stake"
+	EventUndelegateStake        = "undelegate_stake"
+	EventRewardsClaimed         = "rewards_claimed"
+
+	// Miner
+	EventMinerRegistered        = "miner_registered"
+	EventMinerCapacityAdjusted  = "miner_capacity_adjusted"
+
+	// Validator
+	EventValidatorRegistered    = "validator_registered"
+	EventValidatorDeregistered  = "validator_deregistered"
+
+	// Bridge
+	EventBridgeOut              = "bridge_out"
+	EventBridgeIn               = "bridge_in"
+
+	// Intent lifecycle
+	EventIntentCreated          = "intent_created"
+	EventIntentCommitted        = "intent_committed"
+	EventIntentFinalized        = "intent_finalized"
+	EventIntentRenewed          = "intent_renewed"
+	EventIntentTerminated       = "intent_terminated"
+
+	// Governance
+	EventGovProposalCreated     = "governance_proposal_created"
+	EventGovVoteCast            = "governance_vote_cast"
+
+	// Account
+	EventAccountCredited        = "account_credited"
+
+	// Access / Moderation
+	EventAccessPolicyChanged    = "access_policy_changed"
+	EventModerationAction       = "moderation_action"
+
+	// WASM Contracts
+	EventContractDeployed       = "contract_deployed"
+	EventContractCalled         = "contract_called"
+	EventContractDestroyed      = "contract_destroyed"
+	EventContractCronExecuted   = "contract_cron_executed"
+	EventContractCronFailed     = "contract_cron_failed"
+	EventContractEventEmitted   = "contract_event_emitted"
+	EventContractEventDelivered      = "contract_event_delivered"
+	EventContractEventDeliveryFailed = "contract_event_delivery_failed"
+)
+
+// ChainEvent represents a single system-level event stored in the chain event log.
+type ChainEvent struct {
+	EventID             uint64          `json:"event_id"`
+	EventType           string          `json:"event_type"`
+	Payload             json.RawMessage `json:"payload,omitempty"`
+	CreatedAtUnix       int64           `json:"created_at_unix"`
+	RelatedAddress      string          `json:"related_address,omitempty"`
+	RelatedIntentID     string          `json:"related_intent_id,omitempty"`
+	CounterpartyAddress string          `json:"counterparty_address,omitempty"`
+	BlockHeight         int64           `json:"block_height,omitempty"`
+	TransactionHash     string          `json:"transaction_hash,omitempty"`
+	BlockHash           string          `json:"block_hash,omitempty"`
+	LogIndex            int             `json:"log_index"`
+	Emitter             string          `json:"emitter,omitempty"`
+	BlockTimestamp       int64           `json:"block_timestamp,omitempty"`
+}
+
+// ChainEventsResponse is the API response for querying chain events.
+type ChainEventsResponse struct {
+	Events     []ChainEvent `json:"events"`
+	Total      int          `json:"total"`
+	HasMore    bool         `json:"has_more"`
+	NextCursor uint64       `json:"next_cursor,omitempty"`
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WASM Smart Contracts
+// ──────────────────────────────────────────────────────────────────────────────
+
+// WASM contract status constants.
+const (
+	WasmContractStatusActive    = "active"
+	WasmContractStatusDestroyed = "destroyed"
+)
+
+// WASM limits.
+const (
+	MaxWasmBytecodeSize     = 2 * 1024 * 1024   // 2 MB
+	MaxWasmMemoryBytes      = 16 * 1024 * 1024  // 16 MB (256 pages × 64KB)
+	MaxWasmKVEntries        = 10_000
+	MaxWasmKVKeyBytes       = 256
+	MaxWasmKVValueBytes     = 64 * 1024 // 64 KB
+	MaxWasmCronJobs         = 5
+	MinWasmCronIntervalSecs = 60
+	MaxWasmSubscriptions    = 10
+	MaxWasmEventsPerCall    = 5
+	MaxWasmEventAttributes  = 10
+	MaxWasmEventAttrKeyLen  = 256
+	MaxWasmEventAttrValLen  = 256
+	MaxWasmEventTypeLen     = 64
+	MaxWasmLabelLen         = 64
+	MaxWasmMethodNameLen    = 64
+	MaxWasmPendingEvents    = 1000
+	WasmCronAutoDisable     = 10 // consecutive failures before auto-disable
+	DefaultWasmGasLimit     = 10_000_000
+	WasmDefaultCronGasReserve = 1_000_000
+)
+
+// WasmContract is the on-chain record for a deployed WASM contract.
+type WasmContract struct {
+	Address       string `json:"address"`
+	CodeHash      string `json:"code_hash"`
+	Admin         string `json:"admin"`
+	Label         string `json:"label"`
+	Balance       uint64 `json:"balance"`
+	Status        string `json:"status"`
+	PublicKV      bool   `json:"public_kv,omitempty"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+	UpdatedAtUnix int64  `json:"updated_at_unix"`
+}
+
+// WasmCode stores a WASM module bytecode, deduplicated by hash.
+type WasmCode struct {
+	Hash           string `json:"hash"`
+	BytecodeBase64 string `json:"bytecode_base64"`
+	SizeBytes      int64  `json:"size_bytes"`
+	RefCount       int    `json:"ref_count"`
+	UploadedAtUnix int64  `json:"uploaded_at_unix"`
+}
+
+// WasmCronJob is a registered cron schedule for a contract.
+type WasmCronJob struct {
+	ContractAddress    string `json:"contract_address"`
+	MethodName         string `json:"method_name"`
+	IntervalSeconds    int64  `json:"interval_seconds"`
+	LastExecutedAtUnix int64  `json:"last_executed_at_unix"`
+	NextDueAtUnix      int64  `json:"next_due_at_unix"`
+	Enabled            bool   `json:"enabled"`
+	FailureCount       uint64 `json:"failure_count"`
+	CreatedAtUnix      int64  `json:"created_at_unix"`
+}
+
+// WasmCronJobSpec is used in deploy/call requests to register crons.
+type WasmCronJobSpec struct {
+	MethodName      string `json:"method_name"`
+	IntervalSeconds int64  `json:"interval_seconds"`
+}
+
+// WasmContractEvent is an event emitted by a contract during execution.
+type WasmContractEvent struct {
+	EmitterAddress string            `json:"emitter_address"`
+	EventType      string            `json:"event_type"`
+	Attributes     map[string]string `json:"attributes"`
+	EmittedAtBlock uint64            `json:"emitted_at_block"`
+	DeliveryBlock  uint64            `json:"delivery_block"`
+}
+
+// WasmEventSubscription is a subscription to events from another contract.
+type WasmEventSubscription struct {
+	SubscriberAddress string `json:"subscriber_address"`
+	EmitterAddress    string `json:"emitter_address"`
+	EventTypeFilter   string `json:"event_type_filter"`
+	CreatedAtUnix     int64  `json:"created_at_unix"`
+}
+
+// WasmPendingEventDelivery is a queued event waiting for delivery next block.
+type WasmPendingEventDelivery struct {
+	Event         WasmContractEvent `json:"event"`
+	Subscribers   []string          `json:"subscribers"`
+	DeliveryBlock uint64            `json:"delivery_block"`
+}
+
+// ── WASM Transaction Request/Response Types ──
+
+// DeployContractRequest is the request to deploy a new WASM contract.
+type DeployContractRequest struct {
+	ChainID        string            `json:"chain_id"`
+	Deployer       string            `json:"deployer"`
+	Label          string            `json:"label"`
+	BytecodeBase64 string            `json:"bytecode_base64"`
+	InitMethod     string            `json:"init_method"`
+	InitArgs       string            `json:"init_args"`
+	InitFund       uint64            `json:"init_fund"`
+	CronJobs       []WasmCronJobSpec `json:"cron_jobs,omitempty"`
+	PublicKV       bool              `json:"public_kv,omitempty"`
+	Nonce          uint64            `json:"nonce"`
+	Fee            uint64            `json:"fee"`
+	PublicKey      string            `json:"public_key"`
+	Signature      string            `json:"signature"`
+	AgentKeyID     string            `json:"agent_key_id,omitempty"`
+	AgentNonce     uint64            `json:"agent_nonce,omitempty"`
+	AgentPublicKey string            `json:"agent_public_key,omitempty"`
+	AgentSignature string            `json:"agent_signature,omitempty"`
+}
+
+// DeployContractResponse is returned after a successful contract deployment.
+type DeployContractResponse struct {
+	Contract   WasmContract `json:"contract"`
+	InitResult string       `json:"init_result"`
+	GasUsed    uint64       `json:"gas_used"`
+}
+
+// CallContractRequest is the request to invoke a contract method.
+type CallContractRequest struct {
+	ChainID         string `json:"chain_id"`
+	Caller          string `json:"caller"`
+	ContractAddress string `json:"contract_address"`
+	Method          string `json:"method"`
+	Args            string `json:"args"`
+	Fund            uint64 `json:"fund"`
+	Nonce           uint64 `json:"nonce"`
+	Fee             uint64 `json:"fee"`
+	GasLimit        uint64 `json:"gas_limit"`
+	PublicKey       string `json:"public_key"`
+	Signature       string `json:"signature"`
+	AgentKeyID      string `json:"agent_key_id,omitempty"`
+	AgentNonce      uint64 `json:"agent_nonce,omitempty"`
+	AgentPublicKey  string `json:"agent_public_key,omitempty"`
+	AgentSignature  string `json:"agent_signature,omitempty"`
+}
+
+// CallContractResponse is returned after a successful contract call.
+type CallContractResponse struct {
+	Result       string              `json:"result"`
+	GasUsed      uint64              `json:"gas_used"`
+	Events       []WasmContractEvent `json:"events,omitempty"`
+	StateChanges int                 `json:"state_changes"`
+}
+
+// DestroyContractRequest is the request to destroy a contract (admin only).
+type DestroyContractRequest struct {
+	ChainID         string `json:"chain_id"`
+	Admin           string `json:"admin"`
+	ContractAddress string `json:"contract_address"`
+	Nonce           uint64 `json:"nonce"`
+	Fee             uint64 `json:"fee"`
+	PublicKey       string `json:"public_key"`
+	Signature       string `json:"signature"`
+}
+
+// DestroyContractResponse is returned after a successful contract destruction.
+type DestroyContractResponse struct {
+	RecoveredBalance uint64 `json:"recovered_balance"`
+	Status           string `json:"status"`
+}
+
+// ── WASM System Transaction Payloads ──
+
+// WasmCronExecPayload records a cron execution as a system transaction.
+type WasmCronExecPayload struct {
+	ContractAddress string              `json:"contract_address"`
+	MethodName      string              `json:"method_name"`
+	Result          string              `json:"result"`
+	GasUsed         uint64              `json:"gas_used"`
+	GasCharged      uint64              `json:"gas_charged"`
+	BlockTimeUnix   int64               `json:"block_time_unix"`
+	Events          []WasmContractEvent `json:"events,omitempty"`
+	Success         bool                `json:"success"`
+	FailReason      string              `json:"fail_reason,omitempty"`
+}
+
+// WasmEventDeliveryPayload records an event delivery as a system transaction.
+type WasmEventDeliveryPayload struct {
+	SubscriberAddress string            `json:"subscriber_address"`
+	Event             WasmContractEvent `json:"event"`
+	Result            string            `json:"result"`
+	GasUsed           uint64            `json:"gas_used"`
+	GasCharged        uint64            `json:"gas_charged"`
+	Success           bool              `json:"success"`
+	FailReason        string            `json:"fail_reason,omitempty"`
+}
+
+// ── WASM Query Response Types ──
+
+// WasmContractInfo enriches a contract with additional metadata for API responses.
+type WasmContractInfo struct {
+	Contract    WasmContract `json:"contract"`
+	CronJobs    []WasmCronJob          `json:"cron_jobs,omitempty"`
+	Subscriptions []WasmEventSubscription `json:"subscriptions,omitempty"`
+}
+
+// WasmContractListResponse is the API response for listing contracts.
+type WasmContractListResponse struct {
+	Contracts []WasmContractInfo `json:"contracts"`
+}
+
+// WasmKVResponse is the API response for querying contract KV store.
+type WasmKVResponse struct {
+	ContractAddress string            `json:"contract_address"`
+	Entries         map[string]string `json:"entries"`
+}
+
+// ErrorCode identifies the category of an API error for machine parsing.
+type ErrorCode string
+
+const (
+	ErrInvalidInput       ErrorCode = "invalid_input"
+	ErrInsufficientFunds  ErrorCode = "insufficient_funds"
+	ErrNotFound           ErrorCode = "not_found"
+	ErrUnauthorized       ErrorCode = "unauthorized"
+	ErrForbidden          ErrorCode = "forbidden"
+	ErrConflict           ErrorCode = "conflict"
+	ErrIntentExpired      ErrorCode = "intent_expired"
+	ErrIntentFinalized    ErrorCode = "intent_finalized"
+	ErrInvalidSignature   ErrorCode = "invalid_signature"
+	ErrInvalidNonce       ErrorCode = "invalid_nonce"
+	ErrCapacityExceeded   ErrorCode = "capacity_exceeded"
+	ErrDeadlineExceeded   ErrorCode = "deadline_exceeded"
+	ErrUnderpriced        ErrorCode = "underpriced"
+	ErrInternal           ErrorCode = "internal_error"
+	ErrTooManyRequests    ErrorCode = "too_many_requests"
+)
+
+// APIError is a structured error response returned by the chain API.
+type APIError struct {
+	Code    ErrorCode `json:"code"`
+	Message string    `json:"message"`
+}
+
+func (e *APIError) Error() string { return e.Message }

@@ -3,6 +3,7 @@ package chain
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -110,11 +111,6 @@ func (s *Store) MultisigExec(req wire.MultisigExecRequest) (wire.MultisigExecRes
 		return wire.MultisigExecResponse{}, errors.New("multisig wallet not found")
 	}
 
-	// Currently only "transfer" is supported.
-	if req.Operation != "transfer" {
-		return wire.MultisigExecResponse{}, errors.New("unsupported multisig operation: " + req.Operation)
-	}
-
 	// Nonce check.
 	if req.Nonce != wallet.Nonce {
 		return wire.MultisigExecResponse{}, errors.New("invalid multisig nonce")
@@ -165,6 +161,110 @@ func (s *Store) MultisigExec(req wire.MultisigExecRequest) (wire.MultisigExecRes
 
 		txResp := wire.TransferResponse{From: fromAccount, To: toAccount}
 		resp.TransferResponse = &txResp
+
+	case "update_signers":
+		var inner wire.MultisigUpdateSignersPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return wire.MultisigExecResponse{}, errors.New("invalid update_signers payload")
+		}
+		for i, signer := range inner.NewSigners {
+			inner.NewSigners[i] = wire.NormalizeAddress(signer)
+		}
+		if err := wire.ValidateMultisigSigners(inner.NewSigners); err != nil {
+			return wire.MultisigExecResponse{}, err
+		}
+		if inner.NewThreshold < 1 || int(inner.NewThreshold) > len(inner.NewSigners) {
+			return wire.MultisigExecResponse{}, errors.New("threshold must be between 1 and the number of signers")
+		}
+		wallet.Signers = inner.NewSigners
+		wallet.Threshold = inner.NewThreshold
+
+	case "update_threshold":
+		var inner wire.MultisigUpdateThresholdPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return wire.MultisigExecResponse{}, errors.New("invalid update_threshold payload")
+		}
+		if inner.NewThreshold < 1 || int(inner.NewThreshold) > len(wallet.Signers) {
+			return wire.MultisigExecResponse{}, errors.New("threshold must be between 1 and the number of signers")
+		}
+		wallet.Threshold = inner.NewThreshold
+
+	case "create_intent":
+		var inner wire.MultisigCreateIntentPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return wire.MultisigExecResponse{}, errors.New("invalid create_intent payload")
+		}
+		if inner.FileName == "" {
+			return wire.MultisigExecResponse{}, errors.New("file_name is required")
+		}
+		if inner.LockedFee == 0 {
+			return wire.MultisigExecResponse{}, errors.New("locked_fee must be positive")
+		}
+		fromAccount := s.accountLocked(wallet.Address)
+		total := inner.LockedFee + req.Fee
+		if total < inner.LockedFee {
+			return wire.MultisigExecResponse{}, errors.New("create_intent total overflows")
+		}
+		if fromAccount.Balance < total {
+			return wire.MultisigExecResponse{}, errors.New("multisig wallet insufficient balance")
+		}
+		fromAccount.Balance -= total
+		s.data.Accounts[wallet.Address] = fromAccount
+
+		intentID := fmt.Sprintf("ms-%s-%d", wallet.Address, wallet.Nonce)
+		s.data.Intents[intentID] = &Intent{
+			IntentView: wire.IntentView{
+				IntentID:  intentID,
+				User:      wallet.Address,
+				FileName:  inner.FileName,
+				FileSize:  inner.FileSize,
+				LockedFee: inner.LockedFee,
+				Status:    wire.StatusUploading,
+			},
+		}
+		resp.IntentID = intentID
+
+	case "batch_transfer":
+		var inner wire.MultisigBatchTransferPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return wire.MultisigExecResponse{}, errors.New("invalid batch_transfer payload")
+		}
+		if len(inner.Transfers) == 0 {
+			return wire.MultisigExecResponse{}, errors.New("batch_transfer requires at least one transfer")
+		}
+		var totalAmount uint64
+		for i, t := range inner.Transfers {
+			inner.Transfers[i].To = wire.NormalizeAddress(t.To)
+			if inner.Transfers[i].To == "" {
+				return wire.MultisigExecResponse{}, fmt.Errorf("batch_transfer: transfer %d missing recipient", i)
+			}
+			if t.Amount == 0 {
+				return wire.MultisigExecResponse{}, fmt.Errorf("batch_transfer: transfer %d amount must be positive", i)
+			}
+			newTotal := totalAmount + t.Amount
+			if newTotal < totalAmount {
+				return wire.MultisigExecResponse{}, fmt.Errorf("batch_transfer: total amount overflows at transfer %d", i)
+			}
+			totalAmount = newTotal
+		}
+		fromAccount := s.accountLocked(wallet.Address)
+		totalWithFee := totalAmount + req.Fee
+		if totalWithFee < totalAmount {
+			return wire.MultisigExecResponse{}, errors.New("batch_transfer total overflows")
+		}
+		if fromAccount.Balance < totalWithFee {
+			return wire.MultisigExecResponse{}, errors.New("multisig wallet insufficient balance")
+		}
+		fromAccount.Balance -= totalWithFee
+		for _, t := range inner.Transfers {
+			toAccount := s.accountLocked(t.To)
+			toAccount.Balance += t.Amount
+			s.data.Accounts[t.To] = toAccount
+		}
+		s.data.Accounts[wallet.Address] = fromAccount
+
+	default:
+		return wire.MultisigExecResponse{}, errors.New("unsupported multisig operation: " + req.Operation)
 	}
 
 	// Increment wallet nonce.
@@ -307,6 +407,107 @@ func (s *Store) applyMultisigExecLocked(payload multisigExecTxPayload) error {
 		toAccount.Balance += inner.Amount
 		s.data.Accounts[wallet.Address] = fromAccount
 		s.data.Accounts[inner.To] = toAccount
+
+	case "update_signers":
+		var inner wire.MultisigUpdateSignersPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return errors.New("replay multisig exec invalid update_signers payload")
+		}
+		for i, signer := range inner.NewSigners {
+			inner.NewSigners[i] = wire.NormalizeAddress(signer)
+		}
+		if err := wire.ValidateMultisigSigners(inner.NewSigners); err != nil {
+			return errors.New("replay multisig exec update_signers validation failed: " + err.Error())
+		}
+		if inner.NewThreshold < 1 || int(inner.NewThreshold) > len(inner.NewSigners) {
+			return errors.New("replay multisig exec update_signers invalid threshold")
+		}
+		wallet.Signers = inner.NewSigners
+		wallet.Threshold = inner.NewThreshold
+
+	case "update_threshold":
+		var inner wire.MultisigUpdateThresholdPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return errors.New("replay multisig exec invalid update_threshold payload")
+		}
+		if inner.NewThreshold < 1 || int(inner.NewThreshold) > len(wallet.Signers) {
+			return errors.New("replay multisig exec update_threshold invalid threshold")
+		}
+		wallet.Threshold = inner.NewThreshold
+
+	case "create_intent":
+		var inner wire.MultisigCreateIntentPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return errors.New("replay multisig exec invalid create_intent payload")
+		}
+		if inner.FileName == "" {
+			return errors.New("replay multisig exec create_intent missing file_name")
+		}
+		if inner.LockedFee == 0 {
+			return errors.New("replay multisig exec create_intent locked_fee must be positive")
+		}
+		fromAccount := s.accountLocked(wallet.Address)
+		total := inner.LockedFee + req.Fee
+		if total < inner.LockedFee {
+			return errors.New("replay multisig exec create_intent total overflows")
+		}
+		if fromAccount.Balance < total {
+			return errors.New("replay multisig exec create_intent insufficient balance")
+		}
+		fromAccount.Balance -= total
+		s.data.Accounts[wallet.Address] = fromAccount
+
+		intentID := fmt.Sprintf("ms-%s-%d", wallet.Address, wallet.Nonce)
+		s.data.Intents[intentID] = &Intent{
+			IntentView: wire.IntentView{
+				IntentID:  intentID,
+				User:      wallet.Address,
+				FileName:  inner.FileName,
+				FileSize:  inner.FileSize,
+				LockedFee: inner.LockedFee,
+				Status:    wire.StatusUploading,
+			},
+		}
+
+	case "batch_transfer":
+		var inner wire.MultisigBatchTransferPayload
+		if err := json.Unmarshal(req.Payload, &inner); err != nil {
+			return errors.New("replay multisig exec invalid batch_transfer payload")
+		}
+		if len(inner.Transfers) == 0 {
+			return errors.New("replay multisig exec batch_transfer empty transfers")
+		}
+		var totalAmount uint64
+		for i, t := range inner.Transfers {
+			inner.Transfers[i].To = wire.NormalizeAddress(t.To)
+			if inner.Transfers[i].To == "" {
+				return fmt.Errorf("replay multisig exec batch_transfer: transfer %d missing recipient", i)
+			}
+			if t.Amount == 0 {
+				return fmt.Errorf("replay multisig exec batch_transfer: transfer %d amount must be positive", i)
+			}
+			newTotal := totalAmount + t.Amount
+			if newTotal < totalAmount {
+				return fmt.Errorf("replay multisig exec batch_transfer: total overflows at transfer %d", i)
+			}
+			totalAmount = newTotal
+		}
+		fromAccount := s.accountLocked(wallet.Address)
+		totalWithFee := totalAmount + req.Fee
+		if totalWithFee < totalAmount {
+			return errors.New("replay multisig exec batch_transfer total overflows")
+		}
+		if fromAccount.Balance < totalWithFee {
+			return errors.New("replay multisig exec batch_transfer insufficient balance")
+		}
+		fromAccount.Balance -= totalWithFee
+		for _, t := range inner.Transfers {
+			toAccount := s.accountLocked(t.To)
+			toAccount.Balance += t.Amount
+			s.data.Accounts[t.To] = toAccount
+		}
+		s.data.Accounts[wallet.Address] = fromAccount
+
 	default:
 		return errors.New("replay multisig exec unsupported operation: " + req.Operation)
 	}

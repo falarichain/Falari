@@ -42,6 +42,52 @@ type StorageProviderBroadcaster interface {
 	BroadcastStorageProvider(announcement wire.StorageProviderAnnouncement)
 }
 
+// peerTokenBucket implements a simple token bucket rate limiter per peer.
+type peerTokenBucket struct {
+	tokens    float64
+	maxTokens float64
+	rate      float64 // tokens per second
+	lastTime  time.Time
+}
+
+func newPeerTokenBucket(rate float64, burst int) *peerTokenBucket {
+	return &peerTokenBucket{
+		tokens:    float64(burst),
+		maxTokens: float64(burst),
+		rate:      rate,
+		lastTime:  time.Now(),
+	}
+}
+
+func (b *peerTokenBucket) Allow() bool {
+	now := time.Now()
+	elapsed := now.Sub(b.lastTime).Seconds()
+	b.lastTime = now
+	b.tokens += elapsed * b.rate
+	if b.tokens > b.maxTokens {
+		b.tokens = b.maxTokens
+	}
+	if b.tokens >= 1.0 {
+		b.tokens -= 1.0
+		return true
+	}
+	return false
+}
+
+const (
+	// Per-peer gossip rate limit: 20 messages/second with burst of 50.
+	peerGossipRate     = 20.0
+	peerGossipBurst    = 50
+	// Cleanup interval for stale peer rate limiters.
+	peerRateCleanupInterval = 5 * time.Minute
+	peerRateStaleTimeout    = 10 * time.Minute
+)
+
+type peerRateState struct {
+	bucket   *peerTokenBucket
+	lastSeen time.Time
+}
+
 type PeerNetwork struct {
 	store       *Store
 	peers       []string
@@ -54,6 +100,10 @@ type PeerNetwork struct {
 	sub         *pubsub.Subscription
 	gossipTopic string
 	mu          sync.RWMutex
+
+	// Per-peer gossip rate limiters.
+	peerRateMu      sync.Mutex
+	peerRateLimiters map[string]*peerRateState
 }
 
 type PeerNetworkConfig struct {
@@ -331,6 +381,15 @@ func (p *PeerNetwork) registerChainHandshake() {
 	}
 	p.host.SetStreamHandler(chainHandshakeProtocol, func(stream network.Stream) {
 		defer stream.Close()
+		// Set read/write deadlines to prevent slow-loris attacks.
+		if conn, ok := stream.(interface {
+			SetReadDeadline(time.Time) error
+			SetWriteDeadline(time.Time) error
+		}); ok {
+			deadline := time.Now().Add(10 * time.Second)
+			_ = conn.SetReadDeadline(deadline)
+			_ = conn.SetWriteDeadline(deadline)
+		}
 		var req struct {
 			Address   string `json:"address"`
 			PublicKey string `json:"public_key"`
@@ -339,7 +398,27 @@ func (p *PeerNetwork) registerChainHandshake() {
 		if err := json.NewDecoder(stream).Decode(&req); err != nil {
 			return
 		}
-		_ = req
+		// Validate basic handshake fields.
+		remoteAddr := wire.NormalizeAddress(req.Address)
+		if remoteAddr == "" {
+			log.Printf("handshake rejected: empty address from peer %s", stream.Conn().RemotePeer())
+			return
+		}
+		if req.PublicKey == "" {
+			log.Printf("handshake rejected: empty public_key from peer %s (addr=%s)", stream.Conn().RemotePeer(), remoteAddr)
+			return
+		}
+		// Log accepted handshake for observability.
+		log.Printf("handshake accepted: peer=%s addr=%s", stream.Conn().RemotePeer(), remoteAddr)
+		// Respond with our own identity.
+		resp := struct {
+			Address   string `json:"address"`
+			PublicKey string `json:"public_key"`
+		}{
+			Address:   p.store.operatorIdentityAddress(),
+			PublicKey: p.store.operatorPublicKeyHex(),
+		}
+		_ = json.NewEncoder(stream).Encode(resp)
 	})
 }
 
@@ -364,7 +443,47 @@ func (p *PeerNetwork) publishGossip(messageType string, value any) {
 
 const maxGossipBytes = 4 << 20 // 4 MiB – reject oversized messages before deserialization
 
+// peerRateAllow checks whether a peer is within the per-peer gossip rate limit.
+// Returns true if the message is allowed, false if it should be dropped.
+func (p *PeerNetwork) peerRateAllow(peerID string) bool {
+	p.peerRateMu.Lock()
+	defer p.peerRateMu.Unlock()
+	if p.peerRateLimiters == nil {
+		p.peerRateLimiters = make(map[string]*peerRateState)
+	}
+	state, ok := p.peerRateLimiters[peerID]
+	if !ok {
+		state = &peerRateState{
+			bucket: newPeerTokenBucket(peerGossipRate, peerGossipBurst),
+		}
+		p.peerRateLimiters[peerID] = state
+	}
+	state.lastSeen = time.Now()
+	return state.bucket.Allow()
+}
+
+// cleanupPeerRateLimiters removes stale peer rate limiter entries.
+func (p *PeerNetwork) cleanupPeerRateLimiters() {
+	p.peerRateMu.Lock()
+	defer p.peerRateMu.Unlock()
+	now := time.Now()
+	for id, state := range p.peerRateLimiters {
+		if now.Sub(state.lastSeen) > peerRateStaleTimeout {
+			delete(p.peerRateLimiters, id)
+		}
+	}
+}
+
 func (p *PeerNetwork) readGossip() {
+	// Start periodic cleanup of stale peer rate limiters.
+	cleanupTicker := time.NewTicker(peerRateCleanupInterval)
+	defer cleanupTicker.Stop()
+	go func() {
+		for range cleanupTicker.C {
+			p.cleanupPeerRateLimiters()
+		}
+	}()
+
 	for {
 		msg, err := p.sub.Next(p.ctx)
 		if err != nil {
@@ -375,6 +494,11 @@ func (p *PeerNetwork) readGossip() {
 		}
 		if len(msg.Data) > maxGossipBytes {
 			log.Printf("drop oversized gossip message: %d bytes (max %d)", len(msg.Data), maxGossipBytes)
+			continue
+		}
+		// Per-peer rate limiting: drop messages from peers exceeding the rate.
+		peerID := msg.ReceivedFrom.String()
+		if !p.peerRateAllow(peerID) {
 			continue
 		}
 		var envelope gossipEnvelope

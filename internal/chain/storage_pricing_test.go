@@ -153,13 +153,13 @@ func TestCreateIntentAutoLocksRequiredStorageFee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Calculated fee = 1_000_000 (equals minimum 0.01 GF). No retrieval/foundation → burn = 9%.
-	// burn = 30_000, miner portion = 910_000.
+	// Calculated fee = 1_000_000 (equals minimum 0.01 GF). Burn is deferred to finalize.
+	// Full fee locked into LockedStorage.
 	if resp.RequiredFee != 1_000_000 || resp.LockedFee != 1_000_000 {
 		t.Fatalf("expected required and locked fee 1_000_000, got %+v", resp)
 	}
 	account := store.accountLocked(alice.Addr)
-	if account.Balance != gfTokens(10)-1_000_000 || account.LockedStorage != 910_000 {
+	if account.Balance != gfTokens(10)-1_000_000 || account.LockedStorage != 1_000_000 {
 		t.Fatalf("unexpected account after intent: %+v", account)
 	}
 }
@@ -219,37 +219,43 @@ func TestCreateIntentBurnsNinePercentWithoutAddresses(t *testing.T) {
 	if resp.RequiredFee != gfTokens(10) {
 		t.Fatalf("expected required fee 10, got %d", resp.RequiredFee)
 	}
-	if resp.BurnedFee != 90_000_000 {
-		t.Fatalf("expected burned fee 90_000_000, got %d", resp.BurnedFee)
+	// Burn is deferred to finalize — response shows 0 burned.
+	if resp.BurnedFee != 0 {
+		t.Fatalf("expected burned fee 0 (deferred), got %d", resp.BurnedFee)
 	}
-	if resp.RetrievalFee != 0 {
-		t.Fatalf("expected retrieval fee 0 (no address), got %d", resp.RetrievalFee)
+	// Retrieval/Foundation fees are informational BPS amounts (3% each).
+	if resp.RetrievalFee != 30_000_000 {
+		t.Fatalf("expected retrieval fee 30_000_000 (informational), got %d", resp.RetrievalFee)
 	}
-	if resp.FoundationFee != 0 {
-		t.Fatalf("expected foundation fee 0 (no address), got %d", resp.FoundationFee)
+	if resp.FoundationFee != 30_000_000 {
+		t.Fatalf("expected foundation fee 30_000_000 (informational), got %d", resp.FoundationFee)
 	}
 
 	account := store.accountLocked(alice.Addr)
 	if account.Balance != gfTokens(10000)-gfTokens(10) {
 		t.Fatalf("expected balance %d, got %d", gfTokens(10000)-gfTokens(10), account.Balance)
 	}
-	if account.LockedStorage != 910_000_000 {
-		t.Fatalf("expected locked storage 910_000_000, got %d", account.LockedStorage)
+	// Full fee locked into LockedStorage (burn deferred).
+	if account.LockedStorage != gfTokens(10) {
+		t.Fatalf("expected locked storage %d, got %d", gfTokens(10), account.LockedStorage)
 	}
 
 	intent := store.data.Intents[resp.IntentID]
-	if intent.LockedFee != 910_000_000 {
-		t.Fatalf("expected intent locked fee 910_000_000, got %d", intent.LockedFee)
+	if intent.LockedFee != gfTokens(10) {
+		t.Fatalf("expected intent locked fee %d, got %d", gfTokens(10), intent.LockedFee)
 	}
-	if intent.BurnedFee != 90_000_000 {
-		t.Fatalf("expected intent burned fee 90_000_000, got %d", intent.BurnedFee)
+	if intent.BurnedFee != 0 {
+		t.Fatalf("expected intent burned fee 0 (deferred), got %d", intent.BurnedFee)
+	}
+	if !intent.BurnDeferred {
+		t.Fatalf("expected intent BurnDeferred=true")
 	}
 
-	if store.data.StorageFeePool.TotalBurned != 90_000_000 {
-		t.Fatalf("expected pool total burned 90_000_000, got %d", store.data.StorageFeePool.TotalBurned)
+	if store.data.StorageFeePool.TotalBurned != 0 {
+		t.Fatalf("expected pool total burned 0 (deferred), got %d", store.data.StorageFeePool.TotalBurned)
 	}
-	if store.data.StorageFeePool.TotalLocked != 910_000_000 {
-		t.Fatalf("expected pool total locked 910_000_000, got %d", store.data.StorageFeePool.TotalLocked)
+	if store.data.StorageFeePool.TotalLocked != 0 {
+		t.Fatalf("expected pool total locked 0 (deferred), got %d", store.data.StorageFeePool.TotalLocked)
 	}
 }
 
@@ -279,50 +285,48 @@ func TestCreateIntentFourWaySplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 100 MiB, 300 days → 10 tokens (basePrice=10^7)
-	if resp.BurnedFee != 30_000_000 {
-		t.Fatalf("expected burned fee 30_000_000, got %d", resp.BurnedFee)
+	// 100 MiB, 300 days → 10 tokens (basePrice=10^7). Burn/transfer deferred to finalize.
+	if resp.BurnedFee != 0 {
+		t.Fatalf("expected burned fee 0 (deferred), got %d", resp.BurnedFee)
 	}
 	if resp.RetrievalFee != 30_000_000 {
-		t.Fatalf("expected retrieval fee 30_000_000, got %d", resp.RetrievalFee)
+		t.Fatalf("expected retrieval fee 30_000_000 (informational), got %d", resp.RetrievalFee)
 	}
 	if resp.FoundationFee != 30_000_000 {
-		t.Fatalf("expected foundation fee 30_000_000, got %d", resp.FoundationFee)
+		t.Fatalf("expected foundation fee 30_000_000 (informational), got %d", resp.FoundationFee)
 	}
 
-	// User pays 10 tokens
+	// User pays 10 tokens — full amount locked.
 	aliceAcc := store.accountLocked(alice.Addr)
 	if aliceAcc.Balance != gfTokens(10000)-gfTokens(10) {
 		t.Fatalf("expected alice balance %d, got %d", gfTokens(10000)-gfTokens(10), aliceAcc.Balance)
 	}
-	if aliceAcc.LockedStorage != 910_000_000 {
-		t.Fatalf("expected alice locked storage 910_000_000, got %d", aliceAcc.LockedStorage)
+	if aliceAcc.LockedStorage != gfTokens(10) {
+		t.Fatalf("expected alice locked storage %d, got %d", gfTokens(10), aliceAcc.LockedStorage)
 	}
 
-	// Retrieval address receives 3%
+	// No transfers yet — deferred to finalize.
 	retAcc := store.accountLocked("retrieval_multisig")
-	if retAcc.Balance != 30_000_000 {
-		t.Fatalf("expected retrieval balance 30_000_000, got %d", retAcc.Balance)
+	if retAcc.Balance != 0 {
+		t.Fatalf("expected retrieval balance 0 (deferred), got %d", retAcc.Balance)
 	}
-
-	// Foundation address receives 3%
 	fndAcc := store.accountLocked("foundation_multisig")
-	if fndAcc.Balance != 30_000_000 {
-		t.Fatalf("expected foundation balance 30_000_000, got %d", fndAcc.Balance)
+	if fndAcc.Balance != 0 {
+		t.Fatalf("expected foundation balance 0 (deferred), got %d", fndAcc.Balance)
 	}
 
-	// Pool tracking
-	if store.data.StorageFeePool.TotalBurned != 30_000_000 {
-		t.Fatalf("expected pool burned 30_000_000, got %d", store.data.StorageFeePool.TotalBurned)
+	// Pool tracking — all deferred.
+	if store.data.StorageFeePool.TotalBurned != 0 {
+		t.Fatalf("expected pool burned 0 (deferred), got %d", store.data.StorageFeePool.TotalBurned)
 	}
-	if store.data.StorageFeePool.TotalToRetrieval != 30_000_000 {
-		t.Fatalf("expected pool to retrieval 30_000_000, got %d", store.data.StorageFeePool.TotalToRetrieval)
+	if store.data.StorageFeePool.TotalToRetrieval != 0 {
+		t.Fatalf("expected pool to retrieval 0 (deferred), got %d", store.data.StorageFeePool.TotalToRetrieval)
 	}
-	if store.data.StorageFeePool.TotalToFoundation != 30_000_000 {
-		t.Fatalf("expected pool to foundation 30_000_000, got %d", store.data.StorageFeePool.TotalToFoundation)
+	if store.data.StorageFeePool.TotalToFoundation != 0 {
+		t.Fatalf("expected pool to foundation 0 (deferred), got %d", store.data.StorageFeePool.TotalToFoundation)
 	}
-	if store.data.StorageFeePool.TotalLocked != 910_000_000 {
-		t.Fatalf("expected pool locked 910_000_000, got %d", store.data.StorageFeePool.TotalLocked)
+	if store.data.StorageFeePool.TotalLocked != 0 {
+		t.Fatalf("expected pool locked 0 (deferred), got %d", store.data.StorageFeePool.TotalLocked)
 	}
 }
 
@@ -350,16 +354,158 @@ func TestCreateIntentSmallFeeNoBurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Calculated fee = 1_000_000 (equals minimum 0.01 GF). No retrieval/foundation → burn = 9%.
-	// burn = 90_000, miner portion = 910_000.
-	if resp.BurnedFee != 90_000 {
-		t.Fatalf("expected burn 90_000 for calculated fee, got %d", resp.BurnedFee)
+	// Calculated fee = 1_000_000 (equals minimum 0.01 GF). Burn deferred to finalize.
+	if resp.BurnedFee != 0 {
+		t.Fatalf("expected burn 0 (deferred), got %d", resp.BurnedFee)
 	}
 	account := store.accountLocked(alice.Addr)
-	if account.Balance != gfTokens(10)-1_000_000 || account.LockedStorage != 910_000 {
+	if account.Balance != gfTokens(10)-1_000_000 || account.LockedStorage != 1_000_000 {
 		t.Fatalf("unexpected account: %+v", account)
 	}
-	if store.data.StorageFeePool.TotalBurned != 90_000 {
-		t.Fatalf("expected pool total burned 90_000, got %d", store.data.StorageFeePool.TotalBurned)
+	if store.data.StorageFeePool.TotalBurned != 0 {
+		t.Fatalf("expected pool total burned 0 (deferred), got %d", store.data.StorageFeePool.TotalBurned)
+	}
+}
+
+func TestExecuteDeferredBurnLocked(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(10000))
+	store.data.RetrievalAddress = "retrieval_addr"
+	store.data.FoundationAddress = "foundation_addr"
+
+	req := wire.CreateIntentRequest{
+		User:         alice.Addr,
+		FileName:     "deferred.bin",
+		FileSize:     100 * (1 << 20),
+		SegmentSize:  1 << 20,
+		FileRoot:     "file-root",
+		SegmentRoots: []string{"segment-root"},
+		Segments:     []wire.SegmentPlan{{SegmentID: 0, SegmentRoot: "segment-root", ShardHashes: []string{"shard-root"}}},
+		Erasure:      wire.ErasurePolicy{DataShards: 1, ParityShards: 0},
+		Policy:       wire.StoragePolicy{Duration: int64(300 * 24 * time.Hour / time.Second)},
+	}
+	signCreateIntent(t, store, &req, alice)
+	resp, err := store.CreateIntent(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	totalFee := gfTokens(10)
+
+	// Verify pre-conditions: full fee locked, no burn.
+	intent := store.data.Intents[resp.IntentID]
+	if !intent.BurnDeferred {
+		t.Fatal("expected BurnDeferred=true after create")
+	}
+	if intent.LockedFee != totalFee {
+		t.Fatalf("expected LockedFee=%d, got %d", totalFee, intent.LockedFee)
+	}
+
+	// Execute deferred burn.
+	now := time.Now().Unix()
+	store.executeDeferredBurnLocked(intent, now)
+
+	// Verify post-conditions.
+	if intent.BurnDeferred {
+		t.Fatal("expected BurnDeferred=false after execute")
+	}
+	burnBPS := uint64(300)
+	expectedBurn := totalFee * burnBPS / 10_000
+	expectedRetrieval := totalFee * burnBPS / 10_000
+	expectedFoundation := totalFee * burnBPS / 10_000
+	expectedMiner := totalFee - expectedBurn - expectedRetrieval - expectedFoundation
+
+	if intent.LockedFee != expectedMiner {
+		t.Fatalf("expected LockedFee=%d (miner portion), got %d", expectedMiner, intent.LockedFee)
+	}
+	if intent.BurnedFee != expectedBurn {
+		t.Fatalf("expected BurnedFee=%d, got %d", expectedBurn, intent.BurnedFee)
+	}
+
+	// User locked storage should have non-miner portion deducted.
+	nonMiner := totalFee - expectedMiner
+	account := store.accountLocked(alice.Addr)
+	if account.LockedStorage != expectedMiner {
+		t.Fatalf("expected user LockedStorage=%d, got %d", expectedMiner, account.LockedStorage)
+	}
+	_ = nonMiner
+
+	// Retrieval and foundation should have received transfers.
+	retAcc := store.accountLocked("retrieval_addr")
+	if retAcc.Balance != expectedRetrieval {
+		t.Fatalf("expected retrieval balance=%d, got %d", expectedRetrieval, retAcc.Balance)
+	}
+	fndAcc := store.accountLocked("foundation_addr")
+	if fndAcc.Balance != expectedFoundation {
+		t.Fatalf("expected foundation balance=%d, got %d", expectedFoundation, fndAcc.Balance)
+	}
+
+	// Pool accounting.
+	if store.data.StorageFeePool.TotalBurned != expectedBurn {
+		t.Fatalf("expected pool burned=%d, got %d", expectedBurn, store.data.StorageFeePool.TotalBurned)
+	}
+	if store.data.StorageFeePool.TotalToRetrieval != expectedRetrieval {
+		t.Fatalf("expected pool to retrieval=%d, got %d", expectedRetrieval, store.data.StorageFeePool.TotalToRetrieval)
+	}
+	if store.data.StorageFeePool.TotalToFoundation != expectedFoundation {
+		t.Fatalf("expected pool to foundation=%d, got %d", expectedFoundation, store.data.StorageFeePool.TotalToFoundation)
+	}
+	if store.data.StorageFeePool.TotalLocked != expectedMiner {
+		t.Fatalf("expected pool locked=%d, got %d", expectedMiner, store.data.StorageFeePool.TotalLocked)
+	}
+
+	// Calling again should be a no-op.
+	store.executeDeferredBurnLocked(intent, now)
+	if intent.BurnedFee != expectedBurn {
+		t.Fatalf("idempotent check: BurnedFee changed to %d", intent.BurnedFee)
+	}
+}
+
+func TestExecuteDeferredBurnNoAddresses(t *testing.T) {
+	// When no retrieval/foundation addresses, all 9% burns.
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := newTestUser(t)
+	fundAccount(store, alice.Addr, gfTokens(10000))
+
+	req := wire.CreateIntentRequest{
+		User:         alice.Addr,
+		FileName:     "burn_all.bin",
+		FileSize:     100 * (1 << 20),
+		SegmentSize:  1 << 20,
+		FileRoot:     "file-root",
+		SegmentRoots: []string{"segment-root"},
+		Segments:     []wire.SegmentPlan{{SegmentID: 0, SegmentRoot: "segment-root", ShardHashes: []string{"shard-root"}}},
+		Erasure:      wire.ErasurePolicy{DataShards: 1, ParityShards: 0},
+		Policy:       wire.StoragePolicy{Duration: int64(300 * 24 * time.Hour / time.Second)},
+	}
+	signCreateIntent(t, store, &req, alice)
+	resp, err := store.CreateIntent(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	totalFee := gfTokens(10)
+	intent := store.data.Intents[resp.IntentID]
+
+	now := time.Now().Unix()
+	store.executeDeferredBurnLocked(intent, now)
+
+	// 3% burn + 3% (no retrieval) + 3% (no foundation) = 9% total burn.
+	expectedBurn := totalFee * 9 / 100
+	expectedMiner := totalFee - expectedBurn
+
+	if intent.BurnedFee != expectedBurn {
+		t.Fatalf("expected BurnedFee=%d (9%%), got %d", expectedBurn, intent.BurnedFee)
+	}
+	if intent.LockedFee != expectedMiner {
+		t.Fatalf("expected LockedFee=%d, got %d", expectedMiner, intent.LockedFee)
+	}
+	if store.data.StorageFeePool.TotalBurned != expectedBurn {
+		t.Fatalf("expected pool burned=%d, got %d", expectedBurn, store.data.StorageFeePool.TotalBurned)
 	}
 }

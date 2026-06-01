@@ -20,6 +20,7 @@ import (
 func main() {
 	configPath := flag.String("config", "", "path to YAML config file (flags override config values)")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
+	governanceAddr := flag.String("governance-addr", "", "separate HTTP listen address for governance routes (empty = all routes on -addr)")
 	state := flag.String("state", "./data/chain.json", "state file path")
 	genesis := flag.String("genesis", "", "genesis file path (applied only on first start)")
 	epochInterval := flag.Duration("epoch-interval", chain.EpochIntervalDefault, "automatic proof epoch interval, disabled when 0")
@@ -53,6 +54,9 @@ func main() {
 		}
 		if !config.IsFlagSet("addr") && cfg.HTTP.Addr != "" {
 			*addr = cfg.HTTP.Addr
+		}
+		if !config.IsFlagSet("governance-addr") && cfg.HTTP.GovernanceAddr != "" {
+			*governanceAddr = cfg.HTTP.GovernanceAddr
 		}
 		if !config.IsFlagSet("state") && cfg.State != "" {
 			*state = cfg.State
@@ -216,13 +220,25 @@ func main() {
 	network.StartBlockSync(*syncInterval)
 
 	server := chain.NewServer(store, network)
-	handler := middleware.Chain(
-		middleware.CORS(origins),
-		middleware.RateLimitWithTrustedProxies(*rateLimitRPS, *rateLimitBurst, proxies),
-	)(server.Routes())
+
+	// Build route handler: when governance_addr is set, split public/governance
+	// onto separate listeners. Otherwise serve all routes on the main listener.
+	var mainHandler http.Handler
+	if *governanceAddr != "" {
+		mainHandler = middleware.Chain(
+			middleware.CORS(origins),
+			middleware.RateLimitWithTrustedProxies(*rateLimitRPS, *rateLimitBurst, proxies),
+		)(server.PublicRoutes())
+	} else {
+		mainHandler = middleware.Chain(
+			middleware.CORS(origins),
+			middleware.RateLimitWithTrustedProxies(*rateLimitRPS, *rateLimitBurst, proxies),
+		)(server.Routes())
+	}
+
 	httpServer := &http.Server{
 		Addr:              *addr,
-		Handler:           handler,
+		Handler:           mainHandler,
 		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -237,6 +253,29 @@ func main() {
 		}
 	}()
 
+	var govServer *http.Server
+	if *governanceAddr != "" {
+		govHandler := middleware.Chain(
+			middleware.CORS(origins),
+			middleware.RateLimitWithTrustedProxies(*rateLimitRPS, *rateLimitBurst, proxies),
+		)(server.GovernanceRoutes())
+		govServer = &http.Server{
+			Addr:              *governanceAddr,
+			Handler:           govHandler,
+			ReadTimeout:       15 * time.Second,
+			ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+		}
+		go func() {
+			log.Printf("governance API listening on %s", *governanceAddr)
+			if err := govServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("governance server error: %v", err)
+			}
+		}()
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
@@ -245,6 +284,9 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	httpServer.Shutdown(shutdownCtx)
+	if govServer != nil {
+		govServer.Shutdown(shutdownCtx)
+	}
 }
 
 func parseCSV(raw string) []string {

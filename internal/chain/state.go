@@ -29,7 +29,7 @@ var levelDBStateKey = []byte("state:snapshot")
 const defaultBaseFee uint64 = 100_000_000
 const defaultTargetBlockTxs = 10
 const defaultStorageBasePrice uint64 = 10_000_000 // 0.01 Token/MiB/30天 = 0.12 Token/MiB/年
-const defaultStorageMinimumFee uint64 = 1_000_000 // 0.01 Token
+const defaultStorageMinimumFee uint64 = 100_000 // 0.001 Token
 const defaultStorageBurnBPS uint64 = 300
 const defaultStorageRetrievalBPS uint64 = 300
 const defaultStorageFoundationBPS uint64 = 300
@@ -149,6 +149,19 @@ type State struct {
 	MinerNFTTemplate     string `json:"miner_nft_template,omitempty"`
 	MinerNFTContentType  string `json:"miner_nft_content_type,omitempty"`
 	MinerNFTTemplateHash string `json:"miner_nft_template_hash,omitempty"`
+
+	// Chain event log — append-only system event trail (capped at maxChainEvents).
+	ChainEvents []wire.ChainEvent `json:"chain_events,omitempty"`
+	NextEventID uint64            `json:"next_event_id,omitempty"`
+
+	// WASM smart contracts.
+	WasmContracts          map[string]*wire.WasmContract           `json:"wasm_contracts,omitempty"`
+	WasmCodes              map[string]*wire.WasmCode               `json:"wasm_codes,omitempty"`
+	WasmKVStore            map[string]map[string]string            `json:"wasm_kv_store,omitempty"`
+	WasmCronJobs           map[string][]wire.WasmCronJob           `json:"wasm_cron_jobs,omitempty"`
+	WasmEventSubscriptions map[string][]wire.WasmEventSubscription `json:"wasm_event_subscriptions,omitempty"`
+	WasmPendingEvents      []wire.WasmPendingEventDelivery         `json:"wasm_pending_events,omitempty"`
+	WasmNonce              uint64                                  `json:"wasm_nonce,omitempty"`
 }
 
 type Store struct {
@@ -161,6 +174,12 @@ type Store struct {
 	txBroadcaster    TransactionBroadcaster
 	voteBroadcaster  ConsensusVoteBroadcaster
 	blockInterval    time.Duration
+	// Transient fields for event enrichment (not serialized).
+	currentTxHash string
+	blockLogIndex int
+	eventBus      *EventBus
+	// WASM engine (lazily initialized, not serialized).
+	wasmEngine interface{} // *wasm.WasmEngine, set via SetWasmEngine
 }
 
 // SetBlockInterval configures the block production interval for per-block reward calculations.
@@ -176,8 +195,9 @@ func OpenStore(path string) (*Store, error) {
 
 func OpenStoreWithGenesis(path string, genesisPath string) (*Store, error) {
 	store := &Store{
-		path: path,
-		data: newState(),
+		path:     path,
+		data:     newState(),
+		eventBus: NewEventBus(),
 	}
 	if path == "" {
 		return store, nil
@@ -419,6 +439,13 @@ func newState() State {
 		PendingShardRepairs:    map[string]wire.PendingShardRepair{},
 		StorageRewardIndex:     "0",
 		StorageRewardRemainder: "0",
+		ChainEvents:            []wire.ChainEvent{},
+		WasmContracts:          map[string]*wire.WasmContract{},
+		WasmCodes:              map[string]*wire.WasmCode{},
+		WasmKVStore:            map[string]map[string]string{},
+		WasmCronJobs:           map[string][]wire.WasmCronJob{},
+		WasmEventSubscriptions: map[string][]wire.WasmEventSubscription{},
+		WasmPendingEvents:      []wire.WasmPendingEventDelivery{},
 		// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 		DataModerationThresholdNum: 1,
 		DataModerationThresholdDen: 3,
@@ -517,6 +544,9 @@ func normalizeState(state *State) {
 	if state.GovernanceAudits == nil {
 		state.GovernanceAudits = []wire.GovernanceAuditRecord{}
 	}
+	if state.ChainEvents == nil {
+		state.ChainEvents = []wire.ChainEvent{}
+	}
 	if state.GovernanceOperators == nil {
 		state.GovernanceOperators = map[string]wire.GovernanceOperator{}
 	}
@@ -585,6 +615,25 @@ func normalizeState(state *State) {
 	}
 	if state.DirectActionReviewWindowSeconds == 0 {
 		state.DirectActionReviewWindowSeconds = wire.DirectActionReviewWindowSeconds
+	}
+	// WASM contract state initialization.
+	if state.WasmContracts == nil {
+		state.WasmContracts = map[string]*wire.WasmContract{}
+	}
+	if state.WasmCodes == nil {
+		state.WasmCodes = map[string]*wire.WasmCode{}
+	}
+	if state.WasmKVStore == nil {
+		state.WasmKVStore = map[string]map[string]string{}
+	}
+	if state.WasmCronJobs == nil {
+		state.WasmCronJobs = map[string][]wire.WasmCronJob{}
+	}
+	if state.WasmEventSubscriptions == nil {
+		state.WasmEventSubscriptions = map[string][]wire.WasmEventSubscription{}
+	}
+	if state.WasmPendingEvents == nil {
+		state.WasmPendingEvents = []wire.WasmPendingEventDelivery{}
 	}
 	// Governance threshold defaults: data moderation = 1/3, operator changes = 2/3.
 	if state.DataModerationThresholdNum == 0 || state.DataModerationThresholdDen == 0 {
@@ -774,10 +823,6 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 		s.consumeAccountNonceLocked(req.User)
 	}
 	userAccount = s.accountLocked(req.User)
-	burnAmount := req.LockedFee * defaultStorageBurnBPS / 10_000
-	retrievalAmount := req.LockedFee * defaultStorageRetrievalBPS / 10_000
-	foundationAmount := req.LockedFee * defaultStorageFoundationBPS / 10_000
-	minerPortion := req.LockedFee - burnAmount - retrievalAmount - foundationAmount
 	intentID, err := randomID("intent")
 	if err != nil {
 		return wire.CreateIntentResponse{}, err
@@ -788,30 +833,13 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 		}
 	}
 	userAccount.Balance -= req.LockedFee
-	userAccount.LockedStorage += minerPortion
+	userAccount.LockedStorage += req.LockedFee
 	s.data.Accounts[userAccount.Address] = userAccount
 
-	// Transfer retrieval and foundation shares to their addresses (or burn if unconfigured).
-	actualRetrieval := uint64(0)
-	actualFoundation := uint64(0)
-	if retrievalAmount > 0 && s.data.RetrievalAddress != "" {
-		retAcc := s.accountLocked(s.data.RetrievalAddress)
-		retAcc.Balance += retrievalAmount
-		s.data.Accounts[retAcc.Address] = retAcc
-		actualRetrieval = retrievalAmount
-		s.data.StorageFeePool.TotalToRetrieval = saturatingAdd(s.data.StorageFeePool.TotalToRetrieval, retrievalAmount)
-	} else {
-		burnAmount += retrievalAmount
-	}
-	if foundationAmount > 0 && s.data.FoundationAddress != "" {
-		fndAcc := s.accountLocked(s.data.FoundationAddress)
-		fndAcc.Balance += foundationAmount
-		s.data.Accounts[fndAcc.Address] = fndAcc
-		actualFoundation = foundationAmount
-		s.data.StorageFeePool.TotalToFoundation = saturatingAdd(s.data.StorageFeePool.TotalToFoundation, foundationAmount)
-	} else {
-		burnAmount += foundationAmount
-	}
+	// Burn/retrieval/foundation are deferred to finalize time.
+	// Calculate amounts for informational display only.
+	retrievalAmount := req.LockedFee * defaultStorageRetrievalBPS / 10_000
+	foundationAmount := req.LockedFee * defaultStorageFoundationBPS / 10_000
 
 	now := time.Now().Unix()
 	s.data.Intents[intentID] = &Intent{
@@ -829,7 +857,8 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 			Erasure:          req.Erasure,
 			Encryption:       req.Encryption,
 			Policy:           req.Policy,
-			LockedFee:        minerPortion,
+			LockedFee:        req.LockedFee,
+			BurnDeferred:     true,
 			Status:           wire.StatusUploading,
 			StorageStatus:    wire.StorageStatusPending,
 			AccessStatus:     defaultAccessStatus(wire.IntentView{Encryption: req.Encryption}),
@@ -840,15 +869,6 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	s.createPermanentFundLocked(s.data.Intents[intentID], now)
-	s.createDealEscrowLocked(s.data.Intents[intentID], now)
-	if burnAmount > 0 {
-		s.data.Intents[intentID].BurnedFee = burnAmount
-		escrow := s.dealEscrowLocked(s.data.Intents[intentID])
-		escrow.BurnedFee = burnAmount
-		s.data.DealEscrows[intentID] = escrow
-		s.data.StorageFeePool.TotalBurned = saturatingAdd(s.data.StorageFeePool.TotalBurned, burnAmount)
-	}
 	s.reserveStorageAssignmentsLocked(assignments)
 	s.recordTxLocked("create_intent", req.User, createIntentTxPayload{
 		IntentID:      intentID,
@@ -858,7 +878,7 @@ func (s *Store) CreateIntent(req wire.CreateIntentRequest) (wire.CreateIntentRes
 	if err := s.saveLocked(); err != nil {
 		return wire.CreateIntentResponse{}, err
 	}
-	return wire.CreateIntentResponse{IntentID: intentID, Status: wire.StatusUploading, RequiredFee: quote.RequiredFee, LockedFee: req.LockedFee, BurnedFee: burnAmount, RetrievalFee: actualRetrieval, FoundationFee: actualFoundation, Assignments: assignments}, nil
+	return wire.CreateIntentResponse{IntentID: intentID, Status: wire.StatusUploading, RequiredFee: quote.RequiredFee, LockedFee: req.LockedFee, BurnedFee: 0, RetrievalFee: retrievalAmount, FoundationFee: foundationAmount, Assignments: assignments}, nil
 }
 
 func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitResponse, error) {
@@ -983,6 +1003,68 @@ func (s *Store) BatchCommit(req wire.BatchCommitRequest) (wire.BatchCommitRespon
 	}, nil
 }
 
+// executeDeferredBurnLocked performs the deferred fee distribution at finalize
+// time: burn, retrieval/foundation transfers, escrow creation, and permanent
+// fund creation.  It deducts the non-miner portions from user.LockedStorage,
+// shrinks intent.LockedFee to the miner portion, and sets BurnDeferred=false.
+func (s *Store) executeDeferredBurnLocked(intent *Intent, now int64) {
+	if !intent.BurnDeferred {
+		return
+	}
+	totalFee := intent.LockedFee
+	burnAmount := totalFee * defaultStorageBurnBPS / 10_000
+	retrievalAmount := totalFee * defaultStorageRetrievalBPS / 10_000
+	foundationAmount := totalFee * defaultStorageFoundationBPS / 10_000
+	minerPortion := totalFee - burnAmount - retrievalAmount - foundationAmount
+
+	// Deduct non-miner portions from user locked storage.
+	user := s.accountLocked(intent.User)
+	nonMiner := totalFee - minerPortion
+	if nonMiner > user.LockedStorage {
+		nonMiner = user.LockedStorage
+	}
+	user.LockedStorage -= nonMiner
+
+	// Transfer retrieval portion.
+	if retrievalAmount > 0 && s.data.RetrievalAddress != "" {
+		retAcc := s.accountLocked(s.data.RetrievalAddress)
+		retAcc.Balance += retrievalAmount
+		s.data.Accounts[retAcc.Address] = retAcc
+		s.data.StorageFeePool.TotalToRetrieval = saturatingAdd(s.data.StorageFeePool.TotalToRetrieval, retrievalAmount)
+	} else {
+		burnAmount += retrievalAmount
+	}
+
+	// Transfer foundation portion.
+	if foundationAmount > 0 && s.data.FoundationAddress != "" {
+		fndAcc := s.accountLocked(s.data.FoundationAddress)
+		fndAcc.Balance += foundationAmount
+		s.data.Accounts[fndAcc.Address] = fndAcc
+		s.data.StorageFeePool.TotalToFoundation = saturatingAdd(s.data.StorageFeePool.TotalToFoundation, foundationAmount)
+	} else {
+		burnAmount += foundationAmount
+	}
+
+	s.data.Accounts[user.Address] = user
+
+	// Update intent fields.
+	intent.LockedFee = minerPortion
+	intent.BurnedFee = burnAmount
+	intent.BurnDeferred = false
+
+	// Create permanent fund and deal escrow with the miner portion.
+	s.createPermanentFundLocked(intent, now)
+	s.createDealEscrowLocked(intent, now)
+
+	// Record burn in escrow and pool accounting.
+	if burnAmount > 0 {
+		escrow := s.dealEscrowLocked(intent)
+		escrow.BurnedFee = burnAmount
+		s.data.DealEscrows[intent.IntentID] = escrow
+		s.data.StorageFeePool.TotalBurned = saturatingAdd(s.data.StorageFeePool.TotalBurned, burnAmount)
+	}
+}
+
 func (s *Store) Finalize(req wire.FinalizeRequest) (wire.FinalizeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1034,6 +1116,7 @@ func (s *Store) Finalize(req wire.FinalizeRequest) (wire.FinalizeResponse, error
 		intent.ExpiresAtUnix = now + intent.Policy.Duration
 	}
 	intent.UpdatedAt = now
+	s.executeDeferredBurnLocked(intent, now)
 	s.activateDealEscrowLocked(intent, now)
 	s.data.Deals[dealID] = intent.IntentID
 	s.recordTxLocked("finalize_deal", req.User, finalizeDealTxPayload{
@@ -1091,6 +1174,7 @@ func (s *Store) SettleIntent(req wire.SettleIntentRequest) (wire.SettleIntentRes
 }
 
 func (s *Store) settleIntentLocked(intent *Intent, now int64) (wire.SettleIntentResponse, error) {
+	prevStatus := intent.Status
 	switch intent.Status {
 	case wire.StatusUploading, wire.StatusPartial:
 		if now <= intent.DeadlineUnix {
@@ -1099,6 +1183,9 @@ func (s *Store) settleIntentLocked(intent *Intent, now int64) (wire.SettleIntent
 		intent.Status = wire.StatusExpired
 		intent.StorageStatus = wire.StorageStatusExpired
 		intent.AccessStatus = wire.AccessStatusSuspended
+		s.emitEventWithEmitterLocked(wire.EventIntentExpired, map[string]any{
+			"previous_status": prevStatus,
+		}, intent.User, intent.IntentID, "", s.currentHeightLocked(), "system")
 	case wire.StatusFinalized:
 		if intent.Policy.Duration <= 0 {
 			return wire.SettleIntentResponse{}, errors.New("storage duration is permanent")
@@ -1124,6 +1211,9 @@ func (s *Store) settleIntentLocked(intent *Intent, now int64) (wire.SettleIntent
 		intent.Status = wire.StatusExpired
 		intent.StorageStatus = wire.StorageStatusExpired
 		intent.AccessStatus = wire.AccessStatusSuspended
+		s.emitEventWithEmitterLocked(wire.EventIntentSettled, map[string]any{
+			"previous_status": prevStatus,
+		}, intent.User, intent.IntentID, "", s.currentHeightLocked(), "system")
 	case wire.StatusExpired:
 	default:
 		return wire.SettleIntentResponse{}, errors.New("intent cannot be settled")
@@ -1218,6 +1308,26 @@ func (s *Store) GetIntent(intentID string) (wire.IntentView, error) {
 	return intent.IntentView, nil
 }
 
+// ListUserIntents returns all intents belonging to a specific user, newest first.
+func (s *Store) ListUserIntents(address string) []wire.IntentView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	addr := wire.NormalizeAddress(address)
+	var views []wire.IntentView
+	for _, intent := range s.data.Intents {
+		if intent.User == addr {
+			normalizeIntentLifecycle(intent)
+			views = append(views, intent.IntentView)
+		}
+	}
+	// Sort by expiry descending (longest-lived first).
+	sort.Slice(views, func(i, j int) bool {
+		return views[i].ExpiresAtUnix > views[j].ExpiresAtUnix
+	})
+	return views
+}
+
 func (s *Store) GenerateChallenges(req wire.GenerateChallengeRequest) (wire.GenerateChallengeResponse, error) {
 	if req.Count <= 0 {
 		req.Count = 1
@@ -1232,6 +1342,19 @@ func (s *Store) GenerateChallenges(req wire.GenerateChallengeRequest) (wire.Gene
 	}
 	if !intentAllowsStorageProof(intent) {
 		return wire.GenerateChallengeResponse{}, errors.New("intent is not active for storage proofs")
+	}
+
+	// Verify requester signature and intent ownership.
+	if req.Signature != "" {
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyGenerateChallenge(req)
+		}); err != nil {
+			return wire.GenerateChallengeResponse{}, err
+		}
+		if !strings.EqualFold(intent.User, req.User) {
+			return wire.GenerateChallengeResponse{}, errors.New("only the intent owner can generate challenges")
+		}
+		s.consumeAccountNonceLocked(wire.NormalizeAddress(req.User))
 	}
 
 	challenges, err := s.generateChallengesLocked(intent, "", req.Count, time.Now().Add(10*time.Minute).Unix(), 0)
@@ -1482,6 +1605,9 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.Fina
 		}
 		if stats.Status == wire.MinerStatusDegraded && stats.ConsecutiveFailures >= s.miningParamsLocked().MinerDegradeThreshold*2 {
 			stats.Status = wire.MinerStatusJailed
+			s.emitEventWithEmitterLocked(wire.EventMinerJailed, map[string]any{
+				"consecutive_failures": stats.ConsecutiveFailures,
+			}, challenge.MinerAddress, "", "", s.currentHeightLocked(), "system")
 		}
 		slash := epoch.SlashPerMissedProof
 		account := s.accountLocked(challenge.MinerAddress)
@@ -1511,6 +1637,9 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.Fina
 		if account.LockedBonus == 0 && account.LockedStake == 0 && actualSlash > 0 {
 			stats.Status = wire.MinerStatusExiting
 			stats.ExitedAtUnix = time.Now().Add(7 * 24 * time.Hour).Unix()
+			s.emitEventWithEmitterLocked(wire.EventMinerExiting, map[string]any{
+				"reason": "stake_depleted",
+			}, challenge.MinerAddress, "", "", s.currentHeightLocked(), "system")
 		}
 		s.data.Miners[challenge.MinerAddress] = stats
 		if task, created := s.trackMissedProofForRepairLocked(challenge, epoch.EpochRound); created {
@@ -1711,6 +1840,10 @@ func (s *Store) CreditBalance(address string, amount uint64) error {
 	if err := s.saveLocked(); err != nil {
 		return err
 	}
+	s.emitEventWithEmitterLocked(wire.EventAccountCredited, map[string]any{
+		"amount":  amount,
+		"balance": account.Balance,
+	}, address, "", "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -1862,6 +1995,9 @@ func (s *Store) DeregisterMiner(req wire.DeregisterMinerRequest) error {
 	if stats.Status != wire.MinerStatusExiting {
 		stats.Status = wire.MinerStatusExiting
 		stats.ExitedAtUnix = exitedAt
+		s.emitEventWithEmitterLocked(wire.EventMinerExiting, map[string]any{
+			"reason": "voluntary",
+		}, req.MinerAddress, "", "", s.currentHeightLocked(), "system")
 	} else {
 		exitedAt = stats.ExitedAtUnix
 	}
@@ -2052,6 +2188,10 @@ func (s *Store) AdjustCapacity(req wire.AdjustCapacityRequest) (wire.AdjustCapac
 	if err := s.saveLocked(); err != nil {
 		return wire.AdjustCapacityResponse{}, err
 	}
+	s.emitEventWithEmitterLocked(wire.EventMinerCapacityAdjusted, map[string]any{
+		"old_capacity": oldCapacity,
+		"new_capacity": newCapacity,
+	}, req.MinerAddress, "", "", s.currentHeightLocked(), "core")
 	return wire.AdjustCapacityResponse{Miner: stats, RefundUnbonding: refundUnbonding}, nil
 }
 
@@ -2272,6 +2412,9 @@ func (s *Store) finalizeExitingMinersLocked() {
 		if stats.Status == wire.MinerStatusExiting && stats.ExitedAtUnix > 0 && now >= stats.ExitedAtUnix {
 			stats.Status = wire.MinerStatusExited
 			s.data.Miners[address] = stats
+			s.emitEventWithEmitterLocked(wire.EventMinerExited, map[string]any{
+				"stake_returned": stats.Stake,
+			}, address, "", "", s.currentHeightLocked(), "system")
 
 			// Return miner stake via 7-day unbonding.
 			if stats.Stake > 0 {
@@ -2362,6 +2505,9 @@ func (s *Store) expireInactiveMinersLocked() {
 		stats.BonusExpired = true
 		stats.Status = wire.MinerStatusExiting
 		stats.ExitedAtUnix = now + wire.UnbondingPeriodSeconds
+		s.emitEventWithEmitterLocked(wire.EventMinerExiting, map[string]any{
+			"reason": "activation_window_expired",
+		}, address, "", "", s.currentHeightLocked(), "system")
 		s.data.Accounts[address] = account
 		s.data.Miners[address] = stats
 	}

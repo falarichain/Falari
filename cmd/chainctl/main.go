@@ -79,20 +79,6 @@ func main() {
 		listDeleteTasks(os.Args[2:])
 	case "access-policy":
 		setAccessPolicy(os.Args[2:])
-	case "governance-keygen":
-		governanceKeygen(os.Args[2:])
-	case "governance-propose":
-		governancePropose(os.Args[2:])
-	case "governance-vote":
-		governanceVote(os.Args[2:])
-	case "governance-execute":
-		governanceExecute(os.Args[2:])
-	case "governance-proposals":
-		governanceProposals(os.Args[2:])
-	case "governance-operators":
-		governanceOperatorsList(os.Args[2:])
-	case "governance-audit":
-		listGovernanceAudit(os.Args[2:])
 	case "consensus":
 		consensusState(os.Args[2:])
 	case "consensus-votes":
@@ -145,6 +131,8 @@ func main() {
 		genesisCommand(os.Args[2:])
 	case "fee-market":
 		feeMarketCommand(os.Args[2:])
+	case "events":
+		eventsCommand(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -1252,37 +1240,6 @@ func setAccessPolicy(args []string) {
 	fmt.Printf("access updated intent=%s access=%s moderation=%s\n", resp.IntentID, resp.AccessStatus, resp.ModerationStatus)
 }
 
-func governanceKeygen(args []string) {
-	fs := flag.NewFlagSet("governance-keygen", flag.ExitOnError)
-	out := fs.String("out", "", "output key file path")
-	fs.Parse(args)
-
-	if *out == "" {
-		log.Fatal("-out is required")
-	}
-	privateKey, err := ethcrypto.GenerateKey()
-	if err != nil {
-		log.Fatalf("failed to generate key: %v", err)
-	}
-	keyFile := struct {
-		Address    string `json:"address"`
-		PublicKey  string `json:"public_key"`
-		PrivateKey string `json:"private_key"`
-	}{
-		Address:    wire.AccountAddress(&privateKey.PublicKey),
-		PublicKey:  encodeHex(ethcrypto.FromECDSAPub(&privateKey.PublicKey)),
-		PrivateKey: encodeHex(ethcrypto.FromECDSA(privateKey)),
-	}
-	data, err := json.MarshalIndent(keyFile, "", "  ")
-	if err != nil {
-		log.Fatalf("failed to marshal key: %v", err)
-	}
-	if err := os.WriteFile(*out, data, 0600); err != nil {
-		log.Fatalf("failed to write key file: %v", err)
-	}
-	fmt.Printf("governance key generated: address=%s public_key=%s\n", keyFile.Address, keyFile.PublicKey)
-}
-
 type governanceKeyFile struct {
 	Address    string `json:"address"`
 	PublicKey  string `json:"public_key"`
@@ -1308,285 +1265,6 @@ func loadGovernanceECDSAKey(path string) *ecdsa.PrivateKey {
 		log.Fatalf("failed to parse ECDSA private key: %v", err)
 	}
 	return privateKey
-}
-
-func governancePropose(args []string) {
-	fs := flag.NewFlagSet("governance-propose", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	keyPath := fs.String("key", "", "path to governance operator key file")
-	intentID := fs.String("intent", "", "intent id (required for deal actions)")
-	action := fs.String("action", "freeze", "action: freeze, block, legal_hold, appeal, add_operator, remove_operator, update_operator, update_config, update_mining_params")
-	reasonHash := fs.String("reason-hash", "", "required reason hash")
-	expiresAtUnix := fs.Int64("expires-at-unix", 0, "future unix timestamp for freeze expiration")
-	preserveStorage := fs.Bool("preserve-storage", true, "keep storage responsibility active")
-	appealDeadlineUnix := fs.Int64("appeal-deadline-unix", 0, "appeal deadline unix timestamp")
-	targetOperator := fs.String("target-operator", "", "target operator address (for add/remove/update_operator)")
-	targetPublicKey := fs.String("target-public-key", "", "target operator public key (for add/update_operator)")
-	targetPermissions := fs.String("target-permissions", "", "comma-separated permissions (for add/update_operator)")
-	dataModThresholdNum := fs.Int("data-mod-threshold-num", 0, "data moderation threshold numerator (for update_config)")
-	dataModThresholdDen := fs.Int("data-mod-threshold-den", 0, "data moderation threshold denominator (for update_config)")
-	opChangeThresholdNum := fs.Int("op-change-threshold-num", 0, "operator change threshold numerator (for update_config)")
-	opChangeThresholdDen := fs.Int("op-change-threshold-den", 0, "operator change threshold denominator (for update_config)")
-	// Mining params flags.
-	storageReleaseRateBPS := fs.Uint64("storage-release-rate-bps", 0, "storage pool release rate BPS (for update_mining_params)")
-	storageRewardPerBlock := fs.Uint64("storage-reward-per-block", 0, "storage pool per-block reward in smallest units (for update_mining_params)")
-	foundationRewardPerBlock := fs.Uint64("foundation-reward-per-block", 0, "foundation pool per-block reward in smallest units (for update_mining_params)")
-	retrievalRewardPerBlock := fs.Uint64("retrieval-reward-per-block", 0, "retrieval pool per-block reward in smallest units (for update_mining_params)")
-	retrievalReleaseRateBPS := fs.Uint64("retrieval-release-rate-bps", 0, "retrieval pool release rate BPS (for update_mining_params)")
-	storedBytesWeightBPS := fs.Uint64("stored-bytes-weight-bps", 0, "stored bytes weight factor BPS (for update_mining_params)")
-	proofScoreWeightBPS := fs.Uint64("proof-score-weight-bps", 0, "proof score weight factor BPS (for update_mining_params)")
-	availabilityWeightBPS := fs.Uint64("availability-weight-bps", 0, "availability weight factor BPS (for update_mining_params)")
-	retrievalSpeedWeightBPS := fs.Uint64("retrieval-speed-weight-bps", 0, "retrieval speed weight factor BPS (for update_mining_params)")
-	ipDispersionWeightBPS := fs.Uint64("ip-dispersion-weight-bps", 0, "IP dispersion weight factor BPS (for update_mining_params)")
-	retrievalRewardPerMiB := fs.Uint64("retrieval-reward-per-mib", 0, "retrieval reward per MiB (for update_mining_params)")
-	maxRetrievalRewardPerWindow := fs.Uint64("max-retrieval-reward-per-window", 0, "max retrieval reward per window (for update_mining_params)")
-	minerDegradeThreshold := fs.Uint64("miner-degrade-threshold", 0, "miner degrade threshold (for update_mining_params)")
-	storageProofSamples := fs.Int("storage-proof-samples", 0, "storage proof samples count (for update_mining_params)")
-	validatorCommissionBPS := fs.Uint64("validator-commission-bps", 0, "validator commission BPS (for update_mining_params)")
-	retrievalWeightBPS := fs.Uint64("retrieval-weight-bps", 0, "retrieval weight BPS (for update_mining_params)")
-	targetBlockBytes := fs.Uint64("target-block-bytes", 0, "target block size in bytes (for update_mining_params)")
-	maxBlockBytes := fs.Uint64("max-block-bytes", 0, "max block size in bytes (for update_mining_params)")
-	maxBlockTxs := fs.Uint64("max-block-txs", 0, "max transactions per block (for update_mining_params)")
-	maxTxBytes := fs.Uint64("max-tx-bytes", 0, "max regular transaction size in bytes (for update_mining_params)")
-	maxStorageTxBytes := fs.Uint64("max-storage-tx-bytes", 0, "max storage metadata transaction size in bytes (for update_mining_params)")
-	registrationBonusAmount := fs.Uint64("registration-bonus-amount", 0, "registration bonus amount in smallest units (for update_mining_params)")
-	minBonusProofCount := fs.Uint64("min-bonus-proof-count", 0, "minimum successful proofs to release bonus (for update_mining_params)")
-	minBonusSuccessRateBPS := fs.Uint64("min-bonus-success-rate-bps", 0, "minimum success rate BPS for bonus release (for update_mining_params)")
-	minBonusRetrievalCount := fs.Uint64("min-bonus-retrieval-count", 0, "minimum successful retrievals for bonus release (for update_mining_params)")
-	maxBonusAddresses := fs.Uint64("max-bonus-addresses", 0, "maximum miners who can receive bonus (for update_mining_params)")
-	bonusDeadlineSeconds := fs.Uint64("bonus-deadline-seconds", 0, "bonus deadline in seconds (for update_mining_params)")
-	activationWindowSeconds := fs.Uint64("activation-window-seconds", 0, "activation window in seconds (for update_mining_params)")
-	fs.Parse(args)
-
-	if *keyPath == "" || *reasonHash == "" {
-		log.Fatal("-key and -reason-hash are required")
-	}
-
-	isOpMgmt := *action == "add_operator" || *action == "remove_operator" || *action == "update_operator"
-	isConfig := *action == "update_config"
-	isMiningParams := *action == "update_mining_params"
-	if !isOpMgmt && !isConfig && !isMiningParams && *intentID == "" {
-		log.Fatal("-intent is required for deal actions")
-	}
-
-	key := loadGovernanceKey(*keyPath)
-	privKey := loadGovernanceECDSAKey(*keyPath)
-
-	var permissions []string
-	if *targetPermissions != "" {
-		for _, p := range strings.Split(*targetPermissions, ",") {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				permissions = append(permissions, p)
-			}
-		}
-	}
-
-	now := time.Now().Unix()
-	req := wire.CreateGovernanceProposalRequest{
-		Proposer:                          key.Address,
-		IntentID:                          *intentID,
-		Action:                            *action,
-		ReasonHash:                        *reasonHash,
-		ExpiresAtUnix:                     *expiresAtUnix,
-		PreserveStorage:                   *preserveStorage,
-		AppealDeadlineUnix:                *appealDeadlineUnix,
-		TargetOperator:                    *targetOperator,
-		TargetPublicKey:                   *targetPublicKey,
-		TargetPermissions:                 permissions,
-		TargetDataModerationThresholdNum:  *dataModThresholdNum,
-		TargetDataModerationThresholdDen:  *dataModThresholdDen,
-		TargetOperatorChangeThresholdNum:  *opChangeThresholdNum,
-		TargetOperatorChangeThresholdDen:  *opChangeThresholdDen,
-		TargetStorageReleaseRateBPS:       *storageReleaseRateBPS,
-		TargetStorageRewardPerBlock:       *storageRewardPerBlock,
-		TargetFoundationRewardPerBlock:    *foundationRewardPerBlock,
-		TargetRetrievalRewardPerBlock:     *retrievalRewardPerBlock,
-		TargetRetrievalReleaseRateBPS:     *retrievalReleaseRateBPS,
-		TargetStoredBytesWeightBPS:        *storedBytesWeightBPS,
-		TargetProofScoreWeightBPS:         *proofScoreWeightBPS,
-		TargetAvailabilityWeightBPS:       *availabilityWeightBPS,
-		TargetRetrievalSpeedWeightBPS:     *retrievalSpeedWeightBPS,
-		TargetIPDispersionWeightBPS:       *ipDispersionWeightBPS,
-		TargetRetrievalRewardPerMiB:       *retrievalRewardPerMiB,
-		TargetMaxRetrievalRewardPerWindow: *maxRetrievalRewardPerWindow,
-		TargetMinerDegradeThreshold:       *minerDegradeThreshold,
-		TargetStorageProofSamples:         *storageProofSamples,
-		TargetValidatorCommissionBPS:      *validatorCommissionBPS,
-		TargetRetrievalWeightBPS:          *retrievalWeightBPS,
-		TargetBlockBytes:                  *targetBlockBytes,
-		TargetMaxBlockBytes:               *maxBlockBytes,
-		TargetMaxBlockTxs:                 *maxBlockTxs,
-		TargetMaxTxBytes:                  *maxTxBytes,
-		TargetMaxStorageTxBytes:           *maxStorageTxBytes,
-		TargetRegistrationBonusAmount:     *registrationBonusAmount,
-		TargetMinBonusProofCount:          *minBonusProofCount,
-		TargetMinBonusSuccessRateBPS:      *minBonusSuccessRateBPS,
-		TargetMinBonusRetrievalCount:      *minBonusRetrievalCount,
-		TargetMaxBonusAddresses:           *maxBonusAddresses,
-		TargetBonusDeadlineSeconds:        *bonusDeadlineSeconds,
-		TargetActivationWindowSeconds:     *activationWindowSeconds,
-		Nonce:                             fetchOperatorNonce(*chainURL, key.Address),
-		CreatedAtUnix:                     now,
-	}
-	if err := wire.SignGovernanceProposal(&req, privKey); err != nil {
-		log.Fatalf("failed to sign proposal: %v", err)
-	}
-	var resp wire.CreateGovernanceProposalResponse
-	if err := client.NewHTTP(*chainURL).Post("/governance/proposals", req, &resp); err != nil {
-		log.Fatal(err)
-	}
-	if isOpMgmt {
-		fmt.Printf("proposal created: id=%s action=%s target=%s status=%s\n",
-			resp.Proposal.ProposalID, resp.Proposal.Action, resp.Proposal.TargetOperator, resp.Proposal.Status)
-	} else if isConfig {
-		fmt.Printf("proposal created: id=%s action=%s data_mod=%d/%d op_change=%d/%d status=%s\n",
-			resp.Proposal.ProposalID, resp.Proposal.Action,
-			resp.Proposal.TargetDataModerationThresholdNum, resp.Proposal.TargetDataModerationThresholdDen,
-			resp.Proposal.TargetOperatorChangeThresholdNum, resp.Proposal.TargetOperatorChangeThresholdDen,
-			resp.Proposal.Status)
-	} else if isMiningParams {
-		fmt.Printf("proposal created: id=%s action=%s status=%s\n",
-			resp.Proposal.ProposalID, resp.Proposal.Action, resp.Proposal.Status)
-	} else {
-		fmt.Printf("proposal created: id=%s action=%s intent=%s status=%s\n",
-			resp.Proposal.ProposalID, resp.Proposal.Action, resp.Proposal.IntentID, resp.Proposal.Status)
-	}
-}
-
-func governanceVote(args []string) {
-	fs := flag.NewFlagSet("governance-vote", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	keyPath := fs.String("key", "", "path to governance operator key file")
-	proposalID := fs.String("proposal", "", "proposal id")
-	approve := fs.Bool("approve", true, "approve or reject the proposal")
-	fs.Parse(args)
-
-	if *keyPath == "" || *proposalID == "" {
-		log.Fatal("-key and -proposal are required")
-	}
-	key := loadGovernanceKey(*keyPath)
-	privKey := loadGovernanceECDSAKey(*keyPath)
-
-	now := time.Now().Unix()
-	req := wire.CastGovernanceVoteRequest{
-		ProposalID:    *proposalID,
-		Voter:         key.Address,
-		Approve:       *approve,
-		Nonce:         fetchOperatorNonce(*chainURL, key.Address),
-		CreatedAtUnix: now,
-	}
-	if err := wire.SignGovernanceVote(&req, privKey); err != nil {
-		log.Fatalf("failed to sign vote: %v", err)
-	}
-	var resp wire.CastGovernanceVoteResponse
-	if err := client.NewHTTP(*chainURL).Post("/governance/votes", req, &resp); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("vote cast: proposal=%s voter=%s approve=%v approvals=%d rejects=%d threshold=%d executed=%v\n",
-		resp.Vote.ProposalID, resp.Vote.Voter, resp.Vote.Approve, resp.ApproveCount, resp.RejectCount, resp.Threshold, resp.Executed)
-}
-
-func governanceExecute(args []string) {
-	fs := flag.NewFlagSet("governance-execute", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	keyPath := fs.String("key", "", "path to governance operator key file")
-	proposalID := fs.String("proposal", "", "proposal id")
-	fs.Parse(args)
-
-	if *keyPath == "" || *proposalID == "" {
-		log.Fatal("-key and -proposal are required")
-	}
-	key := loadGovernanceKey(*keyPath)
-	privKey := loadGovernanceECDSAKey(*keyPath)
-
-	now := time.Now().Unix()
-	req := wire.ExecuteGovernanceProposalRequest{
-		ProposalID:    *proposalID,
-		Executor:      key.Address,
-		Nonce:         fetchOperatorNonce(*chainURL, key.Address),
-		CreatedAtUnix: now,
-	}
-	if err := wire.SignGovernanceExecute(&req, privKey); err != nil {
-		log.Fatalf("failed to sign execute request: %v", err)
-	}
-	var resp wire.ExecuteGovernanceProposalResponse
-	if err := client.NewHTTP(*chainURL).Post("/governance/execute", req, &resp); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("proposal executed: id=%s status=%s action=%s access=%s moderation=%s storage=%s\n",
-		resp.Proposal.ProposalID, resp.Proposal.Status, resp.Proposal.Action,
-		resp.GovernanceResult.AccessStatus, resp.GovernanceResult.ModerationStatus, resp.GovernanceResult.StorageStatus)
-}
-
-func governanceProposals(args []string) {
-	fs := flag.NewFlagSet("governance-proposals", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	status := fs.String("status", "", "filter by status: pending, executed, rejected, expired, cancelled")
-	intentID := fs.String("intent", "", "filter by intent id")
-	fs.Parse(args)
-
-	var resp wire.GovernanceProposalListResponse
-	query := url.Values{}
-	if *status != "" {
-		query.Set("status", *status)
-	}
-	if *intentID != "" {
-		query.Set("intent", *intentID)
-	}
-	path := "/governance/proposals"
-	if encoded := query.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	if err := client.NewHTTP(*chainURL).Get(path, &resp); err != nil {
-		log.Fatal(err)
-	}
-	for _, p := range resp.Proposals {
-		votes := resp.Votes[p.ProposalID]
-		fmt.Printf("proposal=%s proposer=%s action=%s intent=%s status=%s votes=%d created=%d\n",
-			p.ProposalID, p.Proposer, p.Action, p.IntentID, p.Status, len(votes), p.CreatedAtUnix)
-		for _, v := range votes {
-			fmt.Printf("  vote: voter=%s approve=%v at=%d\n", v.Voter, v.Approve, v.CreatedAtUnix)
-		}
-	}
-}
-
-func governanceOperatorsList(args []string) {
-	fs := flag.NewFlagSet("governance-operators", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	fs.Parse(args)
-
-	var resp wire.GovernanceOperatorListResponse
-	if err := client.NewHTTP(*chainURL).Get("/governance/operators", &resp); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("data moderation threshold: %d/%d (num=%d den=%d)\n",
-		resp.DataModerationThreshold, len(resp.Operators), resp.DataModerationThresholdNum, resp.DataModerationThresholdDen)
-	fmt.Printf("operator change threshold: %d/%d (num=%d den=%d)\n\n",
-		resp.OperatorChangeThreshold, len(resp.Operators), resp.OperatorChangeThresholdNum, resp.OperatorChangeThresholdDen)
-	for _, op := range resp.Operators {
-		hasKey := "no"
-		if op.PublicKey != "" {
-			hasKey = "yes"
-		}
-		fmt.Printf("operator=%s enabled=%v key=%s nonce=%d permissions=%v\n",
-			op.Operator, op.Enabled, hasKey, op.Nonce, op.Permissions)
-	}
-}
-
-// fetchOperatorNonce queries the chain for the current nonce of a governance operator.
-func fetchOperatorNonce(chainURL, address string) uint64 {
-	var resp wire.GovernanceOperatorListResponse
-	if err := client.NewHTTP(chainURL).Get("/governance/operators", &resp); err != nil {
-		log.Fatalf("failed to fetch operator nonce: %v", err)
-	}
-	for _, op := range resp.Operators {
-		if strings.EqualFold(op.Operator, address) {
-			return op.Nonce
-		}
-	}
-	log.Fatalf("operator %s not found", address)
-	return 0
 }
 
 func listDeleteTasks(args []string) {
@@ -1618,38 +1296,6 @@ func listDeleteTasks(args []string) {
 	for _, task := range resp.Tasks {
 		fmt.Printf("delete task=%s intent=%s miner=%s shard=%s status=%s created=%d completed=%d\n",
 			task.TaskID, task.IntentID, task.MinerAddress, task.ShardHash, task.Status, task.CreatedAtUnix, task.CompletedAtUnix)
-	}
-}
-
-func listGovernanceAudit(args []string) {
-	fs := flag.NewFlagSet("governance-audit", flag.ExitOnError)
-	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
-	intentID := fs.String("intent", "", "intent id")
-	operator := fs.String("operator", "", "operator identity")
-	action := fs.String("action", "", "governance action")
-	fs.Parse(args)
-
-	var resp wire.GovernanceAuditResponse
-	query := url.Values{}
-	if *intentID != "" {
-		query.Set("intent", *intentID)
-	}
-	if *operator != "" {
-		query.Set("operator", *operator)
-	}
-	if *action != "" {
-		query.Set("action", *action)
-	}
-	path := "/intents/governance/audit"
-	if encoded := query.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	if err := client.NewHTTP(*chainURL).Get(path, &resp); err != nil {
-		log.Fatal(err)
-	}
-	for _, record := range resp.Records {
-		fmt.Printf("audit=%s intent=%s operator=%s action=%s type=%s access=%s moderation=%s storage=%s expires=%d appeal=%d at=%d\n",
-			record.AuditID, record.IntentID, record.Operator, record.Action, record.GovernanceType, record.AccessStatus, record.ModerationStatus, record.StorageStatus, record.ModerationExpiresAtUnix, record.AppealDeadlineUnix, record.RecordedAtUnix)
 	}
 }
 
@@ -1947,11 +1593,18 @@ func repair(args []string) {
 		unavailableList := setValues(unavailable)
 		if len(unavailableList) > 0 || *includeMissing {
 			var createResp wire.CreateRepairResponse
-			if err := chainClient.Post("/repairs", wire.CreateRepairRequest{
+			repairReq := wire.CreateRepairRequest{
 				IntentID:          plan.IntentID,
 				UnavailableMiners: unavailableList,
 				IncludeMissing:    *includeMissing,
-			}, &createResp); err != nil && len(unavailableList) > 0 {
+				ChainID:           chainID(*chainURL),
+				User:              accountKey.Address,
+				Nonce:             accountNonce(*chainURL, accountKey.Address),
+			}
+			if err := wire.SignCreateRepair(&repairReq, accountKey.PrivateKey); err != nil {
+				log.Fatal(err)
+			}
+			if err := chainClient.Post("/repairs", repairReq, &createResp); err != nil && len(unavailableList) > 0 {
 				log.Fatal(err)
 			}
 		}
@@ -2091,6 +1744,7 @@ func prove(args []string) {
 	intentID := fs.String("intent", "", "intent id")
 	count := fs.Int("count", 1, "number of challenges to generate")
 	storageURLs := fs.String("storage", "", "fallback comma-separated storage node URLs")
+	accountKeyPath := fs.String("account-key", "", "account key file used to sign challenge request")
 	fs.Parse(args)
 
 	if *intentID == "" {
@@ -2098,10 +1752,23 @@ func prove(args []string) {
 	}
 	var challengeResp wire.GenerateChallengeResponse
 	chainClient := client.NewHTTP(*chainURL)
-	if err := chainClient.Post("/challenges", wire.GenerateChallengeRequest{
+	challengeReq := wire.GenerateChallengeRequest{
 		IntentID: *intentID,
 		Count:    *count,
-	}, &challengeResp); err != nil {
+	}
+	if *accountKeyPath != "" {
+		key, err := loadAccountKey(*accountKeyPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		challengeReq.ChainID = chainID(*chainURL)
+		challengeReq.User = key.Address
+		challengeReq.Nonce = accountNonce(*chainURL, key.Address)
+		if err := wire.SignGenerateChallenge(&challengeReq, key.PrivateKey); err != nil {
+			log.Fatal(err)
+		}
+	}
+	if err := chainClient.Post("/challenges", challengeReq, &challengeResp); err != nil {
 		log.Fatal(err)
 	}
 
@@ -2470,18 +2137,12 @@ func chainID(chainURL string) string {
 }
 
 func operatorNonce(chainURL string, address string) uint64 {
-	var resp wire.GovernanceOperatorListResponse
-	if err := client.NewHTTP(chainURL).Get("/governance/operators", &resp); err != nil {
+	var resp map[string]uint64
+	normalized := wire.NormalizeAddress(address)
+	if err := client.NewHTTP(chainURL).Get("/governance/operator-nonce?operator="+normalized, &resp); err != nil {
 		log.Fatal(err)
 	}
-	normalized := wire.NormalizeAddress(address)
-	for _, op := range resp.Operators {
-		if wire.NormalizeAddress(op.Operator) == normalized {
-			return op.Nonce
-		}
-	}
-	log.Fatalf("governance operator %s not found", address)
-	return 0
+	return resp["nonce"]
 }
 
 func postOperator(chainURL string, path string, in any, out any, keyPath string) error {
@@ -3924,6 +3585,113 @@ func garbageCollect(args []string) {
 		len(blocks), len(resp.ShardHashes), len(orphans), deleted, formatBytes(uint64(freedBytes)))
 }
 
+func eventsCommand(args []string) {
+	fs := flag.NewFlagSet("events", flag.ExitOnError)
+	chainURL := fs.String("chain", "http://localhost:8080", "chain node URL")
+	eventType := fs.String("type", "", "filter by event type (e.g. transfer, miner_jailed)")
+	address := fs.String("address", "", "filter by address (matches both sender and receiver)")
+	intentID := fs.String("intent", "", "filter by related intent ID")
+	counterparty := fs.String("counterparty", "", "filter by counterparty address")
+	since := fs.Int64("since", 0, "filter events since this unix timestamp")
+	minHeight := fs.Int64("min-height", 0, "minimum block height (inclusive)")
+	maxHeight := fs.Int64("max-height", 0, "maximum block height (inclusive)")
+	afterEventID := fs.Uint64("after-event-id", 0, "return events after this event ID (forward pagination)")
+	beforeEventID := fs.Uint64("before-event-id", 0, "return events before this event ID (backward pagination, use next_cursor)")
+	txHash := fs.String("tx-hash", "", "filter by transaction hash")
+	blockHeight := fs.Int64("block-height", 0, "filter by exact block height")
+	limit := fs.Int("limit", 50, "maximum number of events to return")
+	jsonOutput := fs.Bool("json", false, "output raw JSON response")
+	fs.Parse(args)
+
+	query := url.Values{}
+	if *eventType != "" {
+		query.Set("type", *eventType)
+	}
+	if *address != "" {
+		query.Set("address", *address)
+	}
+	if *intentID != "" {
+		query.Set("intent_id", *intentID)
+	}
+	if *counterparty != "" {
+		query.Set("counterparty", *counterparty)
+	}
+	if *since > 0 {
+		query.Set("since", fmt.Sprintf("%d", *since))
+	}
+	if *minHeight > 0 {
+		query.Set("min_height", fmt.Sprintf("%d", *minHeight))
+	}
+	if *maxHeight > 0 {
+		query.Set("max_height", fmt.Sprintf("%d", *maxHeight))
+	}
+	if *afterEventID > 0 {
+		query.Set("after_event_id", fmt.Sprintf("%d", *afterEventID))
+	}
+	if *beforeEventID > 0 {
+		query.Set("before_event_id", fmt.Sprintf("%d", *beforeEventID))
+	}
+	if *txHash != "" {
+		query.Set("tx_hash", *txHash)
+	}
+	if *blockHeight > 0 {
+		query.Set("block_height", fmt.Sprintf("%d", *blockHeight))
+	}
+	query.Set("limit", fmt.Sprintf("%d", *limit))
+
+	var resp wire.ChainEventsResponse
+	path := "/events"
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+	if err := client.NewHTTP(*chainURL).Get(path, &resp); err != nil {
+		log.Fatal(err)
+	}
+
+	if *jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(resp)
+		return
+	}
+
+	if len(resp.Events) == 0 {
+		fmt.Println("No events found.")
+		return
+	}
+	fmt.Printf("Events: %d (total matched: %d, has_more: %v", len(resp.Events), resp.Total, resp.HasMore)
+	if resp.NextCursor > 0 {
+		fmt.Printf(", next_cursor: %d", resp.NextCursor)
+	}
+	fmt.Printf(")\n\n")
+	for _, evt := range resp.Events {
+		ts := time.Unix(evt.CreatedAtUnix, 0).UTC().Format("2006-01-02 15:04:05")
+		fmt.Printf("  #%d  %-30s  %s", evt.EventID, evt.EventType, ts)
+		if evt.BlockHeight > 0 {
+			fmt.Printf("  height=%d", evt.BlockHeight)
+		}
+		if evt.TransactionHash != "" {
+			fmt.Printf("  tx=%s", evt.TransactionHash[:min(16, len(evt.TransactionHash))])
+		}
+		if evt.Emitter != "" {
+			fmt.Printf("  emitter=%s", evt.Emitter)
+		}
+		if evt.RelatedAddress != "" {
+			fmt.Printf("  addr=%s", evt.RelatedAddress)
+		}
+		if evt.CounterpartyAddress != "" {
+			fmt.Printf("  counter=%s", evt.CounterpartyAddress)
+		}
+		if evt.RelatedIntentID != "" {
+			fmt.Printf("  intent=%s", evt.RelatedIntentID)
+		}
+		if len(evt.Payload) > 2 {
+			fmt.Printf("  payload=%s", string(evt.Payload))
+		}
+		fmt.Println()
+	}
+}
+
 func usage() {
 	fmt.Println(`usage:
   chainctl status        -chain http://localhost:8080 -storage http://localhost:9090,http://localhost:9091
@@ -3946,14 +3714,6 @@ func usage() {
   chainctl terminate-deal -chain http://localhost:8080 -plan ./upload-plan.json
   chainctl delete-tasks  -chain http://localhost:8080 -intent intent_xxx
   chainctl access-policy -chain http://localhost:8080 -intent intent_xxx -user user_demo -status blocked -reason-hash hash
-  chainctl governance-keygen -out ./governance-key.json
-  chainctl governance-propose -chain http://localhost:8080 -key ./governance-key.json -intent intent_xxx -action freeze -reason-hash hash -expires-at-unix 1893456000
-  chainctl governance-propose -chain http://localhost:8080 -key ./governance-key.json -action add_operator -reason-hash hash -target-operator addr -target-public-key base64key -target-permissions freeze,block
-  chainctl governance-vote -chain http://localhost:8080 -key ./governance-key.json -proposal gov_proposal_xxx -approve
-  chainctl governance-execute -chain http://localhost:8080 -key ./governance-key.json -proposal gov_proposal_xxx
-  chainctl governance-proposals -chain http://localhost:8080 -status pending
-  chainctl governance-operators -chain http://localhost:8080
-  chainctl governance-audit -chain http://localhost:8080 -intent intent_xxx
   chainctl retrieval-receipt -chain http://localhost:8080 -storage http://localhost:9090 -intent intent_xxx -shard shard_hash -key ./alice.json
   chainctl download      -plan ./upload-plan.json -out ./restored.bin
   chainctl download      -chain http://localhost:8080 -intent intent_xxx -out ./restored.bin
@@ -3989,5 +3749,6 @@ func usage() {
   chainctl agent-key revoke -id key_abc123 -master 0xa1b2c3...
   chainctl validators    -chain http://localhost:8080
   chainctl peers         -chain http://localhost:8080
-  chainctl genesis init  -out ./genesis.json`)
+  chainctl genesis init  -out ./genesis.json
+  chainctl events        -chain http://localhost:8080 -type miner_jailed -intent intent_xxx -limit 20 -json`)
 }

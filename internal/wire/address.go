@@ -24,3 +24,8 @@ func NormalizeAddress(address string) string {
 	}
 	return address
 }
+
+// IsValidAddress returns true if the string is a valid 0x-prefixed hex address.
+func IsValidAddress(address string) bool {
+	return common.IsHexAddress(address)
+}

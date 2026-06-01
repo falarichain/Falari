@@ -18,12 +18,42 @@ type Server struct {
 	network *PeerNetwork
 }
 
+var errTooManyRequests = errors.New("too many requests")
+
 func NewServer(store *Store, network *PeerNetwork) *Server {
 	return &Server{store: store, network: network}
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	s.registerPublicRoutes(mux)
+	s.registerGovernanceRoutes(mux)
+	return s.rateLimitMiddleware(mux)
+}
+
+// PublicRoutes returns an http.Handler with only non-governance routes.
+// Used when the chain node runs with a separate governance listener.
+// Cross-listed routes (operator-nonce, health) are included so that
+// chainctl admin commands (set-upgrade, epoch, etc.) still work.
+func (s *Server) PublicRoutes() http.Handler {
+	mux := http.NewServeMux()
+	s.registerPublicRoutes(mux)
+	mux.HandleFunc("GET /governance/operator-nonce", s.getOperatorNonce)
+	mux.HandleFunc("GET /health", s.health)
+	return s.rateLimitMiddleware(mux)
+}
+
+// GovernanceRoutes returns an http.Handler with only governance routes.
+// Served on a separate listener when governance_addr is configured.
+func (s *Server) GovernanceRoutes() http.Handler {
+	mux := http.NewServeMux()
+	s.registerGovernanceRoutes(mux)
+	mux.HandleFunc("GET /governance/operator-nonce", s.getOperatorNonce)
+	mux.HandleFunc("GET /health", s.health)
+	return s.rateLimitMiddleware(mux)
+}
+
+func (s *Server) registerPublicRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("GET /snapshot", s.snapshot)
@@ -46,19 +76,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /intents/{id}/renew", s.renewDeal)
 	mux.HandleFunc("POST /intents/terminate", s.terminateDeal)
 	mux.HandleFunc("POST /intents/access", s.setAccessPolicy)
-	mux.HandleFunc("POST /governance/proposals", s.createGovernanceProposal)
-	mux.HandleFunc("POST /governance/votes", s.castGovernanceVote)
-	mux.HandleFunc("POST /governance/execute", s.executeGovernanceProposal)
-	mux.HandleFunc("POST /governance/cancel", s.cancelGovernanceProposal)
-	mux.HandleFunc("GET /governance/proposals", s.listGovernanceProposals)
-	mux.HandleFunc("GET /governance/operators", s.listGovernanceOperators)
 	mux.HandleFunc("GET /intents/delete-tasks", s.listDeleteTasks)
-	mux.HandleFunc("GET /intents/governance/audit", s.listGovernanceAudit)
-	mux.HandleFunc("GET /governance/blacklist", s.getBlacklist)
-	mux.HandleFunc("POST /governance/direct-action", s.directGovernanceAction)
-	mux.HandleFunc("POST /governance/direct-action/review", s.castDirectActionReviewVote)
-	mux.HandleFunc("POST /governance/direct-action/ratify", s.requireOperator(s.ratifyDirectAction))
-	mux.HandleFunc("GET /governance/direct-actions", s.listDirectActions)
+	mux.HandleFunc("GET /user-intents", s.listUserIntents)
+	mux.HandleFunc("GET /events", s.listEvents)
+	mux.HandleFunc("GET /ws/events", s.wsEvents)
 	mux.HandleFunc("GET /manifests/", s.getManifest)
 	mux.HandleFunc("GET /user-collections", s.listUserCollections)
 	mux.HandleFunc("POST /collections", s.createCollection)
@@ -132,7 +153,29 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /bridge/out", s.bridgeOut)
 	mux.HandleFunc("POST /bridge/claim", s.bridgeClaim)
 	mux.HandleFunc("POST /bridge/admin/config", s.requireOperator(s.bridgeAdminConfig))
-	return mux
+	// WASM contract routes
+	mux.HandleFunc("POST /wasm/deploy", s.deployContract)
+	mux.HandleFunc("POST /wasm/call", s.callContract)
+	mux.HandleFunc("POST /wasm/destroy", s.destroyContract)
+	mux.HandleFunc("GET /wasm/contracts", s.listContracts)
+	mux.HandleFunc("GET /wasm/contracts/{address}/kv", s.getContractKV)
+	mux.HandleFunc("GET /wasm/contracts/{address}", s.getContract)
+	mux.HandleFunc("GET /wasm/code/{hash}", s.getContractCode)
+}
+
+func (s *Server) registerGovernanceRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /governance/proposals", s.createGovernanceProposal)
+	mux.HandleFunc("POST /governance/votes", s.castGovernanceVote)
+	mux.HandleFunc("POST /governance/execute", s.executeGovernanceProposal)
+	mux.HandleFunc("POST /governance/cancel", s.cancelGovernanceProposal)
+	mux.HandleFunc("GET /governance/proposals", s.listGovernanceProposals)
+	mux.HandleFunc("GET /governance/operators", s.listGovernanceOperators)
+	mux.HandleFunc("GET /intents/governance/audit", s.listGovernanceAudit)
+	mux.HandleFunc("GET /governance/blacklist", s.getBlacklist)
+	mux.HandleFunc("POST /governance/direct-action", s.directGovernanceAction)
+	mux.HandleFunc("POST /governance/direct-action/review", s.castDirectActionReviewVote)
+	mux.HandleFunc("POST /governance/direct-action/ratify", s.requireOperator(s.ratifyDirectAction))
+	mux.HandleFunc("GET /governance/direct-actions", s.listDirectActions)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -426,6 +469,20 @@ func (s *Server) listGovernanceOperators(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) getOperatorNonce(w http.ResponseWriter, r *http.Request) {
+	operator := r.URL.Query().Get("operator")
+	if operator == "" {
+		writeError(w, http.StatusBadRequest, errors.New("operator query parameter is required"))
+		return
+	}
+	nonce, ok := s.store.OperatorNonce(operator)
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("governance operator not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]uint64{"nonce": nonce})
+}
+
 func (s *Server) getBlacklist(w http.ResponseWriter, r *http.Request) {
 	resp := s.store.Blacklist()
 	writeJSON(w, http.StatusOK, resp)
@@ -438,6 +495,40 @@ func (s *Server) listDeleteTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listGovernanceAudit(w http.ResponseWriter, r *http.Request) {
 	resp := s.store.GovernanceAudit(r.URL.Query().Get("intent"), r.URL.Query().Get("operator"), r.URL.Query().Get("action"))
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f := EventFilter{
+		Type:            q.Get("type"),
+		Address:         q.Get("address"),
+		IntentID:        q.Get("intent_id"),
+		Counterparty:    q.Get("counterparty"),
+		TransactionHash: q.Get("tx_hash"),
+	}
+	if v := q.Get("since"); v != "" {
+		f.Since, _ = strconv.ParseInt(v, 10, 64)
+	}
+	if v := q.Get("limit"); v != "" {
+		f.Limit, _ = strconv.Atoi(v)
+	}
+	if v := q.Get("min_height"); v != "" {
+		f.MinHeight, _ = strconv.ParseInt(v, 10, 64)
+	}
+	if v := q.Get("max_height"); v != "" {
+		f.MaxHeight, _ = strconv.ParseInt(v, 10, 64)
+	}
+	if v := q.Get("after_event_id"); v != "" {
+		f.AfterEventID, _ = strconv.ParseUint(v, 10, 64)
+	}
+	if v := q.Get("before_event_id"); v != "" {
+		f.BeforeEventID, _ = strconv.ParseUint(v, 10, 64)
+	}
+	if v := q.Get("block_height"); v != "" {
+		f.ExactHeight, _ = strconv.ParseInt(v, 10, 64)
+	}
+	resp := s.store.QueryEvents(f)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -884,6 +975,16 @@ func (s *Server) getManifest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) listUserIntents(w http.ResponseWriter, r *http.Request) {
+	user := r.URL.Query().Get("user")
+	if user == "" {
+		writeError(w, http.StatusBadRequest, errors.New("user query parameter is required"))
+		return
+	}
+	views := s.store.ListUserIntents(user)
+	writeJSON(w, http.StatusOK, map[string]any{"intents": views})
+}
+
 func (s *Server) listUserCollections(w http.ResponseWriter, r *http.Request) {
 	user := r.URL.Query().Get("user")
 	if user == "" {
@@ -1222,7 +1323,48 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	var apiErr *wire.APIError
+	if errors.As(err, &apiErr) {
+		writeJSON(w, status, apiErr)
+		return
+	}
+	writeJSON(w, status, wire.APIError{Code: classifyStoreError(err), Message: err.Error()})
+}
+
+// classifyStoreError maps common store-layer error messages to structured error codes.
+// This enables gradual migration: existing errors.New(...) calls get classified
+// automatically, while new code can return *wire.APIError directly.
+func classifyStoreError(err error) wire.ErrorCode {
+	if err == nil {
+		return wire.ErrInternal
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "insufficient"):
+		return wire.ErrInsufficientFunds
+	case strings.Contains(msg, "not found"):
+		return wire.ErrNotFound
+	case strings.Contains(msg, "not authorized"), strings.Contains(msg, "unauthorized"):
+		return wire.ErrUnauthorized
+	case strings.Contains(msg, "nonce"):
+		return wire.ErrInvalidNonce
+	case strings.Contains(msg, "signature"), strings.Contains(msg, "verify"):
+		return wire.ErrInvalidSignature
+	case strings.Contains(msg, "expired"):
+		return wire.ErrIntentExpired
+	case strings.Contains(msg, "already finalized"), strings.Contains(msg, "already"):
+		return wire.ErrConflict
+	case strings.Contains(msg, "below"), strings.Contains(msg, "underpriced"):
+		return wire.ErrUnderpriced
+	case strings.Contains(msg, "capacity"), strings.Contains(msg, "exceeded"):
+		return wire.ErrCapacityExceeded
+	case strings.Contains(msg, "deadline"):
+		return wire.ErrDeadlineExceeded
+	case strings.Contains(msg, "too many"):
+		return wire.ErrTooManyRequests
+	default:
+		return wire.ErrInvalidInput
+	}
 }
 
 func (s *Server) registerAgentKey(w http.ResponseWriter, r *http.Request) {
@@ -1340,4 +1482,91 @@ func (s *Server) listMultisigWallets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, wire.MultisigWalletListResponse{Wallets: wallets})
+}
+
+// ── WASM Contract HTTP Handlers ──
+
+func (s *Server) deployContract(w http.ResponseWriter, r *http.Request) {
+	var req wire.DeployContractRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.DeployContract(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) callContract(w http.ResponseWriter, r *http.Request) {
+	var req wire.CallContractRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.CallContract(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) destroyContract(w http.ResponseWriter, r *http.Request) {
+	var req wire.DestroyContractRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.store.DestroyContract(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) listContracts(w http.ResponseWriter, _ *http.Request) {
+	contracts := s.store.ListContracts()
+	writeJSON(w, http.StatusOK, wire.WasmContractListResponse{Contracts: contracts})
+}
+
+func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
+	address := r.PathValue("address")
+	if address == "" {
+		address = strings.TrimPrefix(r.URL.Path, "/wasm/contracts/")
+	}
+	info, err := s.store.GetContract(address)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) getContractKV(w http.ResponseWriter, r *http.Request) {
+	address := r.PathValue("address")
+	if address == "" {
+		// Extract from path: /wasm/contracts/{address}/kv
+		path := strings.TrimPrefix(r.URL.Path, "/wasm/contracts/")
+		address = strings.TrimSuffix(path, "/kv")
+	}
+	kv, err := s.store.GetContractKV(address)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, kv)
+}
+
+func (s *Server) getContractCode(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	if hash == "" {
+		hash = strings.TrimPrefix(r.URL.Path, "/wasm/code/")
+	}
+	code, err := s.store.GetContractCode(hash)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, code)
 }

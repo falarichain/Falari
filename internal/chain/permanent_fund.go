@@ -35,6 +35,9 @@ func (s *Store) TopUpPermanentFund(req wire.PermanentFundTopUpRequest) (wire.Per
 	if !isPermanentIntent(intent) {
 		return wire.PermanentFundTopUpResponse{}, errors.New("intent is not permanent storage")
 	}
+	if intent.BurnDeferred {
+		return wire.PermanentFundTopUpResponse{}, errors.New("intent must be finalized before top-up")
+	}
 	if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
 		return wire.VerifyPermanentFundTopUp(req)
 	}); err != nil {
@@ -268,6 +271,11 @@ func (s *Store) closePermanentFundLocked(intent *Intent, reason string, now int6
 	}
 	intent.PermanentFundBalance = 0
 	intent.PermanentFundPaid = fund.Paid
+	s.emitEventWithEmitterLocked(wire.EventPermanentFundClosed, map[string]any{
+		"intent_id": intent.IntentID,
+		"reason":    reason,
+		"burned":    remaining,
+	}, intent.User, intent.IntentID, "", s.currentHeightLocked(), "core")
 	return remaining
 }
 

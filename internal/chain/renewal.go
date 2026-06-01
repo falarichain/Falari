@@ -132,6 +132,10 @@ func (s *Store) RenewDeal(req wire.RenewDealRequest) (wire.RenewDealResponse, er
 	if err := s.saveLocked(); err != nil {
 		return wire.RenewDealResponse{}, err
 	}
+	s.emitEventWithEmitterLocked(wire.EventIntentRenewed, map[string]any{
+		"paid_amount": price,
+		"new_expiry":  newExpiry,
+	}, req.User, req.IntentID, "", s.currentHeightLocked(), "renewal")
 	return resp, nil
 }
 
@@ -257,6 +261,10 @@ func (s *Store) applyRenewDealLocked(payload renewDealTxPayload) error {
 	intent.Policy.Duration = req.Duration
 	intent.UpdatedAt = renewedAt
 	s.addDealEscrowFundsLocked(intent, price, renewedAt)
+	s.emitEventWithEmitterLocked(wire.EventIntentRenewed, map[string]any{
+		"paid_amount": price,
+		"new_expiry":  expectedResp.ExpiresAtUnix,
+	}, req.User, req.IntentID, "", s.currentHeightLocked(), "renewal")
 	return nil
 }
 

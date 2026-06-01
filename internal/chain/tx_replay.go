@@ -83,6 +83,7 @@ func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
 		s.data = blockSnapshot
 		return err
 	}
+	s.blockLogIndex = 0
 	for _, tx := range block.Transactions {
 		if s.data.ConfirmedTxs[tx.TxID] {
 			return restoreBlock(errors.New("block contains already confirmed transaction"))
@@ -168,6 +169,7 @@ func cloneStateForRollback(state State) (State, error) {
 }
 
 func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
+	s.currentTxHash = tx.TxID
 	switch tx.Type {
 	case "faucet":
 		// Faucet has been removed; skip legacy faucet transactions
@@ -466,6 +468,36 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 	case "validator_rotation":
 		// System-generated during block production; state already applied.
 		return nil
+	case "deploy_contract":
+		var payload deployContractTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyDeployContractLocked(payload, tx.CreatedAtUnix)
+	case "call_contract":
+		var payload callContractTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyCallContractLocked(payload, tx.CreatedAtUnix)
+	case "destroy_contract":
+		var payload destroyContractTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyDestroyContractLocked(payload, tx.CreatedAtUnix)
+	case "wasm_cron_exec":
+		var payload wasmCronExecTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyWasmCronExecLocked(payload)
+	case "wasm_event_delivery":
+		var payload wasmEventDeliveryTxPayload
+		if err := json.Unmarshal(tx.Payload, &payload); err != nil {
+			return err
+		}
+		return s.applyWasmEventDeliveryLocked(payload)
 	default:
 		return fmt.Errorf("unknown transaction type: %s", tx.Type)
 	}
@@ -473,6 +505,10 @@ func (s *Store) applyTransactionLocked(tx wire.Transaction) error {
 
 func (s *Store) applyTransferLocked(req wire.TransferRequest) (wire.Account, wire.Account, error) {
 	fromAddress := wire.NormalizeAddress(req.From)
+	toAddress := wire.NormalizeAddress(req.To)
+	if fromAddress == toAddress {
+		return wire.Account{}, wire.Account{}, errors.New("cannot transfer to self")
+	}
 	from := s.accountLocked(fromAddress)
 	if req.Signature == "" {
 		return wire.Account{}, wire.Account{}, errors.New("transfer requires signature")
@@ -505,6 +541,9 @@ func (s *Store) verifyTransferTxLocked(tx wire.Transaction) error {
 	var req wire.TransferRequest
 	if err := json.Unmarshal(tx.Payload, &req); err != nil {
 		return err
+	}
+	if wire.NormalizeAddress(req.From) == wire.NormalizeAddress(req.To) {
+		return errors.New("cannot transfer to self")
 	}
 	if req.Signature == "" {
 		return errors.New("transfer requires signature")
@@ -546,6 +585,10 @@ func (s *Store) applySignedTransferLocked(req wire.TransferRequest, publicKey st
 	to.Balance += req.Amount
 	s.data.Accounts[fromAddress] = from
 	s.data.Accounts[toAddress] = to
+	s.emitEventWithEmitterLocked(wire.EventTransfer, map[string]any{
+		"amount": req.Amount, "fee": req.Fee,
+		"from_balance": from.Balance, "to_balance": to.Balance,
+	}, fromAddress, "", toAddress, s.currentHeightLocked(), "core")
 	return from, to, nil
 }
 
@@ -606,6 +649,9 @@ func (s *Store) applyValidatorRegistrationLocked(req wire.RegisterValidatorReque
 		s.data.OperatorMap = map[string]string{}
 	}
 	s.data.OperatorMap[req.OperatorAddress] = req.OwnerAddress
+	s.emitEventWithEmitterLocked(wire.EventValidatorRegistered, map[string]any{
+		"stake": req.Stake, "endpoint": req.Endpoint,
+	}, req.OwnerAddress, "", req.OperatorAddress, s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -701,6 +747,10 @@ func (s *Store) applyMinerRegistrationLocked(req wire.RegisterMinerRequest, regi
 		s.data.MinerNFTTemplateHash = hex.EncodeToString(hash[:])
 	}
 
+	s.emitEventWithEmitterLocked(wire.EventMinerRegistered, map[string]any{
+		"capacity_bytes": req.CapacityBytes, "stake": req.Stake,
+		"endpoint": req.Endpoint,
+	}, req.MinerAddress, "", "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -745,8 +795,11 @@ func (s *Store) applyClaimMiningRewardsRequestLocked(req wire.ClaimMiningRewards
 	}); err != nil {
 		return err
 	}
-	s.applyClaimMiningRewardsLocked(req.MinerAddress, claimedAt)
+	claimed := s.applyClaimMiningRewardsLocked(req.MinerAddress, claimedAt)
 	s.consumeAccountNonceLocked(req.MinerAddress)
+	s.emitEventWithEmitterLocked(wire.EventRewardsClaimed, map[string]any{
+		"claimed": claimed,
+	}, req.MinerAddress, "", "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -796,29 +849,9 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 		}
 	}
 	account = s.accountLocked(req.User)
-	burnAmount := req.LockedFee * defaultStorageBurnBPS / 10_000
-	retrievalAmount := req.LockedFee * defaultStorageRetrievalBPS / 10_000
-	foundationAmount := req.LockedFee * defaultStorageFoundationBPS / 10_000
-	minerPortion := req.LockedFee - burnAmount - retrievalAmount - foundationAmount
 	account.Balance -= req.LockedFee
-	account.LockedStorage += minerPortion
+	account.LockedStorage += req.LockedFee
 	s.data.Accounts[account.Address] = account
-	if retrievalAmount > 0 && s.data.RetrievalAddress != "" {
-		retAcc := s.accountLocked(s.data.RetrievalAddress)
-		retAcc.Balance += retrievalAmount
-		s.data.Accounts[retAcc.Address] = retAcc
-		s.data.StorageFeePool.TotalToRetrieval = saturatingAdd(s.data.StorageFeePool.TotalToRetrieval, retrievalAmount)
-	} else {
-		burnAmount += retrievalAmount
-	}
-	if foundationAmount > 0 && s.data.FoundationAddress != "" {
-		fndAcc := s.accountLocked(s.data.FoundationAddress)
-		fndAcc.Balance += foundationAmount
-		s.data.Accounts[fndAcc.Address] = fndAcc
-		s.data.StorageFeePool.TotalToFoundation = saturatingAdd(s.data.StorageFeePool.TotalToFoundation, foundationAmount)
-	} else {
-		burnAmount += foundationAmount
-	}
 
 	createdAt := payload.CreatedAtUnix
 	if createdAt <= 0 {
@@ -838,7 +871,8 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 			Erasure:          req.Erasure,
 			Encryption:       req.Encryption,
 			Policy:           req.Policy,
-			LockedFee:        minerPortion,
+			LockedFee:        req.LockedFee,
+			BurnDeferred:     true,
 			Status:           wire.StatusUploading,
 			StorageStatus:    wire.StorageStatusPending,
 			AccessStatus:     defaultAccessStatus(wire.IntentView{Encryption: req.Encryption}),
@@ -849,16 +883,11 @@ func (s *Store) applyCreateIntentLocked(payload createIntentTxPayload) error {
 		CreatedAt:    createdAt,
 		UpdatedAt:    createdAt,
 	}
-	s.createPermanentFundLocked(s.data.Intents[payload.IntentID], createdAt)
-	s.createDealEscrowLocked(s.data.Intents[payload.IntentID], createdAt)
-	if burnAmount > 0 {
-		s.data.Intents[payload.IntentID].BurnedFee = burnAmount
-		escrow := s.dealEscrowLocked(s.data.Intents[payload.IntentID])
-		escrow.BurnedFee = burnAmount
-		s.data.DealEscrows[payload.IntentID] = escrow
-		s.data.StorageFeePool.TotalBurned = saturatingAdd(s.data.StorageFeePool.TotalBurned, burnAmount)
-	}
 	s.reserveStorageAssignmentsLocked(assignments)
+	s.emitEventWithEmitterLocked(wire.EventIntentCreated, map[string]any{
+		"file_name": req.FileName, "file_size": req.FileSize,
+		"locked_fee": req.LockedFee, "segment_count": len(req.Segments),
+	}, req.User, payload.IntentID, "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -969,6 +998,11 @@ func (s *Store) applyBatchCommitLocked(payload batchCommitTxPayload) error {
 	intent.UploadedSize = payload.UploadedSize
 	intent.Status = wire.StatusPartial
 	intent.UpdatedAt = committedAt
+	s.emitEventWithEmitterLocked(wire.EventIntentCommitted, map[string]any{
+		"committed_segments": payload.CommittedSegments,
+		"uploaded_size":      payload.UploadedSize,
+		"receipt_count":      len(req.Receipts),
+	}, req.User, req.IntentID, "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -1016,8 +1050,12 @@ func (s *Store) applyFinalizeDealLocked(payload finalizeDealTxPayload) error {
 		intent.ExpiresAtUnix = now + intent.Policy.Duration
 	}
 	intent.UpdatedAt = now
+	s.executeDeferredBurnLocked(intent, now)
 	s.activateDealEscrowLocked(intent, now)
 	s.data.Deals[payload.DealID] = payload.IntentID
+	s.emitEventWithEmitterLocked(wire.EventIntentFinalized, map[string]any{
+		"deal_id": payload.DealID, "manifest_root": payload.ManifestRoot,
+	}, intent.User, payload.IntentID, "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -1082,6 +1120,9 @@ func (s *Store) applyTerminateDealLocked(payload terminateDealTxPayload) error {
 	} else {
 		s.consumeAccountNonceLocked(req.User)
 	}
+	s.emitEventWithEmitterLocked(wire.EventIntentTerminated, map[string]any{
+		"reason": req.Reason,
+	}, req.User, req.IntentID, "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -1099,6 +1140,9 @@ func (s *Store) applySetAccessPolicyLocked(payload setAccessPolicyTxPayload) err
 		return errors.New("replay set access policy response mismatch")
 	}
 	s.consumeAccountNonceLocked(payload.Request.User)
+	s.emitEventWithEmitterLocked(wire.EventAccessPolicyChanged, map[string]any{
+		"access_status": resp.AccessStatus,
+	}, payload.Request.User, payload.Request.IntentID, "", s.currentHeightLocked(), "core")
 	return nil
 }
 
@@ -1253,6 +1297,10 @@ func (s *Store) applyGovernanceCreateProposalLocked(payload governanceCreateProp
 	s.data.OperatorNonces[proposer] = expectedNonce + 1
 	s.data.GovernanceProposals[proposal.ProposalID] = proposal
 	s.data.GovernanceVotes[proposal.ProposalID] = []wire.GovernanceVote{}
+	s.emitEventWithEmitterLocked(wire.EventGovProposalCreated, map[string]any{
+		"proposal_id": proposal.ProposalID,
+		"action":      req.Action,
+	}, proposer, "", "", s.currentHeightLocked(), "governance")
 	return nil
 }
 
@@ -1366,6 +1414,11 @@ func (s *Store) applyGovernanceCastVoteLocked(payload governanceCastVoteTxPayloa
 		s.data.GovernanceProposals[req.ProposalID] = proposal
 	}
 
+	s.emitEventWithEmitterLocked(wire.EventGovVoteCast, map[string]any{
+		"proposal_id": req.ProposalID,
+		"approve":     req.Approve,
+		"executed":    executed,
+	}, voter, "", "", s.currentHeightLocked(), "governance")
 	return nil
 }
 

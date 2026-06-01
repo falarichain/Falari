@@ -610,3 +610,91 @@ func SignUndelegateStake(req *UndelegateStakeRequest, priv *ecdsa.PrivateKey) er
 func VerifyUndelegateStake(req UndelegateStakeRequest) error {
 	return verifyRequestSig(req.Delegator, req.Signature, func() ([]byte, error) { return UndelegateStakeHash(req) })
 }
+
+// --- GenerateChallenge ---
+
+type generateChallengeSigningPayload struct {
+	ChainID  string `json:"chain_id"`
+	Action   string `json:"action"`
+	IntentID string `json:"intent_id"`
+	Count    int    `json:"count"`
+	User     string `json:"user"`
+	Nonce    uint64 `json:"nonce"`
+}
+
+func GenerateChallengeHash(req GenerateChallengeRequest) ([]byte, error) {
+	p, err := json.Marshal(generateChallengeSigningPayload{
+		ChainID:  req.ChainID,
+		Action:   "generate_challenge",
+		IntentID: req.IntentID,
+		Count:    req.Count,
+		User:     NormalizeAddress(req.User),
+		Nonce:    req.Nonce,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ethcrypto.Keccak256(p), nil
+}
+
+func SignGenerateChallenge(req *GenerateChallengeRequest, priv *ecdsa.PrivateKey) error {
+	if req.User == "" {
+		req.User = AccountAddress(&priv.PublicKey)
+	}
+	sig, pub, err := signRequest(func() ([]byte, error) { return GenerateChallengeHash(*req) }, priv)
+	if err != nil {
+		return err
+	}
+	req.Signature = sig
+	req.PublicKey = pub
+	return nil
+}
+
+func VerifyGenerateChallenge(req GenerateChallengeRequest) error {
+	return verifyRequestSig(req.User, req.Signature, func() ([]byte, error) { return GenerateChallengeHash(req) })
+}
+
+// --- CreateRepair ---
+
+type createRepairSigningPayload struct {
+	ChainID           string   `json:"chain_id"`
+	Action            string   `json:"action"`
+	IntentID          string   `json:"intent_id"`
+	UnavailableMiners []string `json:"unavailable_miners,omitempty"`
+	IncludeMissing    bool     `json:"include_missing"`
+	User              string   `json:"user"`
+	Nonce             uint64   `json:"nonce"`
+}
+
+func CreateRepairHash(req CreateRepairRequest) ([]byte, error) {
+	p, err := json.Marshal(createRepairSigningPayload{
+		ChainID:           req.ChainID,
+		Action:            "create_repair",
+		IntentID:          req.IntentID,
+		UnavailableMiners: req.UnavailableMiners,
+		IncludeMissing:    req.IncludeMissing,
+		User:              NormalizeAddress(req.User),
+		Nonce:             req.Nonce,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ethcrypto.Keccak256(p), nil
+}
+
+func SignCreateRepair(req *CreateRepairRequest, priv *ecdsa.PrivateKey) error {
+	if req.User == "" {
+		req.User = AccountAddress(&priv.PublicKey)
+	}
+	sig, pub, err := signRequest(func() ([]byte, error) { return CreateRepairHash(*req) }, priv)
+	if err != nil {
+		return err
+	}
+	req.Signature = sig
+	req.PublicKey = pub
+	return nil
+}
+
+func VerifyCreateRepair(req CreateRepairRequest) error {
+	return verifyRequestSig(req.User, req.Signature, func() ([]byte, error) { return CreateRepairHash(req) })
+}

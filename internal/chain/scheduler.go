@@ -46,6 +46,7 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 			s.expireMinerBonusesLocked()
 			s.finalizeExitingValidatorsLocked()
 			s.finalizeExitingMinersLocked()
+			s.expireUnreachableProposalsLocked()
 			// NOTE: token release is deterministic from block production/acceptance.
 			// Vested mining rewards move to balance only when miners claim them.
 			s.mu.Unlock()

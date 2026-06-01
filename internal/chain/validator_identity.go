@@ -61,6 +61,28 @@ func (o *OperatorIdentity) OperatorPublicKeyHex() string {
 	return wire.EncodeHex(ethcrypto.CompressPubkey(o.OperatorPublicKey))
 }
 
+// operatorIdentityAddress returns the operator address of the local node.
+// Safe for concurrent use.
+func (s *Store) operatorIdentityAddress() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.operatorIdentity == nil {
+		return ""
+	}
+	return s.operatorIdentity.OperatorAddress
+}
+
+// operatorPublicKeyHex returns the hex-encoded compressed operator public key.
+// Safe for concurrent use.
+func (s *Store) operatorPublicKeyHex() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.operatorIdentity == nil {
+		return ""
+	}
+	return s.operatorIdentity.OperatorPublicKeyHex()
+}
+
 func (o *OperatorIdentity) RegistrationRequest(chainID string, nonce uint64, endpoint string, stake uint64, commissionRateBPS uint64) (wire.RegisterValidatorRequest, error) {
 	req := wire.RegisterValidatorRequest{
 		OwnerAddress:      o.OwnerAddress,

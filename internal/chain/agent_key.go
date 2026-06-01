@@ -1,6 +1,7 @@
 package chain
 
 import (
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -299,10 +300,15 @@ func (s *Store) validateAgentKeyTxLocked(tx wire.Transaction) error {
 }
 
 func agentKeyID(master string, nonce uint64) string {
+	// Include 8 bytes of cryptographic randomness so key IDs cannot be
+	// predicted from master address + nonce alone.
+	var randBuf [8]byte
+	_, _ = crand.Read(randBuf[:])
 	payload, _ := json.Marshal(struct {
 		Master string `json:"master"`
 		Nonce  uint64 `json:"nonce"`
-	}{Master: wire.NormalizeAddress(master), Nonce: nonce})
+		Rand   []byte `json:"rand"`
+	}{Master: wire.NormalizeAddress(master), Nonce: nonce, Rand: randBuf[:]})
 	hash := sha256.Sum256(payload)
 	return "key_" + base64.RawURLEncoding.EncodeToString(hash[:12])
 }

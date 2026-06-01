@@ -81,6 +81,28 @@ func (s *Store) consumeAgentRequestLocked(keyID string, spend uint64) error {
 	return nil
 }
 
+// replayAgentKeyMutationLocked applies the agent key state mutation (nonce
+// increment + usage counters) without any validation. Used during block
+// replay to keep agent key state consistent with the original execution.
+func (s *Store) replayAgentKeyMutationLocked(keyID string, spend uint64) {
+	key, ok := s.data.AgentKeys[keyID]
+	if !ok {
+		return // agent key may have been revoked; skip silently
+	}
+	key.Nonce++
+	// Saturating addition to prevent uint64 overflow.
+	if key.UsedToday > ^uint64(0)-spend {
+		key.UsedToday = ^uint64(0)
+	} else {
+		key.UsedToday += spend
+	}
+	if key.UsedTotal > ^uint64(0)-spend {
+		key.UsedTotal = ^uint64(0)
+	} else {
+		key.UsedTotal += spend
+	}
+}
+
 func agentLimitExceeded(used uint64, spend uint64, limit uint64) bool {
 	if limit == 0 {
 		return false
@@ -119,6 +141,10 @@ func agentPermissionAliases(operation string) []string {
 		return []string{"governance_action"}
 	case "direct_action_review_vote":
 		return []string{"governance_review"}
+	case "deploy_contract":
+		return []string{"wasm_deploy"}
+	case "call_contract":
+		return []string{"wasm_call"}
 	default:
 		return nil
 	}

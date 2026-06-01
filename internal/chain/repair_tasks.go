@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"chain/internal/wire"
@@ -26,6 +27,23 @@ func (s *Store) CreateRepairTasks(req wire.CreateRepairRequest) (wire.CreateRepa
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Verify requester signature and intent ownership.
+	if req.Signature != "" {
+		intent, ok := s.data.Intents[req.IntentID]
+		if !ok {
+			return wire.CreateRepairResponse{}, errors.New("intent not found")
+		}
+		if err := s.verifyAccountRequestLocked(req.ChainID, req.User, req.Nonce, func() error {
+			return wire.VerifyCreateRepair(req)
+		}); err != nil {
+			return wire.CreateRepairResponse{}, err
+		}
+		if !strings.EqualFold(intent.User, req.User) {
+			return wire.CreateRepairResponse{}, errors.New("only the intent owner can create repair tasks")
+		}
+		s.consumeAccountNonceLocked(wire.NormalizeAddress(req.User))
+	}
 
 	tasks, err := s.buildRepairTasksLocked(req)
 	if err != nil {

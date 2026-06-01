@@ -179,6 +179,10 @@ func (s *Store) UndelegateStake(req wire.UndelegateStakeRequest) (wire.Undelegat
 	if err := s.saveLocked(); err != nil {
 		return wire.UndelegateStakeResponse{}, err
 	}
+	s.emitEventWithEmitterLocked(wire.EventUndelegateStake, map[string]any{
+		"released":  released,
+		"delegated": existing.Amount,
+	}, req.Delegator, "", req.Validator, s.currentHeightLocked(), "staking")
 	return wire.UndelegateStakeResponse{
 		Delegator:      req.Delegator,
 		Validator:      req.Validator,
@@ -229,6 +233,10 @@ func (s *Store) applyDelegateStakeLocked(payload delegateStakeTxPayload) error {
 	}
 	s.data.Validators[req.Validator] = validator
 	s.syncMinerDelegatorCountLocked(req.Validator, validator.DelegatorCount)
+	s.emitEventWithEmitterLocked(wire.EventDelegateStake, map[string]any{
+		"amount":     req.Amount,
+		"delegated":  existing.Amount,
+	}, req.Delegator, "", req.Validator, s.currentHeightLocked(), "staking")
 	return nil
 }
 
@@ -288,6 +296,10 @@ func (s *Store) applyUndelegateStakeLocked(payload undelegateStakeTxPayload) err
 	}
 	s.data.Validators[req.Validator] = validator
 	s.syncMinerDelegatorCountLocked(req.Validator, validator.DelegatorCount)
+	s.emitEventWithEmitterLocked(wire.EventUndelegateStake, map[string]any{
+		"amount":     req.Amount,
+		"delegated":  existing.Amount,
+	}, req.Delegator, "", req.Validator, s.currentHeightLocked(), "staking")
 	return nil
 }
 

@@ -3,6 +3,7 @@ package config
 // HTTPConfig holds HTTP server and middleware settings shared by all node types.
 type HTTPConfig struct {
 	Addr           string   `yaml:"addr"`
+	GovernanceAddr string   `yaml:"governance_addr"` // separate governance listener; empty = all routes on Addr
 	CORSOrigins    []string `yaml:"cors_origins"`
 	RateLimitRPS   float64  `yaml:"rate_limit_rps"`
 	RateLimitBurst int      `yaml:"rate_limit_burst"`
