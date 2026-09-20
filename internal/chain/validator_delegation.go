@@ -364,7 +364,8 @@ func (s *Store) ListUnbonding(delegator string) []wire.UnbondingEntry {
 }
 
 // processMaturedUnbondingEntriesLocked moves matured unbonding entries from
-// UnbondingBalance to Balance. Called during epoch rotation.
+// UnbondingBalance to Balance. Part of the per-block housekeeping in
+// runBlockHousekeepingLocked, so producer and replaying nodes credit at the same height.
 func (s *Store) processMaturedUnbondingEntriesLocked() {
 	now := s.consensusTimeLocked()
 	for id, entry := range s.data.UnbondingEntries {

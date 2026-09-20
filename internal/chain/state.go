@@ -1738,6 +1738,17 @@ func (s *Store) FinalizeEpoch(req wire.FinalizeEpochRequest) (wire.FinalizeEpoch
 	return resp, nil
 }
 
+// epochMinerExitDeadline is the one auto-exit clock for a miner whose stake is depleted
+// at finalization. The recording path used to read wall-clock time while replay derived
+// it from the epoch deadline, so one block produced two different StateRoots.
+func epochMinerExitDeadline(epoch wire.ProofEpoch) int64 {
+	base := epoch.DeadlineUnix
+	if base == 0 {
+		base = epoch.StartedAtUnix
+	}
+	return base + wire.UnbondingPeriodSeconds
+}
+
 func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.FinalizeEpochRequest) wire.FinalizeEpochResponse {
 	accepted := 0
 	missed := 0
@@ -1792,7 +1803,7 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.Fina
 		// Auto-exit: bonus and stake both depleted.
 		if account.LockedBonus == 0 && account.LockedStake == 0 && actualSlash > 0 {
 			stats.Status = wire.MinerStatusExiting
-			stats.ExitedAtUnix = time.Now().Add(7 * 24 * time.Hour).Unix()
+			stats.ExitedAtUnix = epochMinerExitDeadline(epoch)
 			s.emitEventWithEmitterLocked(wire.EventMinerExiting, map[string]any{
 				"reason": "stake_depleted",
 			}, challenge.MinerAddress, "", "", s.currentHeightLocked(), "system")
@@ -1888,12 +1899,25 @@ func (s *Store) FinalizeExpiredEpochs() ([]wire.FinalizeEpochResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now().Unix()
-	var responses []wire.FinalizeEpochResponse
+	now := s.consensusTimeLocked()
+	var expired []wire.ProofEpoch
 	for _, epoch := range s.data.Epochs {
 		if epoch.Status == "finalized" || epoch.DeadlineUnix > now {
 			continue
 		}
+		expired = append(expired, epoch)
+	}
+	// Each finalize consumes the next operator nonce, so map order would let the producer
+	// settle the same set of epochs in an order no peer can reproduce.
+	sort.Slice(expired, func(i, j int) bool {
+		if expired[i].EpochRound != expired[j].EpochRound {
+			return expired[i].EpochRound < expired[j].EpochRound
+		}
+		return expired[i].EpochID < expired[j].EpochID
+	})
+
+	var responses []wire.FinalizeEpochResponse
+	for _, epoch := range expired {
 		req := wire.FinalizeEpochRequest{EpochID: epoch.EpochID}
 		if _, err := s.authorizeFinalizeEpochLocked(&req); err != nil {
 			// Without an authorized operator identity the recorded transaction could not be
@@ -1915,9 +1939,6 @@ func (s *Store) MinerStats(minerAddress string) (wire.MinerStats, error) {
 	minerAddress = wire.NormalizeAddress(minerAddress)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.expireInactiveMinersLocked()
-	s.expireMinerBonusesLocked()
-	s.finalizeExitingMinersLocked()
 	stats, ok := s.data.Miners[minerAddress]
 	if !ok {
 		return wire.MinerStats{MinerAddress: minerAddress}, nil
@@ -2511,8 +2532,22 @@ func (s *Store) DeregisterValidator(req wire.DeregisterValidatorRequest) error {
 	return s.saveLocked()
 }
 
+// runBlockHousekeepingLocked applies the miner and validator status transitions that feed
+// the StateRoot. It must run once per block, on every node, inside the pinned block clock:
+// these functions rewrite Accounts, Miners and Validators, so a wall-clock, scheduler-tick
+// or read-API trigger leaves nodes with different roots at the same height.
+func (s *Store) runBlockHousekeepingLocked() {
+	s.expireInactiveMinersLocked()
+	s.expireMinerBonusesLocked()
+	s.finalizeExitingValidatorsLocked()
+	s.finalizeExitingMinersLocked()
+	// Runs after the exits above so unbonding entries created in this block cannot mature
+	// in the same block, and on both sides of the block so the credited balances agree.
+	s.processMaturedUnbondingEntriesLocked()
+}
+
 func (s *Store) finalizeExitingValidatorsLocked() {
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	for address, validator := range s.data.Validators {
 		switch validator.Status {
 		case wire.ValidatorStatusSlashed:
@@ -2555,10 +2590,9 @@ func (s *Store) finalizeExitingValidatorsLocked() {
 }
 
 // finalizeExitingMinersLocked transitions miners from exiting to exited once
-// their ExitedAtUnix deadline has passed. Called alongside
-// finalizeExitingValidatorsLocked in the epoch scheduler and on miner queries.
+// their ExitedAtUnix deadline has passed. Part of runBlockHousekeepingLocked.
 func (s *Store) finalizeExitingMinersLocked() {
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	for address, stats := range s.data.Miners {
 		if stats.Status == wire.MinerStatusExiting && stats.ExitedAtUnix > 0 && now >= stats.ExitedAtUnix {
 			stats.Status = wire.MinerStatusExited
@@ -2614,14 +2648,13 @@ func (s *Store) finalizeExitingMinersLocked() {
 
 // expireInactiveMinersLocked cancels registration bonuses and initiates exit
 // for miners who failed to submit any valid storage proof within the activation
-// window. Called from the scheduler, Status, and MinerStats alongside the
-// other cleanup functions.
+// window. Part of runBlockHousekeepingLocked.
 func (s *Store) expireInactiveMinersLocked() {
 	params := s.miningParamsLocked()
 	if params.ActivationWindowSeconds == 0 {
 		return
 	}
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	for address, stats := range s.data.Miners {
 		// Only target active or degraded miners.
 		if stats.Status != wire.MinerStatusActive && stats.Status != wire.MinerStatusDegraded {
@@ -2666,14 +2699,13 @@ func (s *Store) expireInactiveMinersLocked() {
 
 // expireMinerBonusesLocked batch-expires registration bonuses for miners whose
 // 90-day deadline has passed. This catches miners who stopped submitting proofs
-// before meeting the release conditions. Called from the scheduler, Status, and
-// MinerStats alongside finalizeExitingMinersLocked.
+// before meeting the release conditions. Part of runBlockHousekeepingLocked.
 func (s *Store) expireMinerBonusesLocked() {
 	params := s.miningParamsLocked()
 	if params.BonusDeadlineSeconds == 0 {
 		return
 	}
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	for address, stats := range s.data.Miners {
 		if stats.BonusReleased || stats.BonusExpired {
 			continue
@@ -2718,7 +2750,6 @@ func (s *Store) Validators() wire.ListValidatorsResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.finalizeExitingValidatorsLocked()
 	validators := make([]wire.ValidatorInfo, 0, len(s.data.Validators))
 	for _, validator := range s.data.Validators {
 		validator.Consensus = s.data.ConsensusValidators[validator.OwnerAddress]

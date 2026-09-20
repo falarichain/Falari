@@ -91,8 +91,8 @@ func (s *Store) RegisterAgentKey(req wire.RegisterAgentKeyRequest) (wire.Registe
 	s.consumeAccountNonceLocked(master)
 
 	keyID := agentKeyID(master, nonce)
-	now := time.Now().Unix()
-	dayStart := startOfNextDay()
+	now := s.consensusTimeLocked()
+	dayStart := startOfNextDayAt(now)
 
 	key := wire.AgentKey{
 		KeyID:       keyID,
@@ -263,7 +263,7 @@ func (s *Store) validateAgentKeyTxLocked(tx wire.Transaction) error {
 	if key.Revoked {
 		return errors.New("agent key has been revoked")
 	}
-	if key.ExpiresAt > 0 && time.Now().Unix() > key.ExpiresAt {
+	if key.ExpiresAt > 0 && s.consensusTimeLocked() > key.ExpiresAt {
 		return errors.New("agent key expired")
 	}
 
@@ -271,10 +271,10 @@ func (s *Store) validateAgentKeyTxLocked(tx wire.Transaction) error {
 		return errors.New("agent key lacks permission: " + tx.Type)
 	}
 
-	nowUnix := time.Now().Unix()
+	nowUnix := s.consensusTimeLocked()
 	if nowUnix > key.DayResetAt {
 		key.UsedToday = 0
-		key.DayResetAt = startOfNextDay()
+		key.DayResetAt = startOfNextDayAt(nowUnix)
 	}
 
 	if key.DailyLimit > 0 && key.UsedToday+tx.Fee > key.DailyLimit {
@@ -518,7 +518,9 @@ func validateAgentKeyMatchesRequest(key wire.AgentKey, req wire.RegisterAgentKey
 	return nil
 }
 
-func startOfNextDay() int64 {
-	now := time.Now().UTC()
+// startOfNextDayAt is the UTC day boundary following base, so the daily quota window is
+// derived from the block clock rather than each node's own wall clock.
+func startOfNextDayAt(base int64) int64 {
+	now := time.Unix(base, 0).UTC()
 	return time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC).Unix()
 }

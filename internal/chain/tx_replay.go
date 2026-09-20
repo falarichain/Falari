@@ -88,6 +88,7 @@ func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
 		return err
 	}
 	s.blockLogIndex = 0
+	s.runBlockHousekeepingLocked()
 	for _, tx := range block.Transactions {
 		if s.data.ConfirmedTxs[tx.TxID] {
 			return restoreBlock(errors.New("block contains already confirmed transaction"))
@@ -1776,11 +1777,7 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 		// Auto-exit: bonus and stake both depleted.
 		if account.LockedBonus == 0 && account.LockedStake == 0 && actualSlash > 0 {
 			stats.Status = wire.MinerStatusExiting
-			exitBase := epoch.DeadlineUnix
-			if exitBase == 0 {
-				exitBase = epoch.StartedAtUnix
-			}
-			stats.ExitedAtUnix = exitBase + 7*24*60*60
+			stats.ExitedAtUnix = epochMinerExitDeadline(epoch)
 		}
 		s.data.Accounts[account.Address] = account
 		s.data.Miners[challenge.MinerAddress] = stats

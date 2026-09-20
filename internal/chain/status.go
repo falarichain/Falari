@@ -11,10 +11,6 @@ func (s *Store) Status() wire.ChainStatusResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.expireInactiveMinersLocked()
-	s.expireMinerBonusesLocked()
-	s.finalizeExitingMinersLocked()
-
 	resp := wire.ChainStatusResponse{
 		ChainID:             s.data.ChainID,
 		Status:              "ok",

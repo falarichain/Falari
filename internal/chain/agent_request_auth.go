@@ -3,7 +3,6 @@ package chain
 import (
 	"errors"
 	"slices"
-	"time"
 
 	"chain/internal/wire"
 )
@@ -22,7 +21,7 @@ func (s *Store) verifyAgentRequestLocked(chainID string, keyID string, agentNonc
 	if key.Revoked {
 		return errors.New("agent key has been revoked")
 	}
-	if key.ExpiresAt > 0 && time.Now().Unix() > key.ExpiresAt {
+	if key.ExpiresAt > 0 && s.consensusTimeLocked() > key.ExpiresAt {
 		return errors.New("agent key expired")
 	}
 	if !sameAddress(key.Master, master) {
@@ -38,7 +37,7 @@ func (s *Store) verifyAgentRequestLocked(chainID string, keyID string, agentNonc
 		return err
 	}
 	usedToday := key.UsedToday
-	if time.Now().Unix() > key.DayResetAt {
+	if s.consensusTimeLocked() > key.DayResetAt {
 		usedToday = 0
 	}
 	if agentLimitExceeded(usedToday, spend, key.DailyLimit) {
@@ -55,17 +54,32 @@ func (s *Store) consumeAgentRequestLocked(keyID string, spend uint64) error {
 	if !ok {
 		return errors.New("agent key not found")
 	}
-	nowUnix := time.Now().Unix()
-	if nowUnix > key.DayResetAt {
-		key.UsedToday = 0
-		key.DayResetAt = startOfNextDay()
-	}
+	nowUnix := s.consensusTimeLocked()
+	rolloverAgentKeyDayLocked(key, nowUnix)
 	if agentLimitExceeded(key.UsedToday, spend, key.DailyLimit) {
 		return errors.New("agent key daily limit exceeded")
 	}
 	if agentLimitExceeded(key.UsedTotal, spend, key.TotalLimit) {
 		return errors.New("agent key total limit exceeded")
 	}
+	applyAgentKeyUsageLocked(key, s.consensusTimeLocked(), spend)
+	return nil
+}
+
+// rolloverAgentKeyDayLocked resets the daily counter once the block clock crosses the
+// UTC day boundary the counter was opened for.
+func rolloverAgentKeyDayLocked(key *wire.AgentKey, blockTime int64) {
+	if blockTime > key.DayResetAt {
+		key.UsedToday = 0
+		key.DayResetAt = startOfNextDayAt(blockTime)
+	}
+}
+
+// applyAgentKeyUsageLocked advances one request worth of agent key counters. The UTC day
+// rollover belongs here rather than at the call sites so the producing node and the
+// replaying peers derive the same UsedToday/DayResetAt from the same block clock.
+func applyAgentKeyUsageLocked(key *wire.AgentKey, blockTime int64, spend uint64) {
+	rolloverAgentKeyDayLocked(key, blockTime)
 	key.Nonce++
 	// P2-H07: Saturating addition to prevent uint64 overflow on limit counters.
 	if key.UsedToday > ^uint64(0)-spend {
@@ -78,7 +92,6 @@ func (s *Store) consumeAgentRequestLocked(keyID string, spend uint64) error {
 	} else {
 		key.UsedTotal += spend
 	}
-	return nil
 }
 
 // replayAgentKeyMutationLocked applies the agent key state mutation (nonce
@@ -89,18 +102,7 @@ func (s *Store) replayAgentKeyMutationLocked(keyID string, spend uint64) {
 	if !ok {
 		return // agent key may have been revoked; skip silently
 	}
-	key.Nonce++
-	// Saturating addition to prevent uint64 overflow.
-	if key.UsedToday > ^uint64(0)-spend {
-		key.UsedToday = ^uint64(0)
-	} else {
-		key.UsedToday += spend
-	}
-	if key.UsedTotal > ^uint64(0)-spend {
-		key.UsedTotal = ^uint64(0)
-	} else {
-		key.UsedTotal += spend
-	}
+	applyAgentKeyUsageLocked(key, s.consensusTimeLocked(), spend)
 }
 
 func agentLimitExceeded(used uint64, spend uint64, limit uint64) bool {

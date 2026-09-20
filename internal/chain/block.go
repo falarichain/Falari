@@ -261,8 +261,6 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	if validator.OperatorPublicKey != s.operatorIdentity.OperatorPublicKeyHex() {
 		return wire.Block{}, false, nil
 	}
-	// Process matured unbonding entries each block.
-	s.processMaturedUnbondingEntriesLocked()
 	// Execute WASM cron jobs and deliver pending events before user txs.
 	// H7: Share a per-block time budget across cron and event processing.
 	blockTime := time.Now().Unix()
@@ -277,6 +275,7 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	txs := s.selectPendingTxsForBlockLocked()
 	var appliedTxs []wire.Transaction
 	s.withBlockTimeLocked(blockTime, func() {
+		s.runBlockHousekeepingLocked()
 		appliedTxs, _ = s.applyPendingTransactionsForBlockLocked(txs, s.operatorIdentity.OwnerAddress)
 	})
 	txLeaves := make([]string, 0, len(appliedTxs))
