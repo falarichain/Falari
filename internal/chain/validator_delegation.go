@@ -2,7 +2,7 @@ package chain
 
 import (
 	"errors"
-	"strconv"
+	"fmt"
 	"time"
 
 	"chain/internal/wire"
@@ -144,8 +144,11 @@ func (s *Store) UndelegateStake(req wire.UndelegateStakeRequest) (wire.Undelegat
 	s.data.Accounts[req.Delegator] = account
 
 	// Create unbonding entry with 7-day lock.
-	now := time.Now().Unix()
-	unbondingID := req.Delegator + ":" + req.Validator + ":" + strconv.FormatInt(now, 10)
+	// Include a monotonic counter in the ID to prevent collisions when
+	// multiple unbonds occur in the same second.
+	now := s.consensusTimeLocked()
+	unbondingSeq := len(s.data.UnbondingEntries)
+	unbondingID := fmt.Sprintf("%s:%s:%d:%d", req.Delegator, req.Validator, now, unbondingSeq)
 	if s.data.UnbondingEntries == nil {
 		s.data.UnbondingEntries = map[string]wire.UnbondingEntry{}
 	}
@@ -234,8 +237,8 @@ func (s *Store) applyDelegateStakeLocked(payload delegateStakeTxPayload) error {
 	s.data.Validators[req.Validator] = validator
 	s.syncMinerDelegatorCountLocked(req.Validator, validator.DelegatorCount)
 	s.emitEventWithEmitterLocked(wire.EventDelegateStake, map[string]any{
-		"amount":     req.Amount,
-		"delegated":  existing.Amount,
+		"amount":    req.Amount,
+		"delegated": existing.Amount,
 	}, req.Delegator, "", req.Validator, s.currentHeightLocked(), "staking")
 	return nil
 }
@@ -272,8 +275,9 @@ func (s *Store) applyUndelegateStakeLocked(payload undelegateStakeTxPayload) err
 	s.data.Accounts[req.Delegator] = account
 
 	// Create unbonding entry during replay.
-	now := time.Now().Unix()
-	unbondingID := req.Delegator + ":" + req.Validator + ":" + strconv.FormatInt(now, 10)
+	now := s.consensusTimeLocked()
+	unbondingSeq := len(s.data.UnbondingEntries)
+	unbondingID := fmt.Sprintf("%s:%s:%d:%d", req.Delegator, req.Validator, now, unbondingSeq)
 	if s.data.UnbondingEntries == nil {
 		s.data.UnbondingEntries = map[string]wire.UnbondingEntry{}
 	}
@@ -297,8 +301,8 @@ func (s *Store) applyUndelegateStakeLocked(payload undelegateStakeTxPayload) err
 	s.data.Validators[req.Validator] = validator
 	s.syncMinerDelegatorCountLocked(req.Validator, validator.DelegatorCount)
 	s.emitEventWithEmitterLocked(wire.EventUndelegateStake, map[string]any{
-		"amount":     req.Amount,
-		"delegated":  existing.Amount,
+		"amount":    req.Amount,
+		"delegated": existing.Amount,
 	}, req.Delegator, "", req.Validator, s.currentHeightLocked(), "staking")
 	return nil
 }
@@ -362,7 +366,7 @@ func (s *Store) ListUnbonding(delegator string) []wire.UnbondingEntry {
 // processMaturedUnbondingEntriesLocked moves matured unbonding entries from
 // UnbondingBalance to Balance. Called during epoch rotation.
 func (s *Store) processMaturedUnbondingEntriesLocked() {
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	for id, entry := range s.data.UnbondingEntries {
 		if now < entry.MaturesAtUnix {
 			continue

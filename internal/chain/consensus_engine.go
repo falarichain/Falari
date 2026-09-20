@@ -13,6 +13,13 @@ import (
 const defaultBlockTimeoutMs int64 = 5000
 const maxConsensusRounds uint64 = consensus.MaxConsensusRounds
 
+// Consensus returns the current consensus state in a thread-safe manner.
+func (s *Store) Consensus() consensus.State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.consensusLocked()
+}
+
 func (s *Store) consensusLocked() consensus.State {
 	return consensus.State{
 		Height:       s.data.ConsensusHeight,
@@ -28,7 +35,7 @@ func (s *Store) consensusLocked() consensus.State {
 func (s *Store) consensusVotingPowerLocked() uint64 {
 	var total uint64
 	for _, addr := range s.consensusValidatorAddressesLocked() {
-		total += s.validatorPowerLocked(addr)
+		total = saturatingAdd(total, s.validatorPowerLocked(addr))
 	}
 	return total
 }
@@ -48,7 +55,7 @@ func (s *Store) selectProposerLocked(height uint64, round uint64) (string, error
 	for i, addr := range validators {
 		p := s.effectivePowerLocked(addr)
 		powers[i] = p
-		totalPower += p
+		totalPower = saturatingAdd(totalPower, p)
 	}
 	if totalPower == 0 {
 		return "", errors.New("total voting power is zero")
@@ -70,7 +77,7 @@ func (s *Store) selectProposerLocked(height uint64, round uint64) (string, error
 	threshold := seed % totalPower
 	var cumulative uint64
 	for i, addr := range validators {
-		cumulative += powers[i]
+		cumulative = saturatingAdd(cumulative, powers[i])
 		if threshold < cumulative {
 			return addr, nil
 		}

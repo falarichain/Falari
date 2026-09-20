@@ -118,8 +118,10 @@ func hasAdminPermission(permissions []string) bool {
 	return false
 }
 
-// validateOperatorHeaders validates operator HTTP headers without consuming the nonce.
-// Used for epoch endpoints where nonce is consumed during block replay.
+// validateOperatorHeaders authenticates the operator headers on an epoch request. The
+// signature is bound to the request body, so the body is buffered here and restored for
+// the handler. The nonce is validated but NOT consumed: the epoch transaction carries the
+// same nonce and every node consumes it while replaying.
 // Returns the normalized operator address on success.
 func (s *Server) validateOperatorHeaders(r *http.Request) (string, error) {
 	address := r.Header.Get("X-Operator-Address")
@@ -150,6 +152,12 @@ func (s *Server) validateOperatorHeaders(r *http.Request) (string, error) {
 		return "", errors.New("invalid operator address")
 	}
 
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, maxRequestSize+1))
+	if err != nil || len(rawBody) > maxRequestSize {
+		return "", errors.New("failed to read request body")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(rawBody))
+
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 
@@ -164,7 +172,20 @@ func (s *Server) validateOperatorHeaders(r *http.Request) (string, error) {
 	if nonce != expectedNonce {
 		return "", errors.New("invalid operator nonce")
 	}
+	if err := wire.VerifyOperatorRequestSignature(
+		s.store.data.ChainID,
+		r.Method,
+		r.URL.EscapedPath(),
+		rawBody,
+		nonce,
+		timestampUnix,
+		address,
+		signature,
+	); err != nil {
+		return "", err
+	}
 
-	// NOTE: We do NOT consume the nonce here. It will be consumed during block replay.
+	// NOTE: We do NOT consume the nonce here. It is consumed by the store once the
+	// epoch transaction is recorded, and by block replay on the other nodes.
 	return address, nil
 }

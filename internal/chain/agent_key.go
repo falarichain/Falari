@@ -293,9 +293,9 @@ func (s *Store) validateAgentKeyTxLocked(tx wire.Transaction) error {
 		return errors.New("invalid agent nonce")
 	}
 
-	key.Nonce++
-	key.UsedToday += tx.Fee
-	key.UsedTotal += tx.Fee
+	// Read-only validation: do NOT mutate key state here.
+	// Nonce increment and usage counter updates are handled by
+	// consumeAgentRequestLocked during transaction application.
 	return nil
 }
 

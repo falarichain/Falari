@@ -5,7 +5,6 @@ import (
 	"errors"
 	"math"
 	"strings"
-	"time"
 
 	"chain/internal/wire"
 
@@ -46,8 +45,8 @@ func (s *Store) applyBridgeOutLocked(req wire.BridgeOutRequest) error {
 		return errors.New("bridge amount below minimum")
 	}
 
-	// Daily rate-limit check.
-	now := time.Now().Unix()
+	// Daily rate-limit check — use deterministic block time.
+	now := s.consensusTimeLocked()
 	if now-cfg.DayStartUnix >= 86400 {
 		cfg.DayStartUnix = now
 		cfg.CurrentDayAmount = 0
@@ -147,16 +146,13 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 		return errors.New("bridge is paused")
 	}
 
-	// Verify signature to authenticate the relayer.
-	if err := wire.VerifyBridgeInClaimSignature(req, s.data.ChainID); err != nil {
-		return err
-	}
-
-	// Recover signer address and verify it matches the configured relayer.
-	signerAddr, err := wire.RecoverBridgeInClaimSigner(req, s.data.ChainID)
+	// Verify signature and recover the signer address.
+	signerAddr, err := wire.VerifyBridgeInClaimSignature(req, s.data.ChainID)
 	if err != nil {
 		return err
 	}
+
+	// Verify the recovered signer matches the configured relayer.
 	if !strings.EqualFold(signerAddr, cfg.RelayerAddress) {
 		return errors.New("bridge_in_claim may only be submitted by the configured relayer")
 	}
@@ -167,6 +163,25 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 		return errors.New("bridge message already consumed")
 	}
 
+	// C5: Validate amount against bridge limits BEFORE auto-registration.
+	// Without this check, a compromised relayer could register inbound
+	// records with arbitrary amounts that always pass the self-referential
+	// consistency check below.
+	if req.Amount < cfg.MinBridgeAmount {
+		return errors.New("bridge amount below minimum")
+	}
+	now := s.consensusTimeLocked()
+	if now-cfg.DayStartUnix >= 86400 {
+		cfg.DayStartUnix = now
+		cfg.CurrentDayAmount = 0
+	}
+	if cfg.CurrentDayAmount >= cfg.MaxAmountPerDay {
+		return errors.New("bridge daily limit already reached")
+	}
+	if req.Amount > cfg.MaxAmountPerDay-cfg.CurrentDayAmount {
+		return errors.New("bridge daily limit exceeded")
+	}
+
 	// Look up the corresponding inbound record.
 	inboundKey := req.SourceTxHash
 	inbound, ok := s.data.BridgeInbounds[inboundKey]
@@ -174,7 +189,6 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 	if !ok {
 		// Build inbound record locally. The trusted relayer has already waited
 		// for the Ethereum-side burn delay and included that event in this claim.
-		now := time.Now().Unix()
 		inbound = &wire.BridgeInbound{
 			Nonce:             req.Nonce,
 			SourceTxHash:      req.SourceTxHash,
@@ -189,7 +203,6 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 	}
 
 	// Enforce delay — do NOT write state on failure (consensus safety).
-	now := time.Now().Unix()
 	if now < inbound.ClaimableAfter {
 		return errors.New("bridge claim delay has not elapsed")
 	}
@@ -238,10 +251,13 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 		ConsumedAtUnix: now,
 	}
 
+	// C5: Update daily counter for inbound transfers (shared pool limit).
+	cfg.CurrentDayAmount += req.Amount
+
 	s.emitEventWithEmitterLocked(wire.EventBridgeIn, map[string]any{
-		"amount":           inbound.Amount,
-		"source_tx_hash":   req.SourceTxHash,
-		"source_block":     req.SourceBlockNumber,
+		"amount":         inbound.Amount,
+		"source_tx_hash": req.SourceTxHash,
+		"source_block":   req.SourceBlockNumber,
 	}, recipient, "", "", s.currentHeightLocked(), "bridge")
 	return nil
 }
@@ -251,11 +267,8 @@ func (s *Store) applyBridgeInClaimLocked(req wire.BridgeInClaimRequest) error {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (s *Store) applyBridgeSetConfigLocked(req wire.BridgeSetConfigRequest) error {
-	// Verify signature from a governance operator.
-	if err := wire.VerifyBridgeSetConfigSignature(req, s.data.ChainID); err != nil {
-		return err
-	}
-	signerAddr, err := wire.RecoverBridgeSetConfigSigner(req, s.data.ChainID)
+	// Verify signature and recover the signer address.
+	signerAddr, err := wire.VerifyBridgeSetConfigSignature(req, s.data.ChainID)
 	if err != nil {
 		return err
 	}
@@ -270,7 +283,7 @@ func (s *Store) applyBridgeSetConfigLocked(req wire.BridgeSetConfigRequest) erro
 	}
 
 	// Replay protection: reject requests with timestamps outside the allowed window.
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	skew := now - req.Timestamp
 	if skew < 0 {
 		skew = -skew
@@ -316,7 +329,7 @@ func (s *Store) applyBridgeSetConfigLocked(req wire.BridgeSetConfigRequest) erro
 				BridgePoolAddress: BridgePoolAddress(),
 				DelaySeconds:      86400,
 				MaxAmountPerDay:   1_000_000_000_000, // 10000 FAL (8 decimals)
-				DayStartUnix:      time.Now().Unix(),
+				DayStartUnix:      s.consensusTimeLocked(),
 			}
 		}
 		if req.RelayerAddress != "" {

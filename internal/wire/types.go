@@ -1,6 +1,10 @@
 package wire
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"chain/internal/reward"
+)
 
 const (
 	StatusUploading = "uploading"
@@ -259,7 +263,7 @@ type ChainStatusResponse struct {
 	StorageRewardPerBlock    uint64         `json:"storage_reward_per_block,omitempty"`
 	AverageAvailabilityBPS   uint64         `json:"average_availability_bps,omitempty"`
 	ValidatorsBelowThreshold int            `json:"validators_below_threshold,omitempty"`
-	PermanentFundRemaining      uint64         `json:"repair_pool_remaining,omitempty"`
+	PermanentFundRemaining   uint64         `json:"permanent_fund_remaining,omitempty"`
 	FoundationPoolRemaining  uint64         `json:"foundation_pool_remaining,omitempty"`
 	FoundationAddress        string         `json:"foundation_address,omitempty"`
 	RetrievalAddress         string         `json:"retrieval_address,omitempty"`
@@ -687,24 +691,24 @@ type RetrievalReceiptResponse struct {
 }
 
 type UploadPlan struct {
-	IntentID          string              `json:"intent_id"`
-	User              string              `json:"user"`
-	FileName          string              `json:"file_name"`
-	FileSize          int64               `json:"file_size"`
-	SegmentSize       int64               `json:"segment_size"`
-	FileRoot          string              `json:"file_root"`
-	SegmentRoots      []string            `json:"segment_roots"`
-	Segments          []SegmentPlan       `json:"segments"`
-	RepairPools       []RepairPool        `json:"repair_pools,omitempty"`
-	Assignments       []StorageAssignment `json:"assignments,omitempty"`
-	Erasure           ErasurePolicy       `json:"erasure"`
-	Encryption        *EncryptionMetadata `json:"encryption,omitempty"`
-	Policy            StoragePolicy       `json:"policy"`
-	LockedFee         uint64              `json:"locked_fee"`
+	IntentID          string                  `json:"intent_id"`
+	User              string                  `json:"user"`
+	FileName          string                  `json:"file_name"`
+	FileSize          int64                   `json:"file_size"`
+	SegmentSize       int64                   `json:"segment_size"`
+	FileRoot          string                  `json:"file_root"`
+	SegmentRoots      []string                `json:"segment_roots"`
+	Segments          []SegmentPlan           `json:"segments"`
+	RepairPools       []RepairPool            `json:"repair_pools,omitempty"`
+	Assignments       []StorageAssignment     `json:"assignments,omitempty"`
+	Erasure           ErasurePolicy           `json:"erasure"`
+	Encryption        *EncryptionMetadata     `json:"encryption,omitempty"`
+	Policy            StoragePolicy           `json:"policy"`
+	LockedFee         uint64                  `json:"locked_fee"`
 	Receipts          []MinerReceipt          `json:"receipts"`
 	CommittedSegments []int                   `json:"committed_segments"`
 	CommittedShards   []ShardRef              `json:"committed_shards,omitempty"`
-	ProviderCache     []StorageProviderRecord  `json:"provider_cache,omitempty"`
+	ProviderCache     []StorageProviderRecord `json:"provider_cache,omitempty"`
 }
 
 type StorageManifestResponse struct {
@@ -1182,13 +1186,15 @@ const (
 	TokenSymbol          = "GF"
 	TokenUnit     uint64 = 100_000_000 // 10^8, one GF in smallest units
 
-	TokenTotalSupply           uint64 = 10_000_000_000 * TokenUnit
-	TokenMiningSupply          uint64 = 9_000_000_000 * TokenUnit
-	TokenStoragePoolInitial    uint64 = 6_000_000_000 * TokenUnit
-	TokenRetrievalPoolInitial  uint64 = 600_000_000 * TokenUnit
-	TokenValidatorPoolInitial  uint64 = 1_200_000_000 * TokenUnit
-	TokenPermanentFundPoolInitial uint64 = 1_200_000_000 * TokenUnit
-	TokenFoundationPoolInitial uint64 = 1_000_000_000 * TokenUnit
+	// Emission schedule is defined once in internal/reward; these aliases keep
+	// the API/CLI types in sync with the chain's own accounting.
+	TokenTotalSupply              uint64 = reward.TotalSupply
+	TokenStoragePoolInitial       uint64 = reward.StoragePoolInitial
+	TokenValidatorPoolInitial     uint64 = reward.ValidatorPoolInitial
+	TokenFoundationPoolInitial    uint64 = reward.FoundationPoolInitial
+	TokenRetrievalPoolInitial     uint64 = reward.RetrievalPoolInitial
+	TokenPermanentFundPoolInitial uint64 = reward.PermanentFundPoolInitial
+	TokenPermanentFundCap         uint64 = reward.PermanentFundCap
 
 	MinDelegationAmount    uint64 = 1000 * TokenUnit
 	UnbondingPeriodSeconds int64  = 7 * 86400
@@ -1198,7 +1204,7 @@ type RewardPools struct {
 	StoragePoolRemaining    uint64 `json:"storage_pool_remaining"`
 	RetrievalPoolRemaining  uint64 `json:"retrieval_pool_remaining"`
 	ValidatorPoolRemaining  uint64 `json:"validator_pool_remaining"`
-	PermanentFundRemaining     uint64 `json:"repair_pool_remaining"`
+	PermanentFundRemaining  uint64 `json:"permanent_fund_remaining"`
 	FoundationPoolRemaining uint64 `json:"foundation_pool_remaining"`
 	TokensReleased          uint64 `json:"tokens_released"`
 }
@@ -1294,8 +1300,8 @@ type AdjustCapacityRequest struct {
 }
 
 type AdjustCapacityResponse struct {
-	Miner          MinerStats `json:"miner"`
-	RefundUnbonding uint64    `json:"refund_unbonding,omitempty"`
+	Miner           MinerStats `json:"miner"`
+	RefundUnbonding uint64     `json:"refund_unbonding,omitempty"`
 }
 
 type ClaimMiningRewardsRequest struct {
@@ -1873,8 +1879,8 @@ type BlacklistEntry struct {
 	Operator      string `json:"operator"`
 	BlockedAtUnix int64  `json:"blocked_at_unix"`
 	ExpiresAtUnix int64  `json:"expires_at_unix,omitempty"`
-	ReviewStatus  string `json:"review_status,omitempty"`  // "pending_review" for direct actions
-	ActionID      string `json:"action_id,omitempty"`      // Links to DirectActionRecord
+	ReviewStatus  string `json:"review_status,omitempty"` // "pending_review" for direct actions
+	ActionID      string `json:"action_id,omitempty"`     // Links to DirectActionRecord
 }
 
 // BlacklistResponse is the chain API response for blacklist queries.
@@ -1905,57 +1911,62 @@ type GovernanceProposal struct {
 	TargetOperatorChangeThresholdNum int      `json:"target_operator_change_threshold_num,omitempty"`
 	TargetOperatorChangeThresholdDen int      `json:"target_operator_change_threshold_den,omitempty"`
 	// ── Target mining params (for update_mining_params action) ──
-	TargetStorageReleaseRateBPS       uint64 `json:"target_storage_release_rate_bps,omitempty"`
-	TargetRetrievalReleaseRateBPS     uint64 `json:"target_retrieval_release_rate_bps,omitempty"`
-	TargetStoredBytesWeightBPS        uint64 `json:"target_stored_bytes_weight_bps,omitempty"`
-	TargetProofScoreWeightBPS         uint64 `json:"target_proof_score_weight_bps,omitempty"`
-	TargetAvailabilityWeightBPS       uint64 `json:"target_availability_weight_bps,omitempty"`
-	TargetRetrievalSpeedWeightBPS     uint64 `json:"target_retrieval_speed_weight_bps,omitempty"`
-	TargetIPDispersionWeightBPS       uint64 `json:"target_ip_dispersion_weight_bps,omitempty"`
-	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
-	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
+	TargetStorageReleaseRateBPS        uint64 `json:"target_storage_release_rate_bps,omitempty"`
+	TargetRetrievalReleaseRateBPS      uint64 `json:"target_retrieval_release_rate_bps,omitempty"`
+	TargetStoredBytesWeightBPS         uint64 `json:"target_stored_bytes_weight_bps,omitempty"`
+	TargetProofScoreWeightBPS          uint64 `json:"target_proof_score_weight_bps,omitempty"`
+	TargetAvailabilityWeightBPS        uint64 `json:"target_availability_weight_bps,omitempty"`
+	TargetRetrievalSpeedWeightBPS      uint64 `json:"target_retrieval_speed_weight_bps,omitempty"`
+	TargetIPDispersionWeightBPS        uint64 `json:"target_ip_dispersion_weight_bps,omitempty"`
+	TargetRetrievalRewardPerMiB        uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
+	TargetMaxRetrievalRewardPerWindow  uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
 	TargetPermanentFundTakeoverSeconds int64  `json:"target_repair_pool_takeover_seconds,omitempty"`
-	TargetMinerDegradeThreshold       uint64 `json:"target_miner_degrade_threshold,omitempty"`
-	TargetStorageProofSamples         int    `json:"target_storage_proof_samples,omitempty"`
-	TargetValidatorCommissionBPS      uint64 `json:"target_validator_commission_bps,omitempty"`
-	TargetRetrievalWeightBPS          uint64 `json:"target_retrieval_weight_bps,omitempty"`
-	TargetFoundationReleaseRateBPS    uint64 `json:"target_foundation_release_rate_bps,omitempty"`
-	TargetFoundationAddress           string `json:"target_foundation_address,omitempty"`
-	TargetRetrievalAddress            string `json:"target_retrieval_address,omitempty"`
-	TargetStorageRewardPerBlock       uint64 `json:"target_storage_reward_per_block,omitempty"`
-	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`     // deprecated
-	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`    // deprecated
-	TargetRetrievalRewardPerBlock     uint64 `json:"target_retrieval_reward_per_block,omitempty"`
-	TargetFoundationRewardPerBlock    uint64 `json:"target_foundation_reward_per_block,omitempty"`
-	TargetAvailabilityWindowSize      uint64 `json:"target_availability_window_size,omitempty"`
-	TargetAvailabilityThresholdBPS    uint64 `json:"target_availability_threshold_bps,omitempty"`
-	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
-	TargetValidatorRewardPerBlock     uint64 `json:"target_validator_reward_per_block,omitempty"`
-	TargetMaxConsensusValidators      uint64 `json:"target_max_consensus_validators,omitempty"`
-	TargetMinConsensusValidators      uint64 `json:"target_min_consensus_validators,omitempty"`
-	TargetBlockBytes                  uint64 `json:"target_block_bytes,omitempty"`
-	TargetMaxBlockBytes               uint64 `json:"target_max_block_bytes,omitempty"`
-	TargetMaxBlockTxs                 uint64 `json:"target_max_block_txs,omitempty"`
-	TargetMaxTxBytes                  uint64 `json:"target_max_tx_bytes,omitempty"`
-	TargetMaxStorageTxBytes           uint64 `json:"target_max_storage_tx_bytes,omitempty"`
-	TargetRegistrationBonusAmount     uint64 `json:"target_registration_bonus_amount,omitempty"`
-	TargetMinBonusProofCount          uint64 `json:"target_min_bonus_proof_count,omitempty"`
-	TargetMinBonusSuccessRateBPS      uint64 `json:"target_min_bonus_success_rate_bps,omitempty"`
-	TargetMinBonusRetrievalCount      uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
-	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
-	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
-	TargetActivationWindowSeconds     uint64 `json:"target_activation_window_seconds,omitempty"`
-	TargetFeeMarketBaseFee            uint64 `json:"target_fee_market_base_fee,omitempty"`
-	TargetFeeMarketTargetBlockTxs     int    `json:"target_fee_market_target_block_txs,omitempty"`
-	TargetFeeMultiplierBridgeOut      uint64 `json:"target_fee_multiplier_bridge_out,omitempty"`
-	TargetFeeMultiplierCreateIntent   uint64 `json:"target_fee_multiplier_create_intent,omitempty"`
-	TargetFeeMultiplierUploadNFT      uint64 `json:"target_fee_multiplier_upload_nft_template,omitempty"`
-	TargetFeeMultiplierRegisterVal    uint64 `json:"target_fee_multiplier_register_validator,omitempty"`
-	TargetFeeMultiplierBatchCommit    uint64 `json:"target_fee_multiplier_batch_commit,omitempty"`
-	ChainID                           string `json:"chain_id"`
-	ProposerNonce                     uint64 `json:"proposer_nonce"`
-	Status                            string `json:"status"`
-	CreatedAtUnix                     int64  `json:"created_at_unix"`
+	TargetMinerDegradeThreshold        uint64 `json:"target_miner_degrade_threshold,omitempty"`
+	TargetStorageProofSamples          int    `json:"target_storage_proof_samples,omitempty"`
+	TargetValidatorCommissionBPS       uint64 `json:"target_validator_commission_bps,omitempty"`
+	TargetRetrievalWeightBPS           uint64 `json:"target_retrieval_weight_bps,omitempty"`
+	TargetFoundationReleaseRateBPS     uint64 `json:"target_foundation_release_rate_bps,omitempty"`
+	TargetFoundationAddress            string `json:"target_foundation_address,omitempty"`
+	TargetRetrievalAddress             string `json:"target_retrieval_address,omitempty"`
+	TargetStorageRewardPerBlock        uint64 `json:"target_storage_reward_per_block,omitempty"`
+	TargetRetrievalAnnualRateBPS       uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`  // deprecated
+	TargetFoundationAnnualRateBPS      uint64 `json:"target_foundation_annual_rate_bps,omitempty"` // deprecated
+	TargetRetrievalRewardPerBlock      uint64 `json:"target_retrieval_reward_per_block,omitempty"`
+	TargetFoundationRewardPerBlock     uint64 `json:"target_foundation_reward_per_block,omitempty"`
+	TargetAvailabilityWindowSize       uint64 `json:"target_availability_window_size,omitempty"`
+	TargetAvailabilityThresholdBPS     uint64 `json:"target_availability_threshold_bps,omitempty"`
+	TargetBlockProductionRewardBPS     uint64 `json:"target_block_production_reward_bps,omitempty"`
+	TargetValidatorRewardPerBlock      uint64 `json:"target_validator_reward_per_block,omitempty"`
+	TargetPermanentFundInjectionBPS    uint64 `json:"target_permanent_fund_injection_bps,omitempty"`
+	TargetMaxConsensusValidators       uint64 `json:"target_max_consensus_validators,omitempty"`
+	TargetMinConsensusValidators       uint64 `json:"target_min_consensus_validators,omitempty"`
+	TargetBlockBytes                   uint64 `json:"target_block_bytes,omitempty"`
+	TargetMaxBlockBytes                uint64 `json:"target_max_block_bytes,omitempty"`
+	TargetMaxBlockTxs                  uint64 `json:"target_max_block_txs,omitempty"`
+	TargetMaxTxBytes                   uint64 `json:"target_max_tx_bytes,omitempty"`
+	TargetMaxStorageTxBytes            uint64 `json:"target_max_storage_tx_bytes,omitempty"`
+	TargetRegistrationBonusAmount      uint64 `json:"target_registration_bonus_amount,omitempty"`
+	TargetMinBonusProofCount           uint64 `json:"target_min_bonus_proof_count,omitempty"`
+	TargetMinBonusSuccessRateBPS       uint64 `json:"target_min_bonus_success_rate_bps,omitempty"`
+	TargetMinBonusRetrievalCount       uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
+	TargetMaxBonusAddresses            uint64 `json:"target_max_bonus_addresses,omitempty"`
+	TargetBonusDeadlineSeconds         uint64 `json:"target_bonus_deadline_seconds,omitempty"`
+	TargetActivationWindowSeconds      uint64 `json:"target_activation_window_seconds,omitempty"`
+	TargetFeeMarketBaseFee             uint64 `json:"target_fee_market_base_fee,omitempty"`
+	TargetFeeMarketTargetBlockTxs      int    `json:"target_fee_market_target_block_txs,omitempty"`
+	TargetFeeMultiplierBridgeOut       uint64 `json:"target_fee_multiplier_bridge_out,omitempty"`
+	TargetFeeMultiplierCreateIntent    uint64 `json:"target_fee_multiplier_create_intent,omitempty"`
+	TargetFeeMultiplierUploadNFT       uint64 `json:"target_fee_multiplier_upload_nft_template,omitempty"`
+	TargetFeeMultiplierRegisterVal     uint64 `json:"target_fee_multiplier_register_validator,omitempty"`
+	TargetFeeMultiplierBatchCommit     uint64 `json:"target_fee_multiplier_batch_commit,omitempty"`
+	ChainID                            string `json:"chain_id"`
+	ProposerNonce                      uint64 `json:"proposer_nonce"`
+	Status                             string `json:"status"`
+	CreatedAtUnix                      int64  `json:"created_at_unix"`
+	// EnabledOperatorsSnapshot captures the set of enabled operators at proposal
+	// creation time. This prevents later operator disablements from invalidating
+	// already-cast votes or altering the threshold calculation.
+	EnabledOperatorsSnapshot []string `json:"enabled_operators_snapshot,omitempty"`
 }
 
 // GovernanceVote is a signed vote on a governance proposal.
@@ -1985,56 +1996,60 @@ type CreateGovernanceProposalRequest struct {
 	TargetOperatorChangeThresholdNum int      `json:"target_operator_change_threshold_num,omitempty"`
 	TargetOperatorChangeThresholdDen int      `json:"target_operator_change_threshold_den,omitempty"`
 	// ── Target mining params (for update_mining_params action) ──
-	TargetStorageReleaseRateBPS       uint64 `json:"target_storage_release_rate_bps,omitempty"`
-	TargetRetrievalReleaseRateBPS     uint64 `json:"target_retrieval_release_rate_bps,omitempty"`
-	TargetStoredBytesWeightBPS        uint64 `json:"target_stored_bytes_weight_bps,omitempty"`
-	TargetProofScoreWeightBPS         uint64 `json:"target_proof_score_weight_bps,omitempty"`
-	TargetAvailabilityWeightBPS       uint64 `json:"target_availability_weight_bps,omitempty"`
-	TargetRetrievalSpeedWeightBPS     uint64 `json:"target_retrieval_speed_weight_bps,omitempty"`
-	TargetIPDispersionWeightBPS       uint64 `json:"target_ip_dispersion_weight_bps,omitempty"`
-	TargetRetrievalRewardPerMiB       uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
-	TargetMaxRetrievalRewardPerWindow uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
+	TargetStorageReleaseRateBPS        uint64 `json:"target_storage_release_rate_bps,omitempty"`
+	TargetRetrievalReleaseRateBPS      uint64 `json:"target_retrieval_release_rate_bps,omitempty"`
+	TargetStoredBytesWeightBPS         uint64 `json:"target_stored_bytes_weight_bps,omitempty"`
+	TargetProofScoreWeightBPS          uint64 `json:"target_proof_score_weight_bps,omitempty"`
+	TargetAvailabilityWeightBPS        uint64 `json:"target_availability_weight_bps,omitempty"`
+	TargetRetrievalSpeedWeightBPS      uint64 `json:"target_retrieval_speed_weight_bps,omitempty"`
+	TargetIPDispersionWeightBPS        uint64 `json:"target_ip_dispersion_weight_bps,omitempty"`
+	TargetRetrievalRewardPerMiB        uint64 `json:"target_retrieval_reward_per_mib,omitempty"`
+	TargetMaxRetrievalRewardPerWindow  uint64 `json:"target_max_retrieval_reward_per_window,omitempty"`
 	TargetPermanentFundTakeoverSeconds int64  `json:"target_repair_pool_takeover_seconds,omitempty"`
-	TargetMinerDegradeThreshold       uint64 `json:"target_miner_degrade_threshold,omitempty"`
-	TargetStorageProofSamples         int    `json:"target_storage_proof_samples,omitempty"`
-	TargetValidatorCommissionBPS      uint64 `json:"target_validator_commission_bps,omitempty"`
-	TargetRetrievalWeightBPS          uint64 `json:"target_retrieval_weight_bps,omitempty"`
-	TargetFoundationReleaseRateBPS    uint64 `json:"target_foundation_release_rate_bps,omitempty"`
-	TargetFoundationAddress           string `json:"target_foundation_address,omitempty"`
-	TargetRetrievalAddress            string `json:"target_retrieval_address,omitempty"`
-	TargetStorageRewardPerBlock       uint64 `json:"target_storage_reward_per_block,omitempty"`
-	TargetRetrievalAnnualRateBPS      uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`     // deprecated
-	TargetFoundationAnnualRateBPS     uint64 `json:"target_foundation_annual_rate_bps,omitempty"`    // deprecated
-	TargetRetrievalRewardPerBlock     uint64 `json:"target_retrieval_reward_per_block,omitempty"`
-	TargetFoundationRewardPerBlock    uint64 `json:"target_foundation_reward_per_block,omitempty"`
-	TargetAvailabilityWindowSize      uint64 `json:"target_availability_window_size,omitempty"`
-	TargetAvailabilityThresholdBPS    uint64 `json:"target_availability_threshold_bps,omitempty"`
-	TargetBlockProductionRewardBPS    uint64 `json:"target_block_production_reward_bps,omitempty"`
-	TargetValidatorRewardPerBlock     uint64 `json:"target_validator_reward_per_block,omitempty"`
-	TargetMaxConsensusValidators      uint64 `json:"target_max_consensus_validators,omitempty"`
-	TargetMinConsensusValidators      uint64 `json:"target_min_consensus_validators,omitempty"`
-	TargetBlockBytes                  uint64 `json:"target_block_bytes,omitempty"`
-	TargetMaxBlockBytes               uint64 `json:"target_max_block_bytes,omitempty"`
-	TargetMaxBlockTxs                 uint64 `json:"target_max_block_txs,omitempty"`
-	TargetMaxTxBytes                  uint64 `json:"target_max_tx_bytes,omitempty"`
-	TargetMaxStorageTxBytes           uint64 `json:"target_max_storage_tx_bytes,omitempty"`
-	TargetRegistrationBonusAmount     uint64 `json:"target_registration_bonus_amount,omitempty"`
-	TargetMinBonusProofCount          uint64 `json:"target_min_bonus_proof_count,omitempty"`
-	TargetMinBonusSuccessRateBPS      uint64 `json:"target_min_bonus_success_rate_bps,omitempty"`
-	TargetMinBonusRetrievalCount      uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
-	TargetMaxBonusAddresses           uint64 `json:"target_max_bonus_addresses,omitempty"`
-	TargetBonusDeadlineSeconds        uint64 `json:"target_bonus_deadline_seconds,omitempty"`
-	TargetActivationWindowSeconds     uint64 `json:"target_activation_window_seconds,omitempty"`
-	TargetFeeMarketBaseFee            uint64 `json:"target_fee_market_base_fee,omitempty"`
-	TargetFeeMarketTargetBlockTxs     int    `json:"target_fee_market_target_block_txs,omitempty"`
-	TargetFeeMultiplierBridgeOut      uint64 `json:"target_fee_multiplier_bridge_out,omitempty"`
-	TargetFeeMultiplierCreateIntent   uint64 `json:"target_fee_multiplier_create_intent,omitempty"`
-	TargetFeeMultiplierUploadNFT      uint64 `json:"target_fee_multiplier_upload_nft_template,omitempty"`
-	TargetFeeMultiplierRegisterVal    uint64 `json:"target_fee_multiplier_register_validator,omitempty"`
-	TargetFeeMultiplierBatchCommit    uint64 `json:"target_fee_multiplier_batch_commit,omitempty"`
-	Signature                         string `json:"signature"`
-	Nonce                             uint64 `json:"nonce"`
-	CreatedAtUnix                     int64  `json:"created_at_unix"`
+	TargetMinerDegradeThreshold        uint64 `json:"target_miner_degrade_threshold,omitempty"`
+	TargetStorageProofSamples          int    `json:"target_storage_proof_samples,omitempty"`
+	TargetValidatorCommissionBPS       uint64 `json:"target_validator_commission_bps,omitempty"`
+	TargetRetrievalWeightBPS           uint64 `json:"target_retrieval_weight_bps,omitempty"`
+	TargetFoundationReleaseRateBPS     uint64 `json:"target_foundation_release_rate_bps,omitempty"`
+	TargetFoundationAddress            string `json:"target_foundation_address,omitempty"`
+	TargetRetrievalAddress             string `json:"target_retrieval_address,omitempty"`
+	TargetStorageRewardPerBlock        uint64 `json:"target_storage_reward_per_block,omitempty"`
+	TargetRetrievalAnnualRateBPS       uint64 `json:"target_retrieval_annual_rate_bps,omitempty"`  // deprecated
+	TargetFoundationAnnualRateBPS      uint64 `json:"target_foundation_annual_rate_bps,omitempty"` // deprecated
+	TargetRetrievalRewardPerBlock      uint64 `json:"target_retrieval_reward_per_block,omitempty"`
+	TargetFoundationRewardPerBlock     uint64 `json:"target_foundation_reward_per_block,omitempty"`
+	TargetAvailabilityWindowSize       uint64 `json:"target_availability_window_size,omitempty"`
+	TargetAvailabilityThresholdBPS     uint64 `json:"target_availability_threshold_bps,omitempty"`
+	TargetBlockProductionRewardBPS     uint64 `json:"target_block_production_reward_bps,omitempty"`
+	TargetValidatorRewardPerBlock      uint64 `json:"target_validator_reward_per_block,omitempty"`
+	TargetPermanentFundInjectionBPS    uint64 `json:"target_permanent_fund_injection_bps,omitempty"`
+	TargetMaxConsensusValidators       uint64 `json:"target_max_consensus_validators,omitempty"`
+	TargetMinConsensusValidators       uint64 `json:"target_min_consensus_validators,omitempty"`
+	TargetBlockBytes                   uint64 `json:"target_block_bytes,omitempty"`
+	TargetMaxBlockBytes                uint64 `json:"target_max_block_bytes,omitempty"`
+	TargetMaxBlockTxs                  uint64 `json:"target_max_block_txs,omitempty"`
+	TargetMaxTxBytes                   uint64 `json:"target_max_tx_bytes,omitempty"`
+	TargetMaxStorageTxBytes            uint64 `json:"target_max_storage_tx_bytes,omitempty"`
+	TargetRegistrationBonusAmount      uint64 `json:"target_registration_bonus_amount,omitempty"`
+	TargetMinBonusProofCount           uint64 `json:"target_min_bonus_proof_count,omitempty"`
+	TargetMinBonusSuccessRateBPS       uint64 `json:"target_min_bonus_success_rate_bps,omitempty"`
+	TargetMinBonusRetrievalCount       uint64 `json:"target_min_bonus_retrieval_count,omitempty"`
+	TargetMaxBonusAddresses            uint64 `json:"target_max_bonus_addresses,omitempty"`
+	TargetBonusDeadlineSeconds         uint64 `json:"target_bonus_deadline_seconds,omitempty"`
+	TargetActivationWindowSeconds      uint64 `json:"target_activation_window_seconds,omitempty"`
+	TargetFeeMarketBaseFee             uint64 `json:"target_fee_market_base_fee,omitempty"`
+	TargetFeeMarketTargetBlockTxs      int    `json:"target_fee_market_target_block_txs,omitempty"`
+	TargetFeeMultiplierBridgeOut       uint64 `json:"target_fee_multiplier_bridge_out,omitempty"`
+	TargetFeeMultiplierCreateIntent    uint64 `json:"target_fee_multiplier_create_intent,omitempty"`
+	TargetFeeMultiplierUploadNFT       uint64 `json:"target_fee_multiplier_upload_nft_template,omitempty"`
+	TargetFeeMultiplierRegisterVal     uint64 `json:"target_fee_multiplier_register_validator,omitempty"`
+	TargetFeeMultiplierBatchCommit     uint64 `json:"target_fee_multiplier_batch_commit,omitempty"`
+	// ProposalID is required for cancel operations — exact match prevents
+	// accidentally cancelling the wrong proposal with the same action type.
+	ProposalID    string `json:"proposal_id,omitempty"`
+	Signature     string `json:"signature"`
+	Nonce         uint64 `json:"nonce"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
 }
 
 // CreateGovernanceProposalResponse is the response after creating a proposal.
@@ -2290,25 +2305,25 @@ const DirectActionReviewWindowSeconds int64 = 72 * 60 * 60
 // DirectActionRecord tracks a governance action that was executed directly by an operator
 // and is subject to post-execution committee review.
 type DirectActionRecord struct {
-	ActionID               string `json:"action_id"`
-	IntentID               string `json:"intent_id"`
-	Operator               string `json:"operator"`
-	Action                 string `json:"action"` // "freeze"|"block"|"legal_hold"
-	ReasonHash             string `json:"reason_hash"`
-	ExpiresAtUnix          int64  `json:"expires_at_unix,omitempty"`          // for freeze
-	PreserveStorage        bool   `json:"preserve_storage,omitempty"`         // for block
-	AppealDeadlineUnix     int64  `json:"appeal_deadline_unix,omitempty"`     // for block
-	ReviewStatus           string `json:"review_status"`                      // pending_review|ratified|rejected|auto_ratiated
-	ReviewDeadlineUnix     int64  `json:"review_deadline_unix"`               // when the review window closes
-	CreatedAtUnix          int64  `json:"created_at_unix"`
-	RatifiedAtUnix         int64  `json:"ratified_at_unix,omitempty"`
-	RejectedAtUnix         int64  `json:"rejected_at_unix,omitempty"`
+	ActionID           string `json:"action_id"`
+	IntentID           string `json:"intent_id"`
+	Operator           string `json:"operator"`
+	Action             string `json:"action"` // "freeze"|"block"|"legal_hold"
+	ReasonHash         string `json:"reason_hash"`
+	ExpiresAtUnix      int64  `json:"expires_at_unix,omitempty"`      // for freeze
+	PreserveStorage    bool   `json:"preserve_storage,omitempty"`     // for block
+	AppealDeadlineUnix int64  `json:"appeal_deadline_unix,omitempty"` // for block
+	ReviewStatus       string `json:"review_status"`                  // pending_review|ratified|rejected|auto_ratiated
+	ReviewDeadlineUnix int64  `json:"review_deadline_unix"`           // when the review window closes
+	CreatedAtUnix      int64  `json:"created_at_unix"`
+	RatifiedAtUnix     int64  `json:"ratified_at_unix,omitempty"`
+	RejectedAtUnix     int64  `json:"rejected_at_unix,omitempty"`
 	// Snapshot of intent state before action, for rollback on rejection.
-	PreAccessStatus        string `json:"pre_access_status,omitempty"`
-	PreModerationStatus    string `json:"pre_moderation_status,omitempty"`
-	PreStorageStatus       string `json:"pre_storage_status,omitempty"`
-	PreExpiresAtUnix       int64  `json:"pre_expires_at_unix,omitempty"`
-	PreAppealDeadlineUnix  int64  `json:"pre_appeal_deadline_unix,omitempty"`
+	PreAccessStatus       string `json:"pre_access_status,omitempty"`
+	PreModerationStatus   string `json:"pre_moderation_status,omitempty"`
+	PreStorageStatus      string `json:"pre_storage_status,omitempty"`
+	PreExpiresAtUnix      int64  `json:"pre_expires_at_unix,omitempty"`
+	PreAppealDeadlineUnix int64  `json:"pre_appeal_deadline_unix,omitempty"`
 }
 
 // DirectActionReviewVote is a signed vote on a direct action review.
@@ -2341,9 +2356,9 @@ type DirectGovernanceActionRequest struct {
 
 // DirectGovernanceActionResponse is the response for a direct governance action.
 type DirectGovernanceActionResponse struct {
-	Record             DirectActionRecord               `json:"record"`
-	GovernanceResult   GovernanceDealActionResponse     `json:"governance_result"`
-	ReviewDeadlineUnix int64                            `json:"review_deadline_unix"`
+	Record             DirectActionRecord           `json:"record"`
+	GovernanceResult   GovernanceDealActionResponse `json:"governance_result"`
+	ReviewDeadlineUnix int64                        `json:"review_deadline_unix"`
 }
 
 // DirectActionReviewVoteRequest is the HTTP request for an operator to cast a review vote.
@@ -2362,10 +2377,10 @@ type DirectActionReviewVoteRequest struct {
 
 // DirectActionReviewVoteResponse is the response after casting a review vote.
 type DirectActionReviewVoteResponse struct {
-	Vote         DirectActionReviewVote `json:"vote"`
-	RejectCount  int                    `json:"reject_count"`
-	Threshold    int                    `json:"threshold"`
-	Rejected     bool                   `json:"rejected"`
+	Vote        DirectActionReviewVote `json:"vote"`
+	RejectCount int                    `json:"reject_count"`
+	Threshold   int                    `json:"threshold"`
+	Rejected    bool                   `json:"rejected"`
 }
 
 // DirectActionListResponse is the response for listing direct action records.
@@ -2381,58 +2396,58 @@ type DirectActionListResponse struct {
 // Event type constants for the on-chain event log.
 const (
 	// Existing
-	EventPermanentFundClosed    = "permanent_fund_closed"
-	EventMinerJailed            = "miner_jailed"
-	EventMinerExiting           = "miner_exiting"
-	EventMinerExited            = "miner_exited"
-	EventGovProposalExecuted    = "governance_proposal_executed"
-	EventGovProposalExpired     = "governance_proposal_expired"
-	EventIntentSettled          = "intent_settled"
-	EventIntentExpired          = "intent_expired"
+	EventPermanentFundClosed = "permanent_fund_closed"
+	EventMinerJailed         = "miner_jailed"
+	EventMinerExiting        = "miner_exiting"
+	EventMinerExited         = "miner_exited"
+	EventGovProposalExecuted = "governance_proposal_executed"
+	EventGovProposalExpired  = "governance_proposal_expired"
+	EventIntentSettled       = "intent_settled"
+	EventIntentExpired       = "intent_expired"
 
 	// Financial
-	EventTransfer               = "transfer"
-	EventDelegateStake          = "delegate_stake"
-	EventUndelegateStake        = "undelegate_stake"
-	EventRewardsClaimed         = "rewards_claimed"
+	EventTransfer        = "transfer"
+	EventDelegateStake   = "delegate_stake"
+	EventUndelegateStake = "undelegate_stake"
+	EventRewardsClaimed  = "rewards_claimed"
 
 	// Miner
-	EventMinerRegistered        = "miner_registered"
-	EventMinerCapacityAdjusted  = "miner_capacity_adjusted"
+	EventMinerRegistered       = "miner_registered"
+	EventMinerCapacityAdjusted = "miner_capacity_adjusted"
 
 	// Validator
-	EventValidatorRegistered    = "validator_registered"
-	EventValidatorDeregistered  = "validator_deregistered"
+	EventValidatorRegistered   = "validator_registered"
+	EventValidatorDeregistered = "validator_deregistered"
 
 	// Bridge
-	EventBridgeOut              = "bridge_out"
-	EventBridgeIn               = "bridge_in"
+	EventBridgeOut = "bridge_out"
+	EventBridgeIn  = "bridge_in"
 
 	// Intent lifecycle
-	EventIntentCreated          = "intent_created"
-	EventIntentCommitted        = "intent_committed"
-	EventIntentFinalized        = "intent_finalized"
-	EventIntentRenewed          = "intent_renewed"
-	EventIntentTerminated       = "intent_terminated"
+	EventIntentCreated    = "intent_created"
+	EventIntentCommitted  = "intent_committed"
+	EventIntentFinalized  = "intent_finalized"
+	EventIntentRenewed    = "intent_renewed"
+	EventIntentTerminated = "intent_terminated"
 
 	// Governance
-	EventGovProposalCreated     = "governance_proposal_created"
-	EventGovVoteCast            = "governance_vote_cast"
+	EventGovProposalCreated = "governance_proposal_created"
+	EventGovVoteCast        = "governance_vote_cast"
 
 	// Account
-	EventAccountCredited        = "account_credited"
+	EventAccountCredited = "account_credited"
 
 	// Access / Moderation
-	EventAccessPolicyChanged    = "access_policy_changed"
-	EventModerationAction       = "moderation_action"
+	EventAccessPolicyChanged = "access_policy_changed"
+	EventModerationAction    = "moderation_action"
 
 	// WASM Contracts
-	EventContractDeployed       = "contract_deployed"
-	EventContractCalled         = "contract_called"
-	EventContractDestroyed      = "contract_destroyed"
-	EventContractCronExecuted   = "contract_cron_executed"
-	EventContractCronFailed     = "contract_cron_failed"
-	EventContractEventEmitted   = "contract_event_emitted"
+	EventContractDeployed            = "contract_deployed"
+	EventContractCalled              = "contract_called"
+	EventContractDestroyed           = "contract_destroyed"
+	EventContractCronExecuted        = "contract_cron_executed"
+	EventContractCronFailed          = "contract_cron_failed"
+	EventContractEventEmitted        = "contract_event_emitted"
 	EventContractEventDelivered      = "contract_event_delivered"
 	EventContractEventDeliveryFailed = "contract_event_delivery_failed"
 )
@@ -2451,7 +2466,7 @@ type ChainEvent struct {
 	BlockHash           string          `json:"block_hash,omitempty"`
 	LogIndex            int             `json:"log_index"`
 	Emitter             string          `json:"emitter,omitempty"`
-	BlockTimestamp       int64           `json:"block_timestamp,omitempty"`
+	BlockTimestamp      int64           `json:"block_timestamp,omitempty"`
 }
 
 // ChainEventsResponse is the API response for querying chain events.
@@ -2468,30 +2483,31 @@ type ChainEventsResponse struct {
 
 // WASM contract status constants.
 const (
-	WasmContractStatusActive    = "active"
-	WasmContractStatusDestroyed = "destroyed"
+	WasmContractStatusActive     = "active"
+	WasmContractStatusDestroyed  = "destroyed"
+	WasmContractStatusInitFailed = "init_failed"
 )
 
 // WASM limits.
 const (
-	MaxWasmBytecodeSize     = 2 * 1024 * 1024   // 2 MB
-	MaxWasmMemoryBytes      = 16 * 1024 * 1024  // 16 MB (256 pages × 64KB)
-	MaxWasmKVEntries        = 10_000
-	MaxWasmKVKeyBytes       = 256
-	MaxWasmKVValueBytes     = 64 * 1024 // 64 KB
-	MaxWasmCronJobs         = 5
-	MinWasmCronIntervalSecs = 60
-	MaxWasmSubscriptions    = 10
-	MaxWasmEventsPerCall    = 5
-	MaxWasmEventAttributes  = 10
-	MaxWasmEventAttrKeyLen  = 256
-	MaxWasmEventAttrValLen  = 256
-	MaxWasmEventTypeLen     = 64
-	MaxWasmLabelLen         = 64
-	MaxWasmMethodNameLen    = 64
-	MaxWasmPendingEvents    = 1000
-	WasmCronAutoDisable     = 10 // consecutive failures before auto-disable
-	DefaultWasmGasLimit     = 10_000_000
+	MaxWasmBytecodeSize       = 2 * 1024 * 1024  // 2 MB
+	MaxWasmMemoryBytes        = 16 * 1024 * 1024 // 16 MB (256 pages × 64KB)
+	MaxWasmKVEntries          = 10_000
+	MaxWasmKVKeyBytes         = 256
+	MaxWasmKVValueBytes       = 64 * 1024 // 64 KB
+	MaxWasmCronJobs           = 5
+	MinWasmCronIntervalSecs   = 60
+	MaxWasmSubscriptions      = 10
+	MaxWasmEventsPerCall      = 5
+	MaxWasmEventAttributes    = 10
+	MaxWasmEventAttrKeyLen    = 256
+	MaxWasmEventAttrValLen    = 256
+	MaxWasmEventTypeLen       = 64
+	MaxWasmLabelLen           = 64
+	MaxWasmMethodNameLen      = 64
+	MaxWasmPendingEvents      = 1000
+	WasmCronAutoDisable       = 10 // consecutive failures before auto-disable
+	DefaultWasmGasLimit       = 10_000_000
 	WasmDefaultCronGasReserve = 1_000_000
 )
 
@@ -2663,8 +2679,8 @@ type WasmEventDeliveryPayload struct {
 
 // WasmContractInfo enriches a contract with additional metadata for API responses.
 type WasmContractInfo struct {
-	Contract    WasmContract `json:"contract"`
-	CronJobs    []WasmCronJob          `json:"cron_jobs,omitempty"`
+	Contract      WasmContract            `json:"contract"`
+	CronJobs      []WasmCronJob           `json:"cron_jobs,omitempty"`
 	Subscriptions []WasmEventSubscription `json:"subscriptions,omitempty"`
 }
 
@@ -2683,21 +2699,21 @@ type WasmKVResponse struct {
 type ErrorCode string
 
 const (
-	ErrInvalidInput       ErrorCode = "invalid_input"
-	ErrInsufficientFunds  ErrorCode = "insufficient_funds"
-	ErrNotFound           ErrorCode = "not_found"
-	ErrUnauthorized       ErrorCode = "unauthorized"
-	ErrForbidden          ErrorCode = "forbidden"
-	ErrConflict           ErrorCode = "conflict"
-	ErrIntentExpired      ErrorCode = "intent_expired"
-	ErrIntentFinalized    ErrorCode = "intent_finalized"
-	ErrInvalidSignature   ErrorCode = "invalid_signature"
-	ErrInvalidNonce       ErrorCode = "invalid_nonce"
-	ErrCapacityExceeded   ErrorCode = "capacity_exceeded"
-	ErrDeadlineExceeded   ErrorCode = "deadline_exceeded"
-	ErrUnderpriced        ErrorCode = "underpriced"
-	ErrInternal           ErrorCode = "internal_error"
-	ErrTooManyRequests    ErrorCode = "too_many_requests"
+	ErrInvalidInput      ErrorCode = "invalid_input"
+	ErrInsufficientFunds ErrorCode = "insufficient_funds"
+	ErrNotFound          ErrorCode = "not_found"
+	ErrUnauthorized      ErrorCode = "unauthorized"
+	ErrForbidden         ErrorCode = "forbidden"
+	ErrConflict          ErrorCode = "conflict"
+	ErrIntentExpired     ErrorCode = "intent_expired"
+	ErrIntentFinalized   ErrorCode = "intent_finalized"
+	ErrInvalidSignature  ErrorCode = "invalid_signature"
+	ErrInvalidNonce      ErrorCode = "invalid_nonce"
+	ErrCapacityExceeded  ErrorCode = "capacity_exceeded"
+	ErrDeadlineExceeded  ErrorCode = "deadline_exceeded"
+	ErrUnderpriced       ErrorCode = "underpriced"
+	ErrInternal          ErrorCode = "internal_error"
+	ErrTooManyRequests   ErrorCode = "too_many_requests"
 )
 
 // APIError is a structured error response returned by the chain API.

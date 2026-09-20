@@ -129,18 +129,23 @@ func SignBridgeInClaim(req *BridgeInClaimRequest, privateKey *ecdsa.PrivateKey, 
 	return nil
 }
 
-// VerifyBridgeInClaimSignature verifies the signature on a bridge_in_claim request.
-func VerifyBridgeInClaimSignature(req BridgeInClaimRequest, chainID string) error {
+// VerifyBridgeInClaimSignature verifies the signature on a bridge_in_claim request
+// and returns the recovered signer address. The caller MUST check that the signer
+// is an authorized relayer.
+func VerifyBridgeInClaimSignature(req BridgeInClaimRequest, chainID string) (string, error) {
 	sig, err := decodeHex(req.Signature)
 	if err != nil {
-		return err
+		return "", err
 	}
 	hash, err := bridgeInClaimHash(req, chainID)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = recoverSigner(hash, sig)
-	return err
+	pub, err := recoverSigner(hash, sig)
+	if err != nil {
+		return "", err
+	}
+	return AccountAddress(pub), nil
 }
 
 // RecoverBridgeInClaimSigner recovers the signer address from a bridge_in_claim signature.
@@ -208,18 +213,23 @@ func SignBridgeSetConfig(req *BridgeSetConfigRequest, privateKey *ecdsa.PrivateK
 	return nil
 }
 
-// VerifyBridgeSetConfigSignature verifies the signature on a bridge_set_config request.
-func VerifyBridgeSetConfigSignature(req BridgeSetConfigRequest, chainID string) error {
+// VerifyBridgeSetConfigSignature verifies the signature on a bridge_set_config request
+// and returns the recovered signer address. The caller MUST check that the signer
+// is an authorized governance operator.
+func VerifyBridgeSetConfigSignature(req BridgeSetConfigRequest, chainID string) (string, error) {
 	sig, err := decodeHex(req.Signature)
 	if err != nil {
-		return err
+		return "", err
 	}
 	hash, err := bridgeSetConfigHash(req, chainID)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = recoverSigner(hash, sig)
-	return err
+	pub, err := recoverSigner(hash, sig)
+	if err != nil {
+		return "", err
+	}
+	return AccountAddress(pub), nil
 }
 
 // RecoverBridgeSetConfigSigner recovers the signer address from a bridge_set_config signature.

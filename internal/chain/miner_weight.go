@@ -125,14 +125,15 @@ func (s *Store) computeMinerEffectiveWeightLocked(stats wire.MinerStats, ipDispe
 
 	availabilityScore := uint64(10000)
 	if stats.ConsecutiveFailures > 0 {
-		divisor := uint64(1) << stats.ConsecutiveFailures
-		if divisor == 0 {
-			divisor = 1
-		}
-		if divisor <= 64 {
-			availabilityScore = 10000 / divisor
-		} else {
+		if stats.ConsecutiveFailures >= 64 {
 			availabilityScore = 0
+		} else {
+			divisor := uint64(1) << stats.ConsecutiveFailures
+			if divisor <= 64 {
+				availabilityScore = 10000 / divisor
+			} else {
+				availabilityScore = 0
+			}
 		}
 	}
 

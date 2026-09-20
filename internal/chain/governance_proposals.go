@@ -131,6 +131,11 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 
 	proposal := governanceProposalFromRequest(req, proposer, proposalID, req.CreatedAtUnix)
 
+	// Snapshot enabled operators at proposal creation time. This prevents later
+	// operator disablements from invalidating already-cast votes or altering the
+	// threshold calculation.
+	proposal.EnabledOperatorsSnapshot = s.enabledOperatorAddressesLocked()
+
 	s.data.GovernanceProposals[proposalID] = proposal
 	s.data.GovernanceVotes[proposalID] = []wire.GovernanceVote{}
 	s.data.OperatorNonces[proposer] = expectedNonce + 1
@@ -145,72 +150,74 @@ func (s *Store) CreateGovernanceProposal(req wire.CreateGovernanceProposalReques
 
 func governanceProposalFromRequest(req wire.CreateGovernanceProposalRequest, proposer, proposalID string, createdAtUnix int64) wire.GovernanceProposal {
 	return wire.GovernanceProposal{
-		ProposalID:                        proposalID,
-		Proposer:                          proposer,
-		ProposerSignature:                 req.Signature,
-		IntentID:                          req.IntentID,
-		Action:                            req.Action,
-		ReasonHash:                        req.ReasonHash,
-		ExpiresAtUnix:                     req.ExpiresAtUnix,
-		PreserveStorage:                   req.PreserveStorage,
-		AppealDeadlineUnix:                req.AppealDeadlineUnix,
-		TargetOperator:                    req.TargetOperator,
-		TargetPublicKey:                   req.TargetPublicKey,
-		TargetPermissions:                 req.TargetPermissions,
-		TargetDataModerationThresholdNum:  req.TargetDataModerationThresholdNum,
-		TargetDataModerationThresholdDen:  req.TargetDataModerationThresholdDen,
-		TargetOperatorChangeThresholdNum:  req.TargetOperatorChangeThresholdNum,
-		TargetOperatorChangeThresholdDen:  req.TargetOperatorChangeThresholdDen,
-		TargetStorageReleaseRateBPS:       req.TargetStorageReleaseRateBPS,
-		TargetRetrievalReleaseRateBPS:     req.TargetRetrievalReleaseRateBPS,
-		TargetStoredBytesWeightBPS:        req.TargetStoredBytesWeightBPS,
-		TargetProofScoreWeightBPS:         req.TargetProofScoreWeightBPS,
-		TargetAvailabilityWeightBPS:       req.TargetAvailabilityWeightBPS,
-		TargetRetrievalSpeedWeightBPS:     req.TargetRetrievalSpeedWeightBPS,
-		TargetIPDispersionWeightBPS:       req.TargetIPDispersionWeightBPS,
-		TargetRetrievalRewardPerMiB:       req.TargetRetrievalRewardPerMiB,
-		TargetMaxRetrievalRewardPerWindow: req.TargetMaxRetrievalRewardPerWindow,
+		ProposalID:                         proposalID,
+		Proposer:                           proposer,
+		ProposerSignature:                  req.Signature,
+		IntentID:                           req.IntentID,
+		Action:                             req.Action,
+		ReasonHash:                         req.ReasonHash,
+		ExpiresAtUnix:                      req.ExpiresAtUnix,
+		PreserveStorage:                    req.PreserveStorage,
+		AppealDeadlineUnix:                 req.AppealDeadlineUnix,
+		TargetOperator:                     req.TargetOperator,
+		TargetPublicKey:                    req.TargetPublicKey,
+		TargetPermissions:                  req.TargetPermissions,
+		TargetDataModerationThresholdNum:   req.TargetDataModerationThresholdNum,
+		TargetDataModerationThresholdDen:   req.TargetDataModerationThresholdDen,
+		TargetOperatorChangeThresholdNum:   req.TargetOperatorChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:   req.TargetOperatorChangeThresholdDen,
+		TargetStorageReleaseRateBPS:        req.TargetStorageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:      req.TargetRetrievalReleaseRateBPS,
+		TargetStoredBytesWeightBPS:         req.TargetStoredBytesWeightBPS,
+		TargetProofScoreWeightBPS:          req.TargetProofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:        req.TargetAvailabilityWeightBPS,
+		TargetRetrievalSpeedWeightBPS:      req.TargetRetrievalSpeedWeightBPS,
+		TargetIPDispersionWeightBPS:        req.TargetIPDispersionWeightBPS,
+		TargetRetrievalRewardPerMiB:        req.TargetRetrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow:  req.TargetMaxRetrievalRewardPerWindow,
 		TargetPermanentFundTakeoverSeconds: req.TargetPermanentFundTakeoverSeconds,
-		TargetMinerDegradeThreshold:       req.TargetMinerDegradeThreshold,
-		TargetStorageProofSamples:         req.TargetStorageProofSamples,
-		TargetValidatorCommissionBPS:      req.TargetValidatorCommissionBPS,
-		TargetRetrievalWeightBPS:          req.TargetRetrievalWeightBPS,
-		TargetFoundationReleaseRateBPS:    req.TargetFoundationReleaseRateBPS,
-		TargetFoundationAddress:           req.TargetFoundationAddress,
-		TargetRetrievalAddress:            req.TargetRetrievalAddress,
-		TargetStorageRewardPerBlock:       req.TargetStorageRewardPerBlock,
-		TargetRetrievalAnnualRateBPS:      req.TargetRetrievalAnnualRateBPS,
-		TargetFoundationAnnualRateBPS:     req.TargetFoundationAnnualRateBPS,
-		TargetRetrievalRewardPerBlock:     req.TargetRetrievalRewardPerBlock,
-		TargetFoundationRewardPerBlock:    req.TargetFoundationRewardPerBlock,
-		TargetAvailabilityWindowSize:      req.TargetAvailabilityWindowSize,
-		TargetAvailabilityThresholdBPS:    req.TargetAvailabilityThresholdBPS,
-		TargetBlockProductionRewardBPS:    req.TargetBlockProductionRewardBPS,
-		TargetValidatorRewardPerBlock:     req.TargetValidatorRewardPerBlock,
-		TargetMaxConsensusValidators:      req.TargetMaxConsensusValidators,
-		TargetMinConsensusValidators:      req.TargetMinConsensusValidators,
-		TargetBlockBytes:                  req.TargetBlockBytes,
-		TargetMaxBlockBytes:               req.TargetMaxBlockBytes,
-		TargetMaxBlockTxs:                 req.TargetMaxBlockTxs,
-		TargetMaxTxBytes:                  req.TargetMaxTxBytes,
-		TargetMaxStorageTxBytes:           req.TargetMaxStorageTxBytes,
-		TargetRegistrationBonusAmount:     req.TargetRegistrationBonusAmount,
-		TargetMinBonusProofCount:          req.TargetMinBonusProofCount,
-		TargetMinBonusSuccessRateBPS:      req.TargetMinBonusSuccessRateBPS,
-		TargetMinBonusRetrievalCount:      req.TargetMinBonusRetrievalCount,
-		TargetMaxBonusAddresses:           req.TargetMaxBonusAddresses,
-		TargetBonusDeadlineSeconds:        req.TargetBonusDeadlineSeconds,
-		TargetFeeMarketBaseFee:            req.TargetFeeMarketBaseFee,
-		TargetFeeMarketTargetBlockTxs:     req.TargetFeeMarketTargetBlockTxs,
-		TargetFeeMultiplierBridgeOut:      req.TargetFeeMultiplierBridgeOut,
-		TargetFeeMultiplierCreateIntent:   req.TargetFeeMultiplierCreateIntent,
-		TargetFeeMultiplierUploadNFT:      req.TargetFeeMultiplierUploadNFT,
-		TargetFeeMultiplierRegisterVal:    req.TargetFeeMultiplierRegisterVal,
-		TargetFeeMultiplierBatchCommit:    req.TargetFeeMultiplierBatchCommit,
-		ChainID:                           req.ChainID,
-		ProposerNonce:                     req.Nonce,
-		Status:                            wire.GovProposalPending,
-		CreatedAtUnix:                     createdAtUnix,
+		TargetMinerDegradeThreshold:        req.TargetMinerDegradeThreshold,
+		TargetStorageProofSamples:          req.TargetStorageProofSamples,
+		TargetValidatorCommissionBPS:       req.TargetValidatorCommissionBPS,
+		TargetRetrievalWeightBPS:           req.TargetRetrievalWeightBPS,
+		TargetFoundationReleaseRateBPS:     req.TargetFoundationReleaseRateBPS,
+		TargetFoundationAddress:            req.TargetFoundationAddress,
+		TargetRetrievalAddress:             req.TargetRetrievalAddress,
+		TargetStorageRewardPerBlock:        req.TargetStorageRewardPerBlock,
+		TargetRetrievalAnnualRateBPS:       req.TargetRetrievalAnnualRateBPS,
+		TargetFoundationAnnualRateBPS:      req.TargetFoundationAnnualRateBPS,
+		TargetRetrievalRewardPerBlock:      req.TargetRetrievalRewardPerBlock,
+		TargetFoundationRewardPerBlock:     req.TargetFoundationRewardPerBlock,
+		TargetAvailabilityWindowSize:       req.TargetAvailabilityWindowSize,
+		TargetAvailabilityThresholdBPS:     req.TargetAvailabilityThresholdBPS,
+		TargetBlockProductionRewardBPS:     req.TargetBlockProductionRewardBPS,
+		TargetValidatorRewardPerBlock:      req.TargetValidatorRewardPerBlock,
+		TargetPermanentFundInjectionBPS:    req.TargetPermanentFundInjectionBPS,
+		TargetMaxConsensusValidators:       req.TargetMaxConsensusValidators,
+		TargetMinConsensusValidators:       req.TargetMinConsensusValidators,
+		TargetBlockBytes:                   req.TargetBlockBytes,
+		TargetMaxBlockBytes:                req.TargetMaxBlockBytes,
+		TargetMaxBlockTxs:                  req.TargetMaxBlockTxs,
+		TargetMaxTxBytes:                   req.TargetMaxTxBytes,
+		TargetMaxStorageTxBytes:            req.TargetMaxStorageTxBytes,
+		TargetRegistrationBonusAmount:      req.TargetRegistrationBonusAmount,
+		TargetMinBonusProofCount:           req.TargetMinBonusProofCount,
+		TargetMinBonusSuccessRateBPS:       req.TargetMinBonusSuccessRateBPS,
+		TargetMinBonusRetrievalCount:       req.TargetMinBonusRetrievalCount,
+		TargetMaxBonusAddresses:            req.TargetMaxBonusAddresses,
+		TargetBonusDeadlineSeconds:         req.TargetBonusDeadlineSeconds,
+		TargetActivationWindowSeconds:      req.TargetActivationWindowSeconds,
+		TargetFeeMarketBaseFee:             req.TargetFeeMarketBaseFee,
+		TargetFeeMarketTargetBlockTxs:      req.TargetFeeMarketTargetBlockTxs,
+		TargetFeeMultiplierBridgeOut:       req.TargetFeeMultiplierBridgeOut,
+		TargetFeeMultiplierCreateIntent:    req.TargetFeeMultiplierCreateIntent,
+		TargetFeeMultiplierUploadNFT:       req.TargetFeeMultiplierUploadNFT,
+		TargetFeeMultiplierRegisterVal:     req.TargetFeeMultiplierRegisterVal,
+		TargetFeeMultiplierBatchCommit:     req.TargetFeeMultiplierBatchCommit,
+		ChainID:                            req.ChainID,
+		ProposerNonce:                      req.Nonce,
+		Status:                             wire.GovProposalPending,
+		CreatedAtUnix:                      createdAtUnix,
 	}
 }
 
@@ -293,10 +300,12 @@ func (s *Store) CastGovernanceVote(req wire.CastGovernanceVoteRequest) (wire.Cas
 
 	// Count votes.
 	approveCount, rejectCount := s.countGovernanceVotesLocked(req.ProposalID)
-	threshold := s.governanceThresholdLocked(proposal.Action)
+
+	// Use proposal snapshot for stable threshold calculation.
+	totalEnabled := s.proposalTotalEnabledLocked(proposal)
+	threshold := s.governanceThresholdForLocked(proposal.Action, totalEnabled)
 
 	// Auto-reject if threshold unreachable.
-	totalEnabled := s.countEnabledOperatorsLocked()
 	remaining := totalEnabled - approveCount - rejectCount
 	executed := false
 	if approveCount >= threshold {
@@ -411,22 +420,10 @@ func (s *Store) ExecuteGovernanceProposal(req wire.ExecuteGovernanceProposalRequ
 // executeGovernanceProposalLocked is the internal helper that validates threshold and
 // executes the governance action. Must be called with s.mu held.
 func (s *Store) executeGovernanceProposalLocked(proposal wire.GovernanceProposal, now int64) (wire.GovernanceDealActionResponse, error) {
-	// Re-validate each voter is still an enabled operator.
-	approveCount := 0
-	votes := s.data.GovernanceVotes[proposal.ProposalID]
-	for _, v := range votes {
-		if !v.Approve {
-			continue
-		}
-		voterAddr := normalizeGovernanceOperator(v.Voter)
-		op, ok := s.data.GovernanceOperators[voterAddr]
-		if !ok || !op.Enabled {
-			continue // voter no longer enabled, exclude
-		}
-		approveCount++
-	}
-
-	threshold := s.governanceThresholdLocked(proposal.Action)
+	// Tally and threshold exactly like the vote path, against the snapshot taken
+	// when the proposal was created.
+	approveCount, _ := s.countProposalVotesLocked(proposal, s.data.GovernanceVotes[proposal.ProposalID])
+	threshold := s.governanceThresholdForLocked(proposal.Action, s.proposalTotalEnabledLocked(proposal))
 	if approveCount < threshold {
 		return wire.GovernanceDealActionResponse{}, errors.New("insufficient approval votes: have " +
 			strconv.Itoa(approveCount) + " need " + strconv.Itoa(threshold))
@@ -552,9 +549,15 @@ func (s *Store) executeConfigChangeLocked(proposal wire.GovernanceProposal, now 
 		s.data.OperatorChangeThresholdDen = proposal.TargetOperatorChangeThresholdDen
 	}
 	if proposal.TargetFoundationAddress != "" {
+		if !wire.IsValidAddress(proposal.TargetFoundationAddress) {
+			return wire.GovernanceDealActionResponse{}, fmt.Errorf("foundation address %q is not a valid hex address", proposal.TargetFoundationAddress)
+		}
 		s.data.FoundationAddress = wire.NormalizeAddress(proposal.TargetFoundationAddress)
 	}
 	if proposal.TargetRetrievalAddress != "" {
+		if !wire.IsValidAddress(proposal.TargetRetrievalAddress) {
+			return wire.GovernanceDealActionResponse{}, fmt.Errorf("retrieval address %q is not a valid hex address", proposal.TargetRetrievalAddress)
+		}
 		s.data.RetrievalAddress = wire.NormalizeAddress(proposal.TargetRetrievalAddress)
 	}
 
@@ -601,6 +604,7 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 	applyIfNonZero(&p.AvailabilityThresholdBPS, proposal.TargetAvailabilityThresholdBPS)
 	applyIfNonZero(&p.BlockProductionRewardBPS, proposal.TargetBlockProductionRewardBPS)
 	applyIfNonZero(&p.ValidatorRewardPerBlock, proposal.TargetValidatorRewardPerBlock)
+	applyIfNonZero(&p.PermanentFundInjectionBPS, proposal.TargetPermanentFundInjectionBPS)
 	applyIfNonZero(&p.MaxConsensusValidators, proposal.TargetMaxConsensusValidators)
 	applyIfNonZero(&p.MinConsensusValidators, proposal.TargetMinConsensusValidators)
 	applyIfNonZero(&p.TargetBlockBytes, proposal.TargetBlockBytes)
@@ -630,6 +634,7 @@ func (s *Store) executeMiningParamsChangeLocked(proposal wire.GovernanceProposal
 		{"storage_reward_per_block", p.StorageRewardPerBlock, maxStorageRewardPerBlock},
 		{"retrieval_reward_per_block", p.RetrievalRewardPerBlock, maxRetrievalRewardPerBlock},
 		{"foundation_reward_per_block", p.FoundationRewardPerBlock, maxFoundationRewardPerBlock},
+		{"permanent_fund_injection_bps", p.PermanentFundInjectionBPS, maxPermanentFundInjectionBPS},
 	} {
 		if check.value > check.max {
 			return wire.GovernanceDealActionResponse{}, fmt.Errorf("mining params: %s %d exceeds maximum %d", check.name, check.value, check.max)
@@ -693,39 +698,20 @@ func (s *Store) CancelGovernanceProposal(req wire.CreateGovernanceProposalReques
 	if proposer == "" {
 		return wire.CreateGovernanceProposalResponse{}, errors.New("proposer is required")
 	}
-
-	// Look up the proposal by matching fields (find pending proposal by proposer).
-	var proposalID string
-	for id, p := range s.data.GovernanceProposals {
-		if p.Status != wire.GovProposalPending || normalizeGovernanceOperator(p.Proposer) != proposer {
-			continue
-		}
-		if p.Action != req.Action {
-			continue
-		}
-		if isOperatorManagementAction(p.Action) {
-			// Match operator management proposals by target_operator.
-			if normalizeGovernanceOperator(p.TargetOperator) == normalizeGovernanceOperator(req.TargetOperator) {
-				proposalID = id
-				break
-			}
-		} else if isConfigAction(p.Action) || isMiningParamsAction(p.Action) || isFeeMarketAction(p.Action) {
-			// Config, mining params, and fee market proposals have no intent_id; match by action.
-			proposalID = id
-			break
-		} else {
-			// Match deal action proposals by intent_id.
-			if p.IntentID == req.IntentID {
-				proposalID = id
-				break
-			}
-		}
-	}
-	if proposalID == "" {
-		return wire.CreateGovernanceProposalResponse{}, errors.New("no matching pending proposal found")
+	if req.ProposalID == "" {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("proposal_id is required for cancellation")
 	}
 
-	proposal := s.data.GovernanceProposals[proposalID]
+	// Exact ProposalID match — prevents cancelling the wrong proposal.
+	proposalID := req.ProposalID
+	p, ok := s.data.GovernanceProposals[proposalID]
+	if !ok || p.Status != wire.GovProposalPending {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("proposal not found or not pending")
+	}
+	if normalizeGovernanceOperator(p.Proposer) != proposer {
+		return wire.CreateGovernanceProposalResponse{}, errors.New("only the proposer can cancel their proposal")
+	}
+	proposal := p
 
 	// Verify the cancellation signature (same key as creation).
 	if _, ok := s.data.GovernanceOperators[proposer]; !ok {
@@ -864,8 +850,9 @@ func (s *Store) expireUnreachableProposalsLocked() {
 			continue
 		}
 		approveCount, rejectCount := s.countGovernanceVotesLocked(id)
-		threshold := s.governanceThresholdLocked(p.Action)
-		totalEnabled := s.countEnabledOperatorsLocked()
+		// Use proposal snapshot for stable threshold calculation.
+		totalEnabled := s.proposalTotalEnabledLocked(p)
+		threshold := s.governanceThresholdForLocked(p.Action, totalEnabled)
 		remaining := totalEnabled - approveCount - rejectCount
 		if approveCount+remaining < threshold {
 			p.Status = wire.GovProposalExpired
@@ -882,14 +869,38 @@ func (s *Store) expireUnreachableProposalsLocked() {
 }
 
 // countGovernanceVotesLocked counts valid approval and rejection votes for a proposal.
-// Only votes from currently enabled operators are counted.
+// If the proposal has an enabled-operator snapshot (captured at creation time), only votes
+// from operators in the snapshot are counted. Otherwise, falls back to checking currently
+// enabled operators.
 func (s *Store) countGovernanceVotesLocked(proposalID string) (approve, reject int) {
-	votes := s.data.GovernanceVotes[proposalID]
+	return s.countProposalVotesLocked(s.data.GovernanceProposals[proposalID], s.data.GovernanceVotes[proposalID])
+}
+
+// countProposalVotesLocked tallies an explicit vote list for a proposal. It is
+// shared with block replay so both paths count against the same operator set:
+// reading the live set instead would let an add/remove_operator executed in
+// between make a node reject its peers' already-valid vote transaction.
+func (s *Store) countProposalVotesLocked(proposal wire.GovernanceProposal, votes []wire.GovernanceVote) (approve, reject int) {
+	// Build voter set: prefer snapshot if available for stability.
+	var validVoters map[string]bool
+	if len(proposal.EnabledOperatorsSnapshot) > 0 {
+		validVoters = make(map[string]bool, len(proposal.EnabledOperatorsSnapshot))
+		for _, addr := range proposal.EnabledOperatorsSnapshot {
+			validVoters[normalizeGovernanceOperator(addr)] = true
+		}
+	}
+
 	for _, v := range votes {
 		voterAddr := normalizeGovernanceOperator(v.Voter)
-		op, ok := s.data.GovernanceOperators[voterAddr]
-		if !ok || !op.Enabled {
-			continue
+		if validVoters != nil {
+			if !validVoters[voterAddr] {
+				continue
+			}
+		} else {
+			op, ok := s.data.GovernanceOperators[voterAddr]
+			if !ok || !op.Enabled {
+				continue
+			}
 		}
 		if v.Approve {
 			approve++
@@ -911,11 +922,41 @@ func (s *Store) countEnabledOperatorsLocked() int {
 	return count
 }
 
+// enabledOperatorAddressesLocked returns the addresses of all currently enabled
+// governance operators. Used to snapshot the voter set at proposal creation time.
+func (s *Store) enabledOperatorAddressesLocked() []string {
+	var addrs []string
+	for addr, op := range s.data.GovernanceOperators {
+		if op.Enabled {
+			addrs = append(addrs, addr)
+		}
+	}
+	// Map iteration order is random; the snapshot is persisted in state and
+	// recomputed by every node during replay, so it has to be canonical.
+	sort.Strings(addrs)
+	return addrs
+}
+
+// proposalTotalEnabledLocked returns the effective number of enabled operators
+// for threshold calculations. Uses the proposal's snapshot if available, otherwise
+// falls back to the current live count.
+func (s *Store) proposalTotalEnabledLocked(proposal wire.GovernanceProposal) int {
+	if len(proposal.EnabledOperatorsSnapshot) > 0 {
+		return len(proposal.EnabledOperatorsSnapshot)
+	}
+	return s.countEnabledOperatorsLocked()
+}
+
 // governanceThresholdLocked computes the BFT threshold for enabled operators based on action type.
 // Data moderation actions use DataModerationThreshold (default 1/3).
 // Operator/config changes use OperatorChangeThreshold (default 2/3).
 func (s *Store) governanceThresholdLocked(action string) int {
-	n := s.countEnabledOperatorsLocked()
+	return s.governanceThresholdForLocked(action, s.countEnabledOperatorsLocked())
+}
+
+// governanceThresholdForLocked computes the BFT threshold given a specific total enabled count.
+// Used with snapshot-based counts for stable proposal evaluation.
+func (s *Store) governanceThresholdForLocked(action string, n int) int {
 	if n == 0 {
 		return 0
 	}
@@ -1058,6 +1099,14 @@ func validateConfigChangeFields(req wire.CreateGovernanceProposalRequest) error 
 			return errors.New("operator change threshold denominator must be positive")
 		}
 	}
+	// Each beneficiary address receives a fixed per-block stream for the life of the
+	// chain, so a typo here would mint the pool into an account nobody can spend.
+	if hasFoundationAddr && !wire.IsValidAddress(req.TargetFoundationAddress) {
+		return fmt.Errorf("target_foundation_address %q is not a valid hex address", req.TargetFoundationAddress)
+	}
+	if hasRetrievalAddr && !wire.IsValidAddress(req.TargetRetrievalAddress) {
+		return fmt.Errorf("target_retrieval_address %q is not a valid hex address", req.TargetRetrievalAddress)
+	}
 	return nil
 }
 
@@ -1089,6 +1138,7 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		req.TargetAvailabilityThresholdBPS != 0 ||
 		req.TargetBlockProductionRewardBPS != 0 ||
 		req.TargetValidatorRewardPerBlock != 0 ||
+		req.TargetPermanentFundInjectionBPS != 0 ||
 		req.TargetMaxConsensusValidators != 0 ||
 		req.TargetMinConsensusValidators != 0 ||
 		req.TargetBlockBytes != 0 ||
@@ -1101,7 +1151,8 @@ func validateMiningParamsChangeFields(req wire.CreateGovernanceProposalRequest, 
 		req.TargetMinBonusSuccessRateBPS != 0 ||
 		req.TargetMinBonusRetrievalCount != 0 ||
 		req.TargetMaxBonusAddresses != 0 ||
-		req.TargetBonusDeadlineSeconds != 0 {
+		req.TargetBonusDeadlineSeconds != 0 ||
+		req.TargetActivationWindowSeconds != 0 {
 		return validateMiningParamBounds(req, currentParams)
 	}
 	return errors.New("update_mining_params requires at least one non-zero target field")
@@ -1181,11 +1232,13 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 	for _, check := range []struct {
 		name  string
 		value uint64
+		max   uint64
 	}{
-		{"storage_reward_per_block", req.TargetStorageRewardPerBlock},
+		{"storage_reward_per_block", req.TargetStorageRewardPerBlock, maxStorageRewardPerBlock},
+		{"permanent_fund_injection_bps", req.TargetPermanentFundInjectionBPS, maxPermanentFundInjectionBPS},
 	} {
-		if check.value != 0 && check.value > maxAnnualReleaseRateBPS {
-			return fmt.Errorf("%s exceeds maximum %d", check.name, maxAnnualReleaseRateBPS)
+		if check.value != 0 && check.value > check.max {
+			return fmt.Errorf("%s exceeds maximum %d", check.name, check.max)
 		}
 	}
 
@@ -1264,6 +1317,11 @@ func validateMiningParamBounds(req wire.CreateGovernanceProposalRequest, current
 		return errors.New("min_consensus_validators cannot exceed max_consensus_validators")
 	}
 
+	// Miner activation window.
+	if req.TargetActivationWindowSeconds != 0 && req.TargetActivationWindowSeconds > maxActivationWindowSeconds {
+		return fmt.Errorf("activation_window_seconds must be <= %d", maxActivationWindowSeconds)
+	}
+
 	return nil
 }
 
@@ -1278,71 +1336,72 @@ func nonZeroOr(value uint64, fallback uint64) uint64 {
 // from a stored GovernanceProposal for signature re-verification.
 func proposalToCreateRequest(p wire.GovernanceProposal) wire.CreateGovernanceProposalRequest {
 	return wire.CreateGovernanceProposalRequest{
-		Proposer:                          p.Proposer,
-		ChainID:                           p.ChainID,
-		IntentID:                          p.IntentID,
-		Action:                            p.Action,
-		ReasonHash:                        p.ReasonHash,
-		ExpiresAtUnix:                     p.ExpiresAtUnix,
-		PreserveStorage:                   p.PreserveStorage,
-		AppealDeadlineUnix:                p.AppealDeadlineUnix,
-		TargetOperator:                    p.TargetOperator,
-		TargetPublicKey:                   p.TargetPublicKey,
-		TargetPermissions:                 p.TargetPermissions,
-		TargetDataModerationThresholdNum:  p.TargetDataModerationThresholdNum,
-		TargetDataModerationThresholdDen:  p.TargetDataModerationThresholdDen,
-		TargetOperatorChangeThresholdNum:  p.TargetOperatorChangeThresholdNum,
-		TargetOperatorChangeThresholdDen:  p.TargetOperatorChangeThresholdDen,
-		TargetStorageReleaseRateBPS:       p.TargetStorageReleaseRateBPS,
-		TargetRetrievalReleaseRateBPS:     p.TargetRetrievalReleaseRateBPS,
-		TargetStoredBytesWeightBPS:        p.TargetStoredBytesWeightBPS,
-		TargetProofScoreWeightBPS:         p.TargetProofScoreWeightBPS,
-		TargetAvailabilityWeightBPS:       p.TargetAvailabilityWeightBPS,
-		TargetRetrievalSpeedWeightBPS:     p.TargetRetrievalSpeedWeightBPS,
-		TargetIPDispersionWeightBPS:       p.TargetIPDispersionWeightBPS,
-		TargetRetrievalRewardPerMiB:       p.TargetRetrievalRewardPerMiB,
-		TargetMaxRetrievalRewardPerWindow: p.TargetMaxRetrievalRewardPerWindow,
+		Proposer:                           p.Proposer,
+		ChainID:                            p.ChainID,
+		IntentID:                           p.IntentID,
+		Action:                             p.Action,
+		ReasonHash:                         p.ReasonHash,
+		ExpiresAtUnix:                      p.ExpiresAtUnix,
+		PreserveStorage:                    p.PreserveStorage,
+		AppealDeadlineUnix:                 p.AppealDeadlineUnix,
+		TargetOperator:                     p.TargetOperator,
+		TargetPublicKey:                    p.TargetPublicKey,
+		TargetPermissions:                  p.TargetPermissions,
+		TargetDataModerationThresholdNum:   p.TargetDataModerationThresholdNum,
+		TargetDataModerationThresholdDen:   p.TargetDataModerationThresholdDen,
+		TargetOperatorChangeThresholdNum:   p.TargetOperatorChangeThresholdNum,
+		TargetOperatorChangeThresholdDen:   p.TargetOperatorChangeThresholdDen,
+		TargetStorageReleaseRateBPS:        p.TargetStorageReleaseRateBPS,
+		TargetRetrievalReleaseRateBPS:      p.TargetRetrievalReleaseRateBPS,
+		TargetStoredBytesWeightBPS:         p.TargetStoredBytesWeightBPS,
+		TargetProofScoreWeightBPS:          p.TargetProofScoreWeightBPS,
+		TargetAvailabilityWeightBPS:        p.TargetAvailabilityWeightBPS,
+		TargetRetrievalSpeedWeightBPS:      p.TargetRetrievalSpeedWeightBPS,
+		TargetIPDispersionWeightBPS:        p.TargetIPDispersionWeightBPS,
+		TargetRetrievalRewardPerMiB:        p.TargetRetrievalRewardPerMiB,
+		TargetMaxRetrievalRewardPerWindow:  p.TargetMaxRetrievalRewardPerWindow,
 		TargetPermanentFundTakeoverSeconds: p.TargetPermanentFundTakeoverSeconds,
-		TargetMinerDegradeThreshold:       p.TargetMinerDegradeThreshold,
-		TargetStorageProofSamples:         p.TargetStorageProofSamples,
-		TargetValidatorCommissionBPS:      p.TargetValidatorCommissionBPS,
-		TargetRetrievalWeightBPS:          p.TargetRetrievalWeightBPS,
-		TargetFoundationReleaseRateBPS:    p.TargetFoundationReleaseRateBPS,
-		TargetFoundationAddress:           p.TargetFoundationAddress,
-		TargetRetrievalAddress:            p.TargetRetrievalAddress,
-		TargetStorageRewardPerBlock:       p.TargetStorageRewardPerBlock,
-		TargetRetrievalAnnualRateBPS:      p.TargetRetrievalAnnualRateBPS,
-		TargetFoundationAnnualRateBPS:     p.TargetFoundationAnnualRateBPS,
-		TargetRetrievalRewardPerBlock:     p.TargetRetrievalRewardPerBlock,
-		TargetFoundationRewardPerBlock:    p.TargetFoundationRewardPerBlock,
-		TargetAvailabilityWindowSize:      p.TargetAvailabilityWindowSize,
-		TargetAvailabilityThresholdBPS:    p.TargetAvailabilityThresholdBPS,
-		TargetBlockProductionRewardBPS:    p.TargetBlockProductionRewardBPS,
-		TargetValidatorRewardPerBlock:     p.TargetValidatorRewardPerBlock,
-		TargetMaxConsensusValidators:      p.TargetMaxConsensusValidators,
-		TargetMinConsensusValidators:      p.TargetMinConsensusValidators,
-		TargetBlockBytes:                  p.TargetBlockBytes,
-		TargetMaxBlockBytes:               p.TargetMaxBlockBytes,
-		TargetMaxBlockTxs:                 p.TargetMaxBlockTxs,
-		TargetMaxTxBytes:                  p.TargetMaxTxBytes,
-		TargetMaxStorageTxBytes:           p.TargetMaxStorageTxBytes,
-		TargetRegistrationBonusAmount:     p.TargetRegistrationBonusAmount,
-		TargetMinBonusProofCount:          p.TargetMinBonusProofCount,
-		TargetMinBonusSuccessRateBPS:      p.TargetMinBonusSuccessRateBPS,
-		TargetMinBonusRetrievalCount:      p.TargetMinBonusRetrievalCount,
-		TargetMaxBonusAddresses:           p.TargetMaxBonusAddresses,
-		TargetBonusDeadlineSeconds:        p.TargetBonusDeadlineSeconds,
-		TargetActivationWindowSeconds:     p.TargetActivationWindowSeconds,
-		TargetFeeMarketBaseFee:            p.TargetFeeMarketBaseFee,
-		TargetFeeMarketTargetBlockTxs:     p.TargetFeeMarketTargetBlockTxs,
-		TargetFeeMultiplierBridgeOut:      p.TargetFeeMultiplierBridgeOut,
-		TargetFeeMultiplierCreateIntent:   p.TargetFeeMultiplierCreateIntent,
-		TargetFeeMultiplierUploadNFT:      p.TargetFeeMultiplierUploadNFT,
-		TargetFeeMultiplierRegisterVal:    p.TargetFeeMultiplierRegisterVal,
-		TargetFeeMultiplierBatchCommit:    p.TargetFeeMultiplierBatchCommit,
-		Signature:                         p.ProposerSignature,
-		Nonce:                             p.ProposerNonce,
-		CreatedAtUnix:                     p.CreatedAtUnix,
+		TargetMinerDegradeThreshold:        p.TargetMinerDegradeThreshold,
+		TargetStorageProofSamples:          p.TargetStorageProofSamples,
+		TargetValidatorCommissionBPS:       p.TargetValidatorCommissionBPS,
+		TargetRetrievalWeightBPS:           p.TargetRetrievalWeightBPS,
+		TargetFoundationReleaseRateBPS:     p.TargetFoundationReleaseRateBPS,
+		TargetFoundationAddress:            p.TargetFoundationAddress,
+		TargetRetrievalAddress:             p.TargetRetrievalAddress,
+		TargetStorageRewardPerBlock:        p.TargetStorageRewardPerBlock,
+		TargetRetrievalAnnualRateBPS:       p.TargetRetrievalAnnualRateBPS,
+		TargetFoundationAnnualRateBPS:      p.TargetFoundationAnnualRateBPS,
+		TargetRetrievalRewardPerBlock:      p.TargetRetrievalRewardPerBlock,
+		TargetFoundationRewardPerBlock:     p.TargetFoundationRewardPerBlock,
+		TargetAvailabilityWindowSize:       p.TargetAvailabilityWindowSize,
+		TargetAvailabilityThresholdBPS:     p.TargetAvailabilityThresholdBPS,
+		TargetBlockProductionRewardBPS:     p.TargetBlockProductionRewardBPS,
+		TargetValidatorRewardPerBlock:      p.TargetValidatorRewardPerBlock,
+		TargetPermanentFundInjectionBPS:    p.TargetPermanentFundInjectionBPS,
+		TargetMaxConsensusValidators:       p.TargetMaxConsensusValidators,
+		TargetMinConsensusValidators:       p.TargetMinConsensusValidators,
+		TargetBlockBytes:                   p.TargetBlockBytes,
+		TargetMaxBlockBytes:                p.TargetMaxBlockBytes,
+		TargetMaxBlockTxs:                  p.TargetMaxBlockTxs,
+		TargetMaxTxBytes:                   p.TargetMaxTxBytes,
+		TargetMaxStorageTxBytes:            p.TargetMaxStorageTxBytes,
+		TargetRegistrationBonusAmount:      p.TargetRegistrationBonusAmount,
+		TargetMinBonusProofCount:           p.TargetMinBonusProofCount,
+		TargetMinBonusSuccessRateBPS:       p.TargetMinBonusSuccessRateBPS,
+		TargetMinBonusRetrievalCount:       p.TargetMinBonusRetrievalCount,
+		TargetMaxBonusAddresses:            p.TargetMaxBonusAddresses,
+		TargetBonusDeadlineSeconds:         p.TargetBonusDeadlineSeconds,
+		TargetActivationWindowSeconds:      p.TargetActivationWindowSeconds,
+		TargetFeeMarketBaseFee:             p.TargetFeeMarketBaseFee,
+		TargetFeeMarketTargetBlockTxs:      p.TargetFeeMarketTargetBlockTxs,
+		TargetFeeMultiplierBridgeOut:       p.TargetFeeMultiplierBridgeOut,
+		TargetFeeMultiplierCreateIntent:    p.TargetFeeMultiplierCreateIntent,
+		TargetFeeMultiplierUploadNFT:       p.TargetFeeMultiplierUploadNFT,
+		TargetFeeMultiplierRegisterVal:     p.TargetFeeMultiplierRegisterVal,
+		TargetFeeMultiplierBatchCommit:     p.TargetFeeMultiplierBatchCommit,
+		Signature:                          p.ProposerSignature,
+		Nonce:                              p.ProposerNonce,
+		CreatedAtUnix:                      p.CreatedAtUnix,
 	}
 }
 

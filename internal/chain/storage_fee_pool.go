@@ -213,7 +213,8 @@ func finiteDealEscrowAccrued(escrow wire.DealEscrow, intent *Intent, now int64) 
 	if elapsed >= duration {
 		return escrow.LockedFee
 	}
-	return escrow.LockedFee * uint64(elapsed) / uint64(duration)
+	// Use mulDivUint64 to avoid uint64 overflow on LockedFee * elapsed.
+	return mulDivUint64(escrow.LockedFee, uint64(elapsed), 1, uint64(duration))
 }
 
 func permanentFundDailyRate(balance uint64) uint64 {

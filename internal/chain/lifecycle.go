@@ -650,9 +650,6 @@ func (s *Store) validateGovernanceOperatorLocked(operator string, action string)
 	if operator == "" {
 		return errors.New("governance operator is required")
 	}
-	if len(s.data.GovernanceOperators) == 0 {
-		return nil
-	}
 	record, ok := s.data.GovernanceOperators[operator]
 	if !ok || !record.Enabled {
 		return errors.New("governance operator is not authorized")
@@ -735,11 +732,11 @@ func intentAllowsProviderDiscovery(intent *Intent) bool {
 	if intent == nil {
 		return false
 	}
-	normalizeIntentLifecycle(intent)
-	if intent.StorageStatus == wire.StorageStatusDeleted || intent.StorageStatus == wire.StorageStatusTerminating || intent.StorageStatus == wire.StorageStatusExpired {
+	view := normalizedIntentView(intent)
+	if view.StorageStatus == wire.StorageStatusDeleted || view.StorageStatus == wire.StorageStatusTerminating || view.StorageStatus == wire.StorageStatusExpired {
 		return false
 	}
-	if intent.AccessStatus == wire.AccessStatusBlocked || intent.AccessStatus == wire.AccessStatusSuspended {
+	if view.AccessStatus == wire.AccessStatusBlocked || view.AccessStatus == wire.AccessStatusSuspended {
 		return false
 	}
 	return true
@@ -749,11 +746,20 @@ func intentAllowsStorageProof(intent *Intent) bool {
 	if intent == nil {
 		return false
 	}
-	normalizeIntentLifecycle(intent)
-	if intent.Status != wire.StatusFinalized {
+	view := normalizedIntentView(intent)
+	if view.Status != wire.StatusFinalized {
 		return false
 	}
-	return intent.StorageStatus == wire.StorageStatusActive
+	return view.StorageStatus == wire.StorageStatusActive
+}
+
+// normalizedIntentView applies the lifecycle defaults to a copy so that read-only
+// predicates cannot diverge producer and peer state: a validator that answers a
+// query would otherwise persist a normalization no other validator replays.
+func normalizedIntentView(intent *Intent) Intent {
+	view := *intent
+	normalizeIntentLifecycle(&view)
+	return view
 }
 
 // ── Direct Governance Actions (Execute First, Review Later) ──
@@ -766,7 +772,12 @@ func intentAllowsStorageProof(intent *Intent) bool {
 func (s *Store) DirectGovernanceAction(req wire.DirectGovernanceActionRequest) (wire.DirectGovernanceActionResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.directGovernanceActionLocked(req)
+}
 
+// directGovernanceActionLocked is the internal (lock-free) implementation.
+// Callers must already hold s.mu.
+func (s *Store) directGovernanceActionLocked(req wire.DirectGovernanceActionRequest) (wire.DirectGovernanceActionResponse, error) {
 	operator := normalizeGovernanceOperator(req.Operator)
 	if operator == "" {
 		return wire.DirectGovernanceActionResponse{}, errors.New("operator is required")
@@ -929,7 +940,12 @@ func (s *Store) DirectGovernanceAction(req wire.DirectGovernanceActionRequest) (
 func (s *Store) CastDirectActionReviewVote(req wire.DirectActionReviewVoteRequest) (wire.DirectActionReviewVoteResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.castDirectActionReviewVoteLocked(req)
+}
 
+// castDirectActionReviewVoteLocked is the internal (lock-free) implementation.
+// Callers must already hold s.mu.
+func (s *Store) castDirectActionReviewVoteLocked(req wire.DirectActionReviewVoteRequest) (wire.DirectActionReviewVoteResponse, error) {
 	voter := normalizeGovernanceOperator(req.Voter)
 	if voter == "" {
 		return wire.DirectActionReviewVoteResponse{}, errors.New("voter is required")

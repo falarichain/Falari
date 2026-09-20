@@ -3,26 +3,44 @@ package chain
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"chain/internal/wire"
 )
 
+// H7: Per-block time budget for all WASM system execution (cron + events).
+const wasmSystemBlockBudget = 5 * time.Second
+
 // processWasmCronJobsLocked iterates all registered cron jobs and executes
 // those that are due. Called during produceBlockLocked before user tx selection.
-// Must be called with s.mu held.
-func (s *Store) processWasmCronJobsLocked(blockTime int64) {
+// Must be called with s.mu held. deadline caps total WASM system time per block.
+func (s *Store) processWasmCronJobsLocked(blockTime int64, deadline time.Time) {
 	if len(s.data.WasmCronJobs) == 0 {
 		return
 	}
 
-	for contractAddr, jobs := range s.data.WasmCronJobs {
+	// C1: Snapshot contract addresses to avoid map iteration while WASM host
+	// functions (register_cron / unregister_cron) may modify the map.
+	addrs := make([]string, 0, len(s.data.WasmCronJobs))
+	for addr := range s.data.WasmCronJobs {
+		addrs = append(addrs, addr)
+	}
+
+	for _, contractAddr := range addrs {
 		contract, ok := s.data.WasmContracts[contractAddr]
 		if !ok || contract.Status != wire.WasmContractStatusActive {
 			continue
 		}
 
-		for i, job := range jobs {
+		jobs := s.data.WasmCronJobs[contractAddr]
+		for i := range jobs {
+			job := &jobs[i]
+			// H7: Check per-block time budget before each execution.
+			if time.Now().After(deadline) {
+				log.Printf("wasm cron: per-block time budget exceeded, deferring remaining jobs")
+				return
+			}
 			if !job.Enabled {
 				continue
 			}
@@ -32,11 +50,10 @@ func (s *Store) processWasmCronJobsLocked(blockTime int64) {
 
 			// Check if contract has enough balance for gas.
 			if contract.Balance < wire.WasmDefaultCronGasReserve {
-				// Skip execution if contract can't afford gas.
 				continue
 			}
 
-			// Build the cron input: {"block_time": <unix>, "cron_method": "<name>"}
+			// Build the cron input.
 			input, _ := json.Marshal(map[string]any{
 				"block_time":  blockTime,
 				"cron_method": job.MethodName,
@@ -47,10 +64,25 @@ func (s *Store) processWasmCronJobsLocked(blockTime int64) {
 				contractAddr, job.MethodName, input, blockTime,
 			)
 
-			// Re-fetch contract after WASM execution — host functions called
-			// during execution (exec_transfer, exec_create_intent, etc.) may
-			// have modified the contract's balance in the map.
+			// Re-fetch contract after WASM execution.
 			contract = s.data.WasmContracts[contractAddr]
+
+			// Re-fetch jobs — host functions may have added/removed cron entries.
+			liveJobs := s.data.WasmCronJobs[contractAddr]
+			// C1: only update this specific job if it still exists at the same index.
+			if i < len(liveJobs) && liveJobs[i].MethodName == job.MethodName {
+				success := execErr == nil
+				if success {
+					liveJobs[i].FailureCount = 0
+					liveJobs[i].LastExecutedAtUnix = blockTime
+				} else {
+					liveJobs[i].FailureCount++
+					if liveJobs[i].FailureCount >= wire.WasmCronAutoDisable {
+						liveJobs[i].Enabled = false
+					}
+				}
+				liveJobs[i].NextDueAtUnix = blockTime + job.IntervalSeconds
+			}
 
 			// Charge gas from contract balance.
 			gasCharged := gasUsed
@@ -60,19 +92,7 @@ func (s *Store) processWasmCronJobsLocked(blockTime int64) {
 			contract.Balance -= gasCharged
 			s.data.WasmContracts[contractAddr] = contract
 
-			// Update cron job state.
 			success := execErr == nil
-			if success {
-				job.FailureCount = 0
-				job.LastExecutedAtUnix = blockTime
-			} else {
-				job.FailureCount++
-				if job.FailureCount >= wire.WasmCronAutoDisable {
-					job.Enabled = false
-				}
-			}
-			job.NextDueAtUnix = blockTime + job.IntervalSeconds
-			jobs[i] = job
 
 			// Record the cron execution as a system transaction.
 			payload := wasmCronExecTxPayload{
@@ -105,8 +125,6 @@ func (s *Store) processWasmCronJobsLocked(blockTime int64) {
 				"success":          success,
 			}, contractAddr, "", "", int64(len(s.data.Blocks)), contractAddr)
 		}
-
-		s.data.WasmCronJobs[contractAddr] = jobs
 	}
 }
 

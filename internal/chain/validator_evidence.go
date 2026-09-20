@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"chain/internal/wire"
@@ -61,9 +62,52 @@ func (s *Store) applyValidatorEvidenceLocked(evidence wire.ValidatorEvidence) (b
 	s.data.Accounts[account.Address] = account
 	s.addSlashedToPermanentFundLocked(slash)
 
+	// Slash delegators proportionally to prevent delegation exit bypass.
+	// Compute the slash ratio from self-stake: slash / (selfStake + slash)
+	// i.e. the fraction of total stake that was slashed.
+	selfStakeBeforeSlash := account.LockedStake + slash
 	validator := s.validatorLocked(ownerAddr)
+	totalDelegated := validator.DelegatedStake
+	var delegatorSlashTotal uint64
+	if totalDelegated > 0 && selfStakeBeforeSlash > 0 {
+		for key, del := range s.data.StakeDelegations {
+			if !strings.EqualFold(del.Validator, ownerAddr) {
+				continue
+			}
+			// Proportional slash: del.Amount * slash / selfStakeBeforeSlash
+			delSlash := mulDivUint64(del.Amount, slash, 1, selfStakeBeforeSlash)
+			if delSlash > del.Amount {
+				delSlash = del.Amount
+			}
+			if delSlash == 0 {
+				continue
+			}
+			del.Amount -= delSlash
+			if del.Amount == 0 {
+				delete(s.data.StakeDelegations, key)
+			} else {
+				s.data.StakeDelegations[key] = del
+			}
+			// Reduce delegator's UnbondingBalance if they have pending unbonding,
+			// otherwise reduce their effective delegated amount.
+			delAccount := s.accountLocked(del.Delegator)
+			if delAccount.UnbondingBalance >= delSlash {
+				delAccount.UnbondingBalance -= delSlash
+			}
+			s.data.Accounts[del.Delegator] = delAccount
+			delegatorSlashTotal += delSlash
+		}
+		s.addSlashedToPermanentFundLocked(delegatorSlashTotal)
+	}
+
+	// Update validator delegated stake.
+	if totalDelegated > delegatorSlashTotal {
+		validator.DelegatedStake = totalDelegated - delegatorSlashTotal
+	} else {
+		validator.DelegatedStake = 0
+	}
 	validator.Stake = account.LockedStake
-	validator.Slashed += slash
+	validator.Slashed += slash + delegatorSlashTotal
 	validator.EvidenceCount++
 	if validator.Stake == 0 {
 		validator.Status = wire.ValidatorStatusSlashed

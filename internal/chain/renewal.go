@@ -307,26 +307,12 @@ func (s *Store) autoRenewDealsLocked(now int64) (renewed int) {
 }
 
 func (s *Store) StartAutoRenewScheduler(interval time.Duration) {
+	// C8: Auto-renew is now handled deterministically within block production
+	// (see produceBlockLocked in block.go). The standalone goroutine scheduler
+	// has been removed to prevent consensus-diverging state mutations caused
+	// by clock drift between validators.
 	if interval <= 0 {
 		return
 	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for range ticker.C {
-			s.mu.Lock()
-			renewed := s.autoRenewDealsLocked(time.Now().Unix())
-			var err error
-			if renewed > 0 {
-				err = s.saveLocked()
-			}
-			s.mu.Unlock()
-			if renewed > 0 {
-				log.Printf("auto renewed %d deals", renewed)
-			}
-			if err != nil {
-				log.Printf("auto renew save failed: %v", err)
-			}
-		}
-	}()
+	log.Printf("auto-renew scheduler: standalone mode disabled; renewals are processed during block production")
 }

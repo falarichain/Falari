@@ -131,6 +131,8 @@ func propose(args []string) {
 	storageRewardPerBlock := fs.Uint64("storage-reward-per-block", 0, "storage pool per-block reward in smallest units (for update_mining_params)")
 	foundationRewardPerBlock := fs.Uint64("foundation-reward-per-block", 0, "foundation pool per-block reward in smallest units (for update_mining_params)")
 	retrievalRewardPerBlock := fs.Uint64("retrieval-reward-per-block", 0, "retrieval pool per-block reward in smallest units (for update_mining_params)")
+	validatorRewardPerBlock := fs.Uint64("validator-reward-per-block", 0, "validator pool per-block gross reward in smallest units (for update_mining_params)")
+	permanentFundInjectionBPS := fs.Uint64("permanent-fund-injection-bps", 0, "share of miner and validator emission routed to the permanent storage fund, in BPS (for update_mining_params)")
 	retrievalReleaseRateBPS := fs.Uint64("retrieval-release-rate-bps", 0, "retrieval pool release rate BPS (for update_mining_params)")
 	storedBytesWeightBPS := fs.Uint64("stored-bytes-weight-bps", 0, "stored bytes weight factor BPS (for update_mining_params)")
 	proofScoreWeightBPS := fs.Uint64("proof-score-weight-bps", 0, "proof score weight factor BPS (for update_mining_params)")
@@ -210,6 +212,8 @@ func propose(args []string) {
 		TargetStorageRewardPerBlock:       *storageRewardPerBlock,
 		TargetFoundationRewardPerBlock:    *foundationRewardPerBlock,
 		TargetRetrievalRewardPerBlock:     *retrievalRewardPerBlock,
+		TargetValidatorRewardPerBlock:     *validatorRewardPerBlock,
+		TargetPermanentFundInjectionBPS:   *permanentFundInjectionBPS,
 		TargetRetrievalReleaseRateBPS:     *retrievalReleaseRateBPS,
 		TargetStoredBytesWeightBPS:        *storedBytesWeightBPS,
 		TargetProofScoreWeightBPS:         *proofScoreWeightBPS,

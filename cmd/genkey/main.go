@@ -25,7 +25,7 @@ func main() {
 	fmt.Printf("private_key:  %s\n", privHex)
 	fmt.Println()
 	fmt.Println("Store the private key securely. Use it via environment variable:")
-	fmt.Println("  VALIDATOR_PRIVATE_KEY=<private_key> chainnode ...")
+	fmt.Println("  OWNER_ADDRESS=<address> OWNER_PRIVATE_KEY=<private_key> OPERATOR_PRIVATE_KEY=<private_key> chainnode ...")
 	fmt.Println("  MINER_PRIVATE_KEY=<private_key>     storagenode ...")
 	fmt.Println("  MINER_PRIVATE_KEY=<private_key>     retrievalnode ...")
 }

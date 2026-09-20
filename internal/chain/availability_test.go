@@ -153,24 +153,29 @@ func TestBlockProductionRewardSplit(t *testing.T) {
 		t.Fatalf("expected validator pool to release tokens, got 0")
 	}
 
-	// New algorithm: exactly ValidatorRewardPerBlock is released per block (default 16 tokens).
+	// The whole gross release leaves the pool; the fund carve-out never does.
 	params := store.miningParamsLocked()
 	expectedRelease := params.ValidatorRewardPerBlock
 	if expectedRelease == 0 {
-		expectedRelease = 16 * reward.TokenUnit
+		expectedRelease = 22 * reward.TokenUnit
 	}
 	if released != expectedRelease {
 		t.Fatalf("expected released %d (ValidatorRewardPerBlock), got %d", expectedRelease, released)
 	}
 
-	expectedBlockReward := released * 3000 / 10000
+	fundShare := expectedRelease * params.PermanentFundInjectionBPS / 10000
+	if got := store.data.RewardPools.PermanentFundRemaining; got != fundShare {
+		t.Fatalf("expected permanent fund injection %d, got %d", fundShare, got)
+	}
+	payout := expectedRelease - fundShare
+	expectedBlockReward := payout * 3000 / 10000
 	if producerBal != expectedBlockReward {
 		t.Fatalf("expected block reward %d (30%%), got %d", expectedBlockReward, producerBal)
 	}
 
 	// Producer is also the only consensus validator, so it receives the 70%
 	// staking portion via vesting (PendingMiningRewards).
-	expectedStakingReward := released - expectedBlockReward
+	expectedStakingReward := payout - expectedBlockReward
 	pending := store.data.Accounts["producer"].PendingMiningRewards
 	if pending != expectedStakingReward {
 		t.Fatalf("expected pending staking reward %d, got %d", expectedStakingReward, pending)

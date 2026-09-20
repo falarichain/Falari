@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -15,10 +16,57 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	host "github.com/libp2p/go-libp2p/core/host"
 	peer "github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/multiformats/go-multiaddr"
 )
 
-const defaultProviderTopic = "storage-chain/providers/devnet"
+const (
+	defaultProviderTopic = "storage-chain/providers/devnet"
+
+	// H5: Provider gossip limits.
+	providerMaxGossipBytes = 4 << 20 // 4 MiB
+	providerGossipRate     = 10.0    // messages per second per peer
+	providerGossipBurst    = 20
+	providerRateStale      = 10 * time.Minute
+	providerRateCleanup    = 5 * time.Minute
+)
+
+// providerTokenBucket is a simple token bucket for per-peer rate limiting.
+type providerTokenBucket struct {
+	tokens    float64
+	maxTokens float64
+	rate      float64
+	lastTime  time.Time
+}
+
+func newProviderTokenBucket(rate float64, burst int) *providerTokenBucket {
+	return &providerTokenBucket{
+		tokens:    float64(burst),
+		maxTokens: float64(burst),
+		rate:      rate,
+		lastTime:  time.Now(),
+	}
+}
+
+func (b *providerTokenBucket) Allow() bool {
+	now := time.Now()
+	elapsed := now.Sub(b.lastTime).Seconds()
+	b.lastTime = now
+	b.tokens += elapsed * b.rate
+	if b.tokens > b.maxTokens {
+		b.tokens = b.maxTokens
+	}
+	if b.tokens >= 1.0 {
+		b.tokens -= 1.0
+		return true
+	}
+	return false
+}
+
+type providerRateState struct {
+	bucket   *providerTokenBucket
+	lastSeen time.Time
+}
 
 type ProviderNetwork struct {
 	node          *Node
@@ -33,6 +81,10 @@ type ProviderNetwork struct {
 	mu            sync.RWMutex
 	providers     map[string]wire.StorageProviderRecord
 	dhtService    *falaridht.Service
+
+	// H5: Per-peer gossip rate limiters.
+	peerRateMu       sync.Mutex
+	peerRateLimiters map[string]*providerRateState
 }
 
 func StartProviderNetwork(node *Node, listenAddrs string, rawPeers string, topicName string, endpoint string, capacityBytes uint64) (*ProviderNetwork, error) {
@@ -53,9 +105,16 @@ func StartProviderNetworkWithDHT(node *Node, listenAddrs string, rawPeers string
 	if len(addrs) == 0 {
 		addrs = []string{"/ip4/0.0.0.0/tcp/0"}
 	}
+	// H3: Add connection manager to prevent unbounded peer growth.
+	cm, err := connmgr.NewConnManager(50, 100, connmgr.WithGracePeriod(30*time.Second))
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("provider connmgr: %w", err)
+	}
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(addrs...),
 		libp2p.EnableHolePunching(),
+		libp2p.ConnectionManager(cm),
 	)
 	if err != nil {
 		cancel()
@@ -242,12 +301,31 @@ func (p *ProviderNetwork) announceLoop() {
 }
 
 func (p *ProviderNetwork) readLoop() {
+	// H5: Start periodic cleanup of stale peer rate limiters.
+	cleanupTicker := time.NewTicker(providerRateCleanup)
+	defer cleanupTicker.Stop()
+	go func() {
+		for range cleanupTicker.C {
+			p.cleanupPeerRateLimiters()
+		}
+	}()
+
 	for {
 		msg, err := p.sub.Next(p.ctx)
 		if err != nil {
 			return
 		}
 		if p.host != nil && msg.ReceivedFrom == p.host.ID() {
+			continue
+		}
+		// H5: Reject oversized messages before deserialization.
+		if len(msg.Data) > providerMaxGossipBytes {
+			log.Printf("provider: drop oversized gossip: %d bytes (max %d)", len(msg.Data), providerMaxGossipBytes)
+			continue
+		}
+		// H5: Per-peer rate limiting.
+		peerID := msg.ReceivedFrom.String()
+		if !p.peerRateAllow(peerID) {
 			continue
 		}
 		var announcement wire.StorageProviderAnnouncement
@@ -260,6 +338,36 @@ func (p *ProviderNetwork) readLoop() {
 			continue
 		}
 		p.storeProvider(announcement.Provider)
+	}
+}
+
+// peerRateAllow checks whether a peer is within the per-peer gossip rate limit.
+func (p *ProviderNetwork) peerRateAllow(peerID string) bool {
+	p.peerRateMu.Lock()
+	defer p.peerRateMu.Unlock()
+	if p.peerRateLimiters == nil {
+		p.peerRateLimiters = make(map[string]*providerRateState)
+	}
+	state, ok := p.peerRateLimiters[peerID]
+	if !ok {
+		state = &providerRateState{
+			bucket: newProviderTokenBucket(providerGossipRate, providerGossipBurst),
+		}
+		p.peerRateLimiters[peerID] = state
+	}
+	state.lastSeen = time.Now()
+	return state.bucket.Allow()
+}
+
+// cleanupPeerRateLimiters removes stale peer rate limiter entries.
+func (p *ProviderNetwork) cleanupPeerRateLimiters() {
+	p.peerRateMu.Lock()
+	defer p.peerRateMu.Unlock()
+	now := time.Now()
+	for id, state := range p.peerRateLimiters {
+		if now.Sub(state.lastSeen) > providerRateStale {
+			delete(p.peerRateLimiters, id)
+		}
 	}
 }
 

@@ -8,19 +8,19 @@ import (
 // execution (host function side effects). Stored in the transaction payload
 // so that block replay can re-apply these changes without re-executing WASM.
 type WasmStateDelta struct {
-	KVUpserts        map[string]string              `json:"kv_upserts,omitempty"`
-	KVDeletes         []string                       `json:"kv_deletes,omitempty"`
-	ContractBalance   *int64                         `json:"contract_balance,omitempty"`
-	AccountDeltas     map[string]int64               `json:"account_deltas,omitempty"`
+	KVUpserts         map[string]string               `json:"kv_upserts,omitempty"`
+	KVDeletes         []string                        `json:"kv_deletes,omitempty"`
+	ContractBalance   *int64                          `json:"contract_balance,omitempty"`
+	AccountDeltas     map[string]int64                `json:"account_deltas,omitempty"`
 	PendingEvents     []wire.WasmPendingEventDelivery `json:"pending_events,omitempty"`
-	Subscriptions     []wire.WasmEventSubscription   `json:"subscriptions,omitempty"`
-	CronJobs          []wire.WasmCronJob             `json:"cron_jobs,omitempty"`
-	NonceDelta        *uint64                        `json:"nonce_delta,omitempty"`
-	NewIntents        map[string]*Intent             `json:"new_intents,omitempty"`
-	EscrowDeltas      map[string]EscrowDelta         `json:"escrow_deltas,omitempty"`
-	NewCollections    map[string]wire.DataCollection `json:"new_collections,omitempty"`
-	NewRecords        map[string]wire.DataRecord     `json:"new_records,omitempty"`
-	CollectionAppends map[string][]string            `json:"collection_appends,omitempty"`
+	Subscriptions     []wire.WasmEventSubscription    `json:"subscriptions,omitempty"`
+	CronJobs          []wire.WasmCronJob              `json:"cron_jobs,omitempty"`
+	NonceDelta        *uint64                         `json:"nonce_delta,omitempty"`
+	NewIntents        map[string]*Intent              `json:"new_intents,omitempty"`
+	EscrowDeltas      map[string]EscrowDelta          `json:"escrow_deltas,omitempty"`
+	NewCollections    map[string]wire.DataCollection  `json:"new_collections,omitempty"`
+	NewRecords        map[string]wire.DataRecord      `json:"new_records,omitempty"`
+	CollectionAppends map[string][]string             `json:"collection_appends,omitempty"`
 }
 
 // IsEmpty returns true if the delta contains no state changes.
@@ -50,30 +50,30 @@ type EscrowDelta struct {
 // immediately before WASM execution. Used by diffWasmState to compute deltas.
 type wasmStateSnapshot struct {
 	contractAddr       string
-	kvStore            map[string]string              // deep copy of contract's KV
-	contractBalance    uint64                         // WasmContracts[addr].Balance
-	subscriptions      []wire.WasmEventSubscription   // copy of slice
-	cronJobs           []wire.WasmCronJob             // copy of slice
-	pendingEventsCount int                            // len(WasmPendingEvents)
+	kvStore            map[string]string            // deep copy of contract's KV
+	contractBalance    uint64                       // WasmContracts[addr].Balance
+	subscriptions      []wire.WasmEventSubscription // copy of slice
+	cronJobs           []wire.WasmCronJob           // copy of slice
+	pendingEventsCount int                          // len(WasmPendingEvents)
 	wasmNonce          uint64
-	accountBalances    map[string]uint64              // addr → Accounts[addr].Balance
-	intentIDs          map[string]bool                // existing intent IDs
-	escrows            map[string]wire.DealEscrow     // copy of relevant escrows
-	collectionIDs      map[string]bool                // existing collection IDs
-	recordIDs          map[string]bool                // existing record IDs
-	collectionRecords  map[string]int                 // collID → len(CollectionRecords[collID])
+	accountBalances    map[string]uint64          // addr → Accounts[addr].Balance
+	intentIDs          map[string]bool            // existing intent IDs
+	escrows            map[string]wire.DealEscrow // copy of relevant escrows
+	collectionIDs      map[string]bool            // existing collection IDs
+	recordIDs          map[string]bool            // existing record IDs
+	collectionRecords  map[string]int             // collID → len(CollectionRecords[collID])
 }
 
 // captureWasmStateSnapshot takes a point-in-time snapshot of all state that
 // WASM host functions can modify. Called immediately before engine.CallExport().
 func captureWasmStateSnapshot(s *Store, contractAddr string) wasmStateSnapshot {
 	snap := wasmStateSnapshot{
-		contractAddr:    contractAddr,
-		accountBalances: make(map[string]uint64),
-		intentIDs:       make(map[string]bool),
-		escrows:         make(map[string]wire.DealEscrow),
-		collectionIDs:   make(map[string]bool),
-		recordIDs:       make(map[string]bool),
+		contractAddr:      contractAddr,
+		accountBalances:   make(map[string]uint64),
+		intentIDs:         make(map[string]bool),
+		escrows:           make(map[string]wire.DealEscrow),
+		collectionIDs:     make(map[string]bool),
+		recordIDs:         make(map[string]bool),
 		collectionRecords: make(map[string]int),
 	}
 
@@ -108,9 +108,9 @@ func captureWasmStateSnapshot(s *Store, contractAddr string) wasmStateSnapshot {
 	// WasmNonce.
 	snap.wasmNonce = s.data.WasmNonce
 
-	// Account balances: record the executing contract's account.
-	if acc, ok := s.data.Accounts[contractAddr]; ok {
-		snap.accountBalances[contractAddr] = acc.Balance
+	// H6: Snapshot ALL account balances so exec_transfer targets are captured.
+	for addr, acc := range s.data.Accounts {
+		snap.accountBalances[addr] = acc.Balance
 	}
 
 	// Existing intent IDs.
@@ -176,7 +176,9 @@ func diffWasmState(s *Store, before wasmStateSnapshot, contractAddr string) Wasm
 	}
 
 	// ── Account balance diffs ──
-	// Scan all accounts; compare against snapshot balances.
+	// H6: All pre-existing accounts are snapshotted, so any untracked account
+	// with balance > 0 was created during WASM execution (via exec_transfer →
+	// accountLocked). Include its full balance as the delta.
 	accountDeltas := make(map[string]int64)
 	for addr, acc := range s.data.Accounts {
 		oldBal, tracked := before.accountBalances[addr]
@@ -185,33 +187,10 @@ func diffWasmState(s *Store, before wasmStateSnapshot, contractAddr string) Wasm
 				accountDeltas[addr] = int64(acc.Balance) - int64(oldBal)
 			}
 		} else if acc.Balance > 0 {
-			// Account not in snapshot but has balance — could be a new
-			// account that received a transfer. We include it only if
-			// it might have been created during this WASM call.
-			// Since we can't know for sure without pre-snapshotting all
-			// accounts, we check: if balance > 0 and the account wasn't
-			// tracked, the delta is +balance (net new funds).
-			// However, this would incorrectly flag ALL existing accounts.
-			// So we skip untracked accounts — exec_transfer targets should
-			// already exist (accountLocked auto-creates them with 0 balance).
-			// We only care about BALANCE CHANGES, not account creation.
-			_ = addr
+			// New account created during WASM execution; delta = full balance.
+			accountDeltas[addr] = int64(acc.Balance)
 		}
 	}
-	// For untracked accounts that received transfers: accountLocked creates
-	// them with 0 balance, so if they now have balance > 0, the delta is
-	// their full balance. But we need to distinguish "existed with 0" from
-	// "created during WASM". Since accountLocked always creates on access,
-	// we can't tell the difference. Solution: record all accounts with
-	// balance changes that were NOT in the snapshot by checking if they
-	// appear in Accounts but weren't tracked. This is safe because:
-	// - Before WASM: account may or may not exist (0 or more balance)
-	// - After WASM: if exec_transfer sent funds, balance increased
-	// - We can't know the original balance if not snapshotted
-	// Workaround: pre-snapshot likely targets. Since we can't know targets
-	// in advance, we accept this limitation for now. External transfers to
-	// previously-unseen accounts may not be fully captured.
-	// TODO: instrument exec_transfer to record target addresses for pre-snapshot.
 	if len(accountDeltas) > 0 {
 		delta.AccountDeltas = accountDeltas
 	}

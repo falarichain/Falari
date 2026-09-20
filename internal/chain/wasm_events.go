@@ -2,6 +2,8 @@ package chain
 
 import (
 	"encoding/json"
+	"log"
+	"time"
 
 	"chain/internal/wire"
 )
@@ -9,16 +11,24 @@ import (
 // deliverWasmPendingEventsLocked processes all pending WASM events that are due
 // for delivery at the current block. For each subscriber, it calls the
 // subscriber's "handle_event" method with the event data as input.
-// Must be called with s.mu held.
-func (s *Store) deliverWasmPendingEventsLocked(blockTime int64) {
+// Must be called with s.mu held. deadline caps total WASM system time per block.
+func (s *Store) deliverWasmPendingEventsLocked(blockTime int64, deadline time.Time) {
 	if len(s.data.WasmPendingEvents) == 0 {
 		return
 	}
 
 	blockHeight := uint64(len(s.data.Blocks))
 	remaining := make([]wire.WasmPendingEventDelivery, 0)
+	budgetExhausted := false
 
 	for _, pending := range s.data.WasmPendingEvents {
+		if budgetExhausted {
+			// C2 fix: When budget is exhausted, retain ALL remaining events
+			// instead of silently dropping them via goto.
+			remaining = append(remaining, pending)
+			continue
+		}
+
 		// Only deliver events that are due at or before the current block.
 		if pending.DeliveryBlock > blockHeight {
 			remaining = append(remaining, pending)
@@ -27,6 +37,16 @@ func (s *Store) deliverWasmPendingEventsLocked(blockTime int64) {
 
 		// Deliver to each subscriber.
 		for _, subAddr := range pending.Subscribers {
+			// H7: Check per-block time budget before each execution.
+			if time.Now().After(deadline) {
+				log.Printf("wasm events: per-block time budget exceeded, deferring remaining deliveries")
+				budgetExhausted = true
+				// Re-queue the current pending entry since not all subscribers
+				// were processed; subsequent events will also be retained.
+				remaining = append(remaining, pending)
+				break
+			}
+
 			contract, ok := s.data.WasmContracts[subAddr]
 			if !ok || contract.Status != wire.WasmContractStatusActive {
 				continue // skip inactive subscribers
@@ -39,9 +59,9 @@ func (s *Store) deliverWasmPendingEventsLocked(blockTime int64) {
 
 			// Build event input for the subscriber's handle_event method.
 			eventInput, _ := json.Marshal(map[string]any{
-				"emitter_address": pending.Event.EmitterAddress,
-				"event_type":      pending.Event.EventType,
-				"attributes":      pending.Event.Attributes,
+				"emitter_address":  pending.Event.EmitterAddress,
+				"event_type":       pending.Event.EventType,
+				"attributes":       pending.Event.Attributes,
 				"emitted_at_block": pending.Event.EmittedAtBlock,
 			})
 

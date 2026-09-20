@@ -116,7 +116,9 @@ func eventCounterFromContext(ctx context.Context) *wasmEventCounter {
 func consumeGas(ctx context.Context, amount uint64) {
 	gm := wasm.GasMeterFromContext(ctx)
 	if gm == nil {
-		return
+		// No gas meter means the contract can call host functions without
+		// paying for them. Trap to prevent unbounded execution.
+		panic("gas meter not configured")
 	}
 	if err := gm.Consume(amount); err != nil {
 		panic(err.Error())
@@ -205,18 +207,18 @@ func (s *Store) registerHostFunctions(builder wazero.HostModuleBuilder) {
 				return writeResult(ctx, mod, errorJSON("miner not found"))
 			}
 			data, _ := json.Marshal(map[string]any{
-				"miner_address":             miner.MinerAddress,
-				"capacity_bytes":            miner.CapacityBytes,
-				"used_bytes":                miner.UsedBytes,
-				"stake":                     miner.Stake,
-				"status":                    miner.Status,
-				"proof_success":             miner.ProofSuccess,
-				"proof_failure":             miner.ProofFailure,
-				"rewards":                   miner.Rewards,
-				"endpoint":                  miner.Endpoint,
-				"access_service_required":   miner.AccessServiceRequired,
-				"upload_service_enabled":    miner.UploadServiceEnabled,
-				"download_service_enabled":  miner.DownloadServiceEnabled,
+				"miner_address":            miner.MinerAddress,
+				"capacity_bytes":           miner.CapacityBytes,
+				"used_bytes":               miner.UsedBytes,
+				"stake":                    miner.Stake,
+				"status":                   miner.Status,
+				"proof_success":            miner.ProofSuccess,
+				"proof_failure":            miner.ProofFailure,
+				"rewards":                  miner.Rewards,
+				"endpoint":                 miner.Endpoint,
+				"access_service_required":  miner.AccessServiceRequired,
+				"upload_service_enabled":   miner.UploadServiceEnabled,
+				"download_service_enabled": miner.DownloadServiceEnabled,
 			})
 			return writeResult(ctx, mod, data)
 		}).
@@ -356,13 +358,13 @@ func (s *Store) registerHostFunctions(builder wazero.HostModuleBuilder) {
 				return writeResult(ctx, mod, errorJSON("collection not found"))
 			}
 			data, _ := json.Marshal(map[string]any{
-				"collection_id":  coll.CollectionID,
-				"user":           coll.User,
-				"name":           coll.Name,
-				"description":    coll.Description,
-				"metadata":       coll.Metadata,
+				"collection_id":   coll.CollectionID,
+				"user":            coll.User,
+				"name":            coll.Name,
+				"description":     coll.Description,
+				"metadata":        coll.Metadata,
 				"created_at_unix": coll.CreatedAtUnix,
-				"record_count":   len(s.data.CollectionRecords[collID]),
+				"record_count":    len(s.data.CollectionRecords[collID]),
 			})
 			return writeResult(ctx, mod, data)
 		}).
@@ -481,15 +483,15 @@ func (s *Store) registerHostFunctions(builder wazero.HostModuleBuilder) {
 				return writeResult(ctx, mod, errorJSON("deal escrow not found"))
 			}
 			data, _ := json.Marshal(map[string]any{
-				"intent_id":           escrow.IntentID,
-				"user":                escrow.User,
-				"locked_fee":          escrow.LockedFee,
-				"paid_fee":            escrow.PaidFee,
-				"accrued_fee":         escrow.AccruedFee,
-				"status":              escrow.Status,
-				"permanent":           escrow.Permanent,
-				"start_at_unix":       escrow.StartAtUnix,
-				"expires_at_unix":     escrow.ExpiresAtUnix,
+				"intent_id":            escrow.IntentID,
+				"user":                 escrow.User,
+				"locked_fee":           escrow.LockedFee,
+				"paid_fee":             escrow.PaidFee,
+				"accrued_fee":          escrow.AccruedFee,
+				"status":               escrow.Status,
+				"permanent":            escrow.Permanent,
+				"start_at_unix":        escrow.StartAtUnix,
+				"expires_at_unix":      escrow.ExpiresAtUnix,
 				"last_accrued_at_unix": escrow.LastAccruedAtUnix,
 			})
 			return writeResult(ctx, mod, data)
@@ -964,6 +966,10 @@ func (s *Store) registerHostFunctions(builder wazero.HostModuleBuilder) {
 			if !ok {
 				return 3
 			}
+			// Security: only the deal owner (or the contract itself) can renew.
+			if escrow.User != addr {
+				return 4
+			}
 
 			contract.Balance -= amount
 			s.data.WasmContracts[addr] = contract
@@ -1084,13 +1090,15 @@ func (s *Store) registerHostFunctions(builder wazero.HostModuleBuilder) {
 // ── Internal helpers for host functions ──
 
 // readString reads a UTF-8 string from WASM linear memory.
+// Returns empty string only for zero-length reads; out-of-bounds reads
+// trigger a WASM trap to prevent silent data corruption.
 func readString(mod api.Module, ptr, length uint32) string {
 	if length == 0 {
 		return ""
 	}
 	data, ok := mod.Memory().Read(ptr, length)
 	if !ok {
-		return ""
+		panic("wasm memory read out of bounds")
 	}
 	return string(data)
 }

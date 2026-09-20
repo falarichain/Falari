@@ -25,7 +25,7 @@ const (
 	defaultBlockSizeHeadroom = 8 * 1024
 	maxFutureBlockTimeSkew   = 30 * time.Second
 	maxMempoolTxs            = 10_000 // prevents unbounded mempool growth / OOM
-	maxMempoolTxsPerSender   = 512   // prevents single-sender mempool spam
+	maxMempoolTxsPerSender   = 512    // prevents single-sender mempool spam
 )
 
 func (s *Store) recordTxLocked(txType, from string, payload any) string {
@@ -81,10 +81,8 @@ func (s *Store) AcceptTransaction(tx wire.Transaction) (bool, error) {
 		return false, err
 	}
 
-	if tx.AgentKeyID != "" || transactionRequiresSignature(tx.Type) {
-		if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
-			return false, err
-		}
+	if err := verifyTransactionEnvelope(tx, s.ChainID()); err != nil {
+		return false, err
 	}
 
 	s.mu.Lock()
@@ -111,39 +109,44 @@ func (s *Store) AcceptTransaction(tx wire.Transaction) (bool, error) {
 }
 
 func (s *Store) ProduceBlock() (wire.ProduceBlockResponse, error) {
-	s.mu.Lock()
+	var block wire.Block
+	var produced bool
 
-	if s.operatorIdentity == nil {
-		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, errors.New("no operator identity configured")
-	}
-	validator, ok := s.data.Validators[s.operatorIdentity.OwnerAddress]
-	if !ok || validator.Status != wire.ValidatorStatusActive {
-		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, errors.New("operator's owner is not an active validator")
-	}
-	if validator.OperatorPublicKey != s.operatorIdentity.OperatorPublicKeyHex() {
-		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, errors.New("operator public key mismatch")
-	}
-	if err := s.validateLocalProducerTurnLocked(); err != nil {
-		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, err
-	}
-	block, produced, err := s.produceBlockLocked()
+	// Wrap all locked operations in a closure to guarantee unlock via defer.
+	err := func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if s.operatorIdentity == nil {
+			return errors.New("no operator identity configured")
+		}
+		validator, ok := s.data.Validators[s.operatorIdentity.OwnerAddress]
+		if !ok || validator.Status != wire.ValidatorStatusActive {
+			return errors.New("operator's owner is not an active validator")
+		}
+		if validator.OperatorPublicKey != s.operatorIdentity.OperatorPublicKeyHex() {
+			return errors.New("operator public key mismatch")
+		}
+		if err := s.validateLocalProducerTurnLocked(); err != nil {
+			return err
+		}
+		var err error
+		block, produced, err = s.produceBlockLocked()
+		if err != nil {
+			return err
+		}
+		if !produced {
+			return nil
+		}
+		return s.saveLocked()
+	}()
+
 	if err != nil {
-		s.mu.Unlock()
 		return wire.ProduceBlockResponse{}, err
 	}
 	if !produced {
-		s.mu.Unlock()
 		return wire.ProduceBlockResponse{Produced: false}, nil
 	}
-	if err := s.saveLocked(); err != nil {
-		s.mu.Unlock()
-		return wire.ProduceBlockResponse{}, err
-	}
-	s.mu.Unlock()
 	s.broadcastBlock(block)
 	s.SubmitLocalConsensusVotesForBlock(block)
 	return wire.ProduceBlockResponse{Produced: true, Block: block}, nil
@@ -211,7 +214,7 @@ func (s *Store) AcceptBlock(block wire.Block) (bool, error) {
 	if snapErr != nil {
 		return false, snapErr
 	}
-	if block.StateRoot != "" && block.StateRoot != s.stateRootLocked() {
+	if block.StateRoot != "" && block.StateRoot != s.fullStateRootLocked() {
 		s.data = postTxSnapshot
 		return false, errors.New("block state root mismatch")
 	}
@@ -261,12 +264,21 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	// Process matured unbonding entries each block.
 	s.processMaturedUnbondingEntriesLocked()
 	// Execute WASM cron jobs and deliver pending events before user txs.
+	// H7: Share a per-block time budget across cron and event processing.
 	blockTime := time.Now().Unix()
-	s.processWasmCronJobsLocked(blockTime)
-	s.deliverWasmPendingEventsLocked(blockTime)
+	wasmDeadline := time.Now().Add(wasmSystemBlockBudget)
+	s.processWasmCronJobsLocked(blockTime, wasmDeadline)
+	s.deliverWasmPendingEventsLocked(blockTime, wasmDeadline)
+	// C8: Auto-renew deals deterministically within block production so all
+	// validators produce the same state. Previously ran in a separate goroutine
+	// with its own timer, causing consensus-diverging state mutations.
+	s.autoRenewDealsLocked(blockTime)
 	s.blockLogIndex = 0
 	txs := s.selectPendingTxsForBlockLocked()
-	appliedTxs, _ := s.applyPendingTransactionsForBlockLocked(txs, s.operatorIdentity.OwnerAddress)
+	var appliedTxs []wire.Transaction
+	s.withBlockTimeLocked(blockTime, func() {
+		appliedTxs, _ = s.applyPendingTransactionsForBlockLocked(txs, s.operatorIdentity.OwnerAddress)
+	})
 	txLeaves := make([]string, 0, len(appliedTxs))
 	for _, tx := range appliedTxs {
 		txLeaves = append(txLeaves, txLeaf(tx))
@@ -281,7 +293,7 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 		TimeUnix:          blockTime,
 		PrevHash:          prevHash,
 		TxRoot:            chaincrypto.MerkleRoot(txLeaves),
-		StateRoot:         s.stateRootLocked(),
+		StateRoot:         s.fullStateRootLocked(),
 		Transactions:      appliedTxs,
 		ProducerAddress:   s.operatorIdentity.OperatorAddress,
 		ProducerPublicKey: s.operatorIdentity.OperatorPublicKeyHex(),
@@ -578,17 +590,16 @@ func (s *Store) validateBlockTimeLocked(block wire.Block) error {
 	return nil
 }
 
-func transactionRequiresSignature(txType string) bool {
-	switch txType {
-	case "create_intent", "batch_commit", "finalize_deal", "settle_intent",
-		"permanent_fund_topup", "renew_deal", "terminate_deal",
-		"set_access_policy", "delegate_stake", "undelegate_stake",
-		"governance_create_proposal", "governance_cast_vote", "governance_execute_proposal":
-		return true
-		// bridge_out, bridge_in_claim, bridge_set_config, and claim_mining_rewards
-		// use their own payload-level signatures.
+// verifyTransactionEnvelope enforces the transaction envelope signature.
+// Requests that carry their own payload signature (transfer, storage, governance,
+// bridge) are authenticated by that signature, and transactions recorded by the
+// block producer on the network's behalf have no envelope signature to check — so
+// the envelope is only verified when the sender signed it or when an agent key acts.
+func verifyTransactionEnvelope(tx wire.Transaction, chainID string) error {
+	if tx.AgentKeyID == "" && tx.Signature == "" {
+		return nil
 	}
-	return false
+	return wire.VerifyTransactionSignature(tx, chainID)
 }
 
 func validateTransactionShape(tx wire.Transaction) error {

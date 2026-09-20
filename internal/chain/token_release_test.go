@@ -13,6 +13,7 @@ func TestRetrievalPoolIsReservedForGatewaySettlement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.initRewardPoolsLocked()
 	store.data.Miners["miner_a"] = wire.MinerStats{MinerAddress: "miner_a", Status: wire.MinerStatusActive, RetrievalBytes: 100, AntiSpamScore: 10000, SpeedScore: 10000}
 	store.data.Miners["miner_b"] = wire.MinerStats{MinerAddress: "miner_b", Status: wire.MinerStatusActive, RetrievalBytes: 300, AntiSpamScore: 10000, SpeedScore: 10000}
 
@@ -96,25 +97,41 @@ func TestFoundationPoolDistributesDirectlyToAddress(t *testing.T) {
 	}
 }
 
-func TestFoundationPoolReturnsWhenNoAddress(t *testing.T) {
+func TestFoundationPerBlockReleaseSkippedWithoutAddress(t *testing.T) {
 	store, err := OpenStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.initRewardPoolsLocked()
-	// Simulate a release that already decremented FoundationRemaining and incremented TokensReleased.
-	store.data.RewardPools.FoundationRemaining = wire.TokenFoundationPoolInitial - 500
-	store.data.RewardPools.TokensReleased = 500
+	store.data.FoundationAddress = ""
+	now := int64(1_700_000_000)
 
-	store.distributeFoundationPoolRewardsLocked(500)
+	store.releaseFoundationPerBlockLocked(now)
 
-	// Tokens should be returned to the pool since no address is set.
-	if store.data.RewardPools.FoundationRemaining != wire.TokenFoundationPoolInitial {
-		t.Fatalf("expected foundation pool restored to %d, got %d",
-			wire.TokenFoundationPoolInitial, store.data.RewardPools.FoundationRemaining)
+	if store.data.RewardPools.FoundationRemaining != reward.FoundationPoolInitial {
+		t.Fatalf("expected foundation pool untouched, got %d", store.data.RewardPools.FoundationRemaining)
 	}
 	if store.data.RewardPools.TokensReleased != 0 {
-		t.Fatalf("expected tokens released reset to 0, got %d", store.data.RewardPools.TokensReleased)
+		t.Fatalf("expected no tokens released, got %d", store.data.RewardPools.TokensReleased)
+	}
+}
+
+func TestRetrievalPerBlockReleaseSkippedWithoutAddress(t *testing.T) {
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.initRewardPoolsLocked()
+	store.data.RetrievalAddress = ""
+	now := int64(1_700_000_000)
+
+	store.releaseRetrievalPerBlockLocked(now)
+
+	if store.data.RewardPools.RetrievalRemaining != reward.RetrievalPoolInitial {
+		t.Fatalf("expected retrieval pool untouched, got %d", store.data.RewardPools.RetrievalRemaining)
+	}
+	if store.data.RewardPools.TokensReleased != 0 {
+		t.Fatalf("expected no tokens released, got %d", store.data.RewardPools.TokensReleased)
 	}
 }
 
@@ -134,7 +151,10 @@ func TestStoragePerBlockReleaseAccruesEstimatedRewards(t *testing.T) {
 	now := int64(1_700_000_000)
 	store.releaseStoragePerBlockLocked(now)
 
-	expected := uint64(50) * reward.TokenUnit // default StorageRewardPerBlock
+	params := store.miningParamsLocked()
+	gross := params.StorageRewardPerBlock // default 70 GF
+	fundShare := gross * params.PermanentFundInjectionBPS / 10000
+	expected := gross - fundShare // miner take-home after the fund carve-out
 	if got := store.data.Accounts["miner_a"].PendingMiningRewards; got != 0 {
 		t.Fatalf("expected no direct pending mining rewards before proof settlement, got %d", got)
 	}
@@ -145,9 +165,12 @@ func TestStoragePerBlockReleaseAccruesEstimatedRewards(t *testing.T) {
 	if got := stats.UnsettledStorageRewards; got != expected {
 		t.Fatalf("expected unsettled storage reward %d, got %d", expected, got)
 	}
-	if store.data.RewardPools.StorageRemaining != reward.StoragePoolInitial-expected {
+	if got := store.data.RewardPools.PermanentFundRemaining; got != fundShare {
+		t.Fatalf("expected permanent fund injection %d, got %d", fundShare, got)
+	}
+	if store.data.RewardPools.StorageRemaining != reward.StoragePoolInitial-gross {
 		t.Fatalf("expected storage pool remaining %d, got %d",
-			reward.StoragePoolInitial-expected, store.data.RewardPools.StorageRemaining)
+			reward.StoragePoolInitial-gross, store.data.RewardPools.StorageRemaining)
 	}
 
 	settled := store.settleStorageRewardForMinerLocked("miner_a", now+60)

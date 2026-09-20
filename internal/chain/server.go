@@ -187,7 +187,7 @@ func (s *Server) snapshot(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) consensus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.store.consensusLocked())
+	writeJSON(w, http.StatusOK, s.store.Consensus())
 }
 
 func (s *Server) setUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -683,12 +683,19 @@ func (s *Server) listRetrievalReceipts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startEpoch(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.validateOperatorHeaders(r); err != nil {
+	operatorAddress, err := s.validateOperatorHeaders(r)
+	if err != nil {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	var req wire.StartEpochRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	// The authenticated operator and the operator named by the signed request must be
+	// the same party, otherwise the transaction would consume the wrong nonce.
+	if normalizeGovernanceOperator(req.OperatorAddress) != operatorAddress {
+		writeError(w, http.StatusForbidden, errors.New("start epoch operator_address does not match authenticated operator"))
 		return
 	}
 	resp, err := s.store.StartEpoch(req)
@@ -700,12 +707,17 @@ func (s *Server) startEpoch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) finalizeEpoch(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.validateOperatorHeaders(r); err != nil {
+	operatorAddress, err := s.validateOperatorHeaders(r)
+	if err != nil {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	var req wire.FinalizeEpochRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if normalizeGovernanceOperator(req.OperatorAddress) != operatorAddress {
+		writeError(w, http.StatusForbidden, errors.New("finalize epoch operator_address does not match authenticated operator"))
 		return
 	}
 	resp, err := s.store.FinalizeEpoch(req)

@@ -186,7 +186,7 @@ func (s *Store) payPermanentFundSubsidyLocked(intent *Intent, minerAddress strin
 	if subsidy == 0 {
 		return 0
 	}
-	s.data.RewardPools.PayFromPermanentFund(subsidy)
+	s.data.RewardPools.SpendPermanentFund(subsidy)
 	s.data.StorageFeePool.RepairPoolTransferred = saturatingAdd(s.data.StorageFeePool.RepairPoolTransferred, subsidy)
 	return subsidy
 }

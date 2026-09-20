@@ -422,13 +422,16 @@ func TestBlockProductionChargesFeesToProducer(t *testing.T) {
 		t.Fatalf("unexpected recipient balance: %d", toAccount.Balance)
 	}
 	// Producer balance must increase by at least the transfer fee + block reward.
+	// The block reward is paid out of the validator release net of the
+	// permanent-fund carve-out.
 	params := store.miningParamsLocked()
 	perBlock := params.ValidatorRewardPerBlock
 	productionBPS := params.BlockProductionRewardBPS
 	if productionBPS == 0 {
 		productionBPS = 3000
 	}
-	blockReward := perBlock * productionBPS / 10000
+	payout := perBlock - perBlock*params.PermanentFundInjectionBPS/10000
+	blockReward := payout * productionBPS / 10000
 	minExpectedGain := gfTokens(5) + blockReward
 	actualGain := producerAccount.Balance - producerBalBefore
 	if actualGain < minExpectedGain {
@@ -918,6 +921,7 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.SetOperatorIdentity(identity)
+	operator := testRegisterEpochOperator(producer, identity.OperatorAddress)
 	seedFinalizedDealForEpochTest(producer)
 
 	peer, err := OpenStore("")
@@ -925,6 +929,7 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedFinalizedDealForEpochTest(peer)
+	testRegisterEpochOperator(peer, identity.OperatorAddress)
 	peerRegistration, err := identity.RegistrationRequest(peer.ChainID(), peer.AccountNonce(identity.OwnerAddress), "http://validator-a", MinValidatorStake, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -987,6 +992,14 @@ func TestAcceptPeerProofEpochBlocks(t *testing.T) {
 	account := peer.accountLocked("miner_epoch")
 	if account.LockedStake != 7 {
 		t.Fatalf("expected locked stake 7, got %d", account.LockedStake)
+	}
+	// The producer consumes the operator nonce at intake and the peer consumes it during
+	// replay, so both nodes must land on the same counter.
+	if producer.data.OperatorNonces[operator] != 2 {
+		t.Fatalf("expected the producer to consume two epoch nonces, got %d", producer.data.OperatorNonces[operator])
+	}
+	if peer.data.OperatorNonces[operator] != producer.data.OperatorNonces[operator] {
+		t.Fatalf("peer consumed %d nonces, producer consumed %d", peer.data.OperatorNonces[operator], producer.data.OperatorNonces[operator])
 	}
 }
 

@@ -52,6 +52,9 @@ func main() {
 		if err := config.Load(*configPath, &cfg); err != nil {
 			log.Fatalf("load config: %v", err)
 		}
+		if err := cfg.Validate(); err != nil {
+			log.Fatalf("invalid config %s: %v", *configPath, err)
+		}
 		if !config.IsFlagSet("addr") && cfg.HTTP.Addr != "" {
 			*addr = cfg.HTTP.Addr
 		}
@@ -177,12 +180,18 @@ func main() {
 	if endpoint == "" {
 		endpoint = "http://localhost" + *addr
 	}
-	registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), endpoint, *validatorStake, *validatorCommissionBPS)
-	if err != nil {
-		log.Fatalf("sign validator registration: %v", err)
-	}
-	if _, err := store.RegisterValidator(registration); err != nil {
-		log.Fatalf("register validator: %v", err)
+	// Genesis may pre-declare this node's validator, and every restart re-runs this code,
+	// so a live registration is skipped instead of failing as a duplicate.
+	if store.HasActiveValidator(identity.OwnerAddress, identity.OperatorAddress) {
+		log.Printf("validator %s already active, skipping registration", identity.OwnerAddress)
+	} else {
+		registration, err := identity.RegistrationRequest(store.ChainID(), store.AccountNonce(identity.OwnerAddress), endpoint, *validatorStake, *validatorCommissionBPS)
+		if err != nil {
+			log.Fatalf("sign validator registration: %v", err)
+		}
+		if _, err := store.RegisterValidator(registration); err != nil {
+			log.Fatalf("register validator: %v", err)
+		}
 	}
 	store.SetOperatorIdentity(identity)
 	network, err := chain.NewPeerNetworkWithConfig(store, chain.PeerNetworkConfig{
@@ -199,6 +208,11 @@ func main() {
 	store.SetTransactionBroadcaster(network)
 	store.SetConsensusVoteBroadcaster(network)
 	log.Printf("validator %s enabled endpoint=%s stake=%d commission_bps=%d", identity.OwnerAddress, endpoint, *validatorStake, *validatorCommissionBPS)
+	if operatorAddress, err := store.EpochDriverStatus(); err != nil {
+		log.Printf("epoch scheduler operator %s is not authorized: %v (this node will not start or finalize epochs)", operatorAddress, err)
+	} else {
+		log.Printf("epoch scheduler operator %s authorized", operatorAddress)
+	}
 	if len(network.Peers()) > 0 {
 		log.Printf("peer network enabled peers=%v", network.Peers())
 	}
@@ -215,8 +229,8 @@ func main() {
 	store.StartIntentSettlementScheduler(chain.IntentSettlementSchedulerConfig{Interval: *settleInterval})
 	store.StartAutoRenewScheduler(*renewInterval)
 	store.SetBlockInterval(*blockInterval)
-	store.StartBlockProducer(*blockInterval)
-	store.StartBlockTimeoutChecker(*blockInterval)
+	store.StartBlockProducer(context.Background(), *blockInterval)
+	store.StartBlockTimeoutChecker(context.Background(), *blockInterval)
 	network.StartBlockSync(*syncInterval)
 
 	server := chain.NewServer(store, network)

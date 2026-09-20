@@ -33,8 +33,8 @@ func (s *Store) CreateMultisigWallet(req wire.MultisigCreateRequest) (wire.Multi
 	if err := wire.ValidateMultisigSigners(req.Signers); err != nil {
 		return wire.MultisigWallet{}, err
 	}
-	if req.Threshold < 1 || int(req.Threshold) > len(req.Signers) {
-		return wire.MultisigWallet{}, errors.New("threshold must be between 1 and the number of signers")
+	if req.Threshold < 2 || int(req.Threshold) > len(req.Signers) {
+		return wire.MultisigWallet{}, errors.New("threshold must be between 2 and the number of signers")
 	}
 
 	// Compute deterministic address.
@@ -173,8 +173,8 @@ func (s *Store) MultisigExec(req wire.MultisigExecRequest) (wire.MultisigExecRes
 		if err := wire.ValidateMultisigSigners(inner.NewSigners); err != nil {
 			return wire.MultisigExecResponse{}, err
 		}
-		if inner.NewThreshold < 1 || int(inner.NewThreshold) > len(inner.NewSigners) {
-			return wire.MultisigExecResponse{}, errors.New("threshold must be between 1 and the number of signers")
+		if inner.NewThreshold < 2 || int(inner.NewThreshold) > len(inner.NewSigners) {
+			return wire.MultisigExecResponse{}, errors.New("threshold must be between 2 and the number of signers")
 		}
 		wallet.Signers = inner.NewSigners
 		wallet.Threshold = inner.NewThreshold
@@ -184,8 +184,8 @@ func (s *Store) MultisigExec(req wire.MultisigExecRequest) (wire.MultisigExecRes
 		if err := json.Unmarshal(req.Payload, &inner); err != nil {
 			return wire.MultisigExecResponse{}, errors.New("invalid update_threshold payload")
 		}
-		if inner.NewThreshold < 1 || int(inner.NewThreshold) > len(wallet.Signers) {
-			return wire.MultisigExecResponse{}, errors.New("threshold must be between 1 and the number of signers")
+		if inner.NewThreshold < 2 || int(inner.NewThreshold) > len(wallet.Signers) {
+			return wire.MultisigExecResponse{}, errors.New("threshold must be between 2 and the number of signers")
 		}
 		wallet.Threshold = inner.NewThreshold
 
@@ -419,7 +419,7 @@ func (s *Store) applyMultisigExecLocked(payload multisigExecTxPayload) error {
 		if err := wire.ValidateMultisigSigners(inner.NewSigners); err != nil {
 			return errors.New("replay multisig exec update_signers validation failed: " + err.Error())
 		}
-		if inner.NewThreshold < 1 || int(inner.NewThreshold) > len(inner.NewSigners) {
+		if inner.NewThreshold < 2 || int(inner.NewThreshold) > len(inner.NewSigners) {
 			return errors.New("replay multisig exec update_signers invalid threshold")
 		}
 		wallet.Signers = inner.NewSigners

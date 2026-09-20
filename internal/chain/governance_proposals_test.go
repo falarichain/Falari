@@ -394,13 +394,14 @@ func TestCancelGovernanceProposal(t *testing.T) {
 	store, privKeys, addresses := testGovernanceSetup(t)
 
 	proposalReq := testGovernanceProposalReq(t, store, addresses[0], privKeys[0])
-	_, err := store.CreateGovernanceProposal(proposalReq)
+	created, err := store.CreateGovernanceProposal(proposalReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// After creating a proposal, the operator nonce has been incremented to 1.
 	cancelReq := wire.CreateGovernanceProposalRequest{
+		ProposalID:    created.Proposal.ProposalID,
 		Proposer:      addresses[0],
 		ChainID:       store.data.ChainID,
 		Nonce:         store.data.OperatorNonces[addresses[0]],
@@ -765,14 +766,14 @@ func TestUpdateMiningParamsPartialUpdate(t *testing.T) {
 	origParams := store.GetMiningParams()
 
 	req := wire.CreateGovernanceProposalRequest{
-		Proposer:                  addresses[0],
-		ChainID:                   store.data.ChainID,
-		Action:                    "update_mining_params",
-		ReasonHash:                "tune_proof_weight",
+		Proposer:                   addresses[0],
+		ChainID:                    store.data.ChainID,
+		Action:                     "update_mining_params",
+		ReasonHash:                 "tune_proof_weight",
 		TargetProofScoreWeightBPS:  3000,
 		TargetStoredBytesWeightBPS: 3500,
-		Nonce:                     store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
-		CreatedAtUnix:             time.Now().Unix(),
+		Nonce:                      store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
+		CreatedAtUnix:              time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
 		t.Fatal(err)
@@ -886,5 +887,167 @@ func TestUpdateMiningParamsValidatorRewardPerBlock(t *testing.T) {
 	if updatedParams.ValidatorCommissionBPS != origParams.ValidatorCommissionBPS {
 		t.Fatalf("validator commission should be unchanged: expected %d, got %d",
 			origParams.ValidatorCommissionBPS, updatedParams.ValidatorCommissionBPS)
+	}
+}
+
+func TestUpdateMiningParamsPermanentFundInjection(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	newStorageReward := 84 * reward.TokenUnit
+	newInjectionBPS := uint64(3000)
+
+	req := wire.CreateGovernanceProposalRequest{
+		Proposer:                        addresses[0],
+		ChainID:                         store.data.ChainID,
+		Action:                          "update_mining_params",
+		ReasonHash:                      "adjust_emission",
+		TargetStorageRewardPerBlock:     newStorageReward,
+		TargetPermanentFundInjectionBPS: newInjectionBPS,
+		Nonce:                           store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
+		CreatedAtUnix:                   time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
+		t.Fatal(err)
+	}
+	propResp, err := store.CreateGovernanceProposal(req)
+	if err != nil {
+		t.Fatalf("update_mining_params proposal failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		voteReq := testGovernanceVoteReq(t, store, propResp.Proposal.ProposalID, addresses[i], true, privKeys[i])
+		voteResp, err := store.CastGovernanceVote(voteReq)
+		if err != nil {
+			t.Fatalf("vote %d failed: %v", i, err)
+		}
+		if voteResp.Executed {
+			break
+		}
+	}
+
+	updated := store.GetMiningParams()
+	if updated.StorageRewardPerBlock != newStorageReward {
+		t.Fatalf("expected storage_reward_per_block %d, got %d", newStorageReward, updated.StorageRewardPerBlock)
+	}
+	if updated.PermanentFundInjectionBPS != newInjectionBPS {
+		t.Fatalf("expected permanent_fund_injection_bps %d, got %d", newInjectionBPS, updated.PermanentFundInjectionBPS)
+	}
+}
+
+func TestUpdateMiningParamsRejectsOutOfRangeFundInjection(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	req := wire.CreateGovernanceProposalRequest{
+		Proposer:                        addresses[0],
+		ChainID:                         store.data.ChainID,
+		Action:                          "update_mining_params",
+		ReasonHash:                      "overflow_injection",
+		TargetPermanentFundInjectionBPS: maxPermanentFundInjectionBPS + 1,
+		Nonce:                           store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
+		CreatedAtUnix:                   time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateGovernanceProposal(req); err == nil {
+		t.Fatal("expected injection BPS above the cap to be rejected")
+	}
+}
+
+func TestUpdateMiningParamsRejectsOutOfRangeActivationWindow(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	req := wire.CreateGovernanceProposalRequest{
+		Proposer:                      addresses[0],
+		ChainID:                       store.data.ChainID,
+		Action:                        "update_mining_params",
+		ReasonHash:                    "overflow_activation_window",
+		TargetActivationWindowSeconds: maxActivationWindowSeconds + 1,
+		Nonce:                         store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
+		CreatedAtUnix:                 time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateGovernanceProposal(req); err == nil {
+		t.Fatal("expected activation window above the cap to be rejected")
+	}
+}
+
+// TestUpdateMiningParamsBonusFieldsRoundTrip drives the registration-bonus family
+// and the activation window through create -> vote -> execute. Executing
+// re-derives the signing payload from the stored proposal and re-verifies the
+// proposer's signature, so a target that is stored, signed or applied
+// inconsistently surfaces here as a failed execution.
+func TestUpdateMiningParamsBonusFieldsRoundTrip(t *testing.T) {
+	store, privKeys, addresses := testGovernanceSetup(t)
+
+	req := wire.CreateGovernanceProposalRequest{
+		Proposer:                      addresses[0],
+		ChainID:                       store.data.ChainID,
+		Action:                        "update_mining_params",
+		ReasonHash:                    "adjust_registration_bonus",
+		TargetRegistrationBonusAmount: 6000 * reward.TokenUnit,
+		TargetMinBonusProofCount:      6000,
+		TargetMinBonusSuccessRateBPS:  9900,
+		TargetMinBonusRetrievalCount:  120,
+		TargetMaxBonusAddresses:       210000,
+		TargetBonusDeadlineSeconds:    100 * 24 * 60 * 60,
+		TargetActivationWindowSeconds: 10 * 24 * 60 * 60,
+		Nonce:                         store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
+		CreatedAtUnix:                 time.Now().Unix(),
+	}
+	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.CreateGovernanceProposal(req)
+	if err != nil {
+		t.Fatalf("create bonus proposal: %v", err)
+	}
+	stored := created.Proposal
+	for name, got := range map[string]uint64{
+		"registration_bonus_amount":  stored.TargetRegistrationBonusAmount,
+		"min_bonus_proof_count":      stored.TargetMinBonusProofCount,
+		"min_bonus_success_rate_bps": stored.TargetMinBonusSuccessRateBPS,
+		"min_bonus_retrieval_count":  stored.TargetMinBonusRetrievalCount,
+		"max_bonus_addresses":        stored.TargetMaxBonusAddresses,
+		"bonus_deadline_seconds":     stored.TargetBonusDeadlineSeconds,
+		"activation_window_seconds":  stored.TargetActivationWindowSeconds,
+	} {
+		if got == 0 {
+			t.Fatalf("target %s was not carried into the stored proposal", name)
+		}
+	}
+
+	executed := false
+	for i := 0; i < 2; i++ {
+		voteResp, err := store.CastGovernanceVote(testGovernanceVoteReq(t, store, stored.ProposalID, addresses[i], true, privKeys[i]))
+		if err != nil {
+			t.Fatalf("vote %d failed: %v", i, err)
+		}
+		if voteResp.Executed {
+			executed = true
+			break
+		}
+	}
+	if !executed {
+		t.Fatal("proposal did not execute after two approvals")
+	}
+
+	params := store.GetMiningParams()
+	if params.RegistrationBonusAmount != 6000*reward.TokenUnit {
+		t.Fatalf("registration bonus: got %d", params.RegistrationBonusAmount)
+	}
+	if params.MinBonusProofCount != 6000 || params.MinBonusSuccessRateBPS != 9900 {
+		t.Fatalf("bonus proof/success targets: got %d / %d", params.MinBonusProofCount, params.MinBonusSuccessRateBPS)
+	}
+	if params.MinBonusRetrievalCount != 120 || params.MaxBonusAddresses != 210000 {
+		t.Fatalf("bonus retrieval/address targets: got %d / %d", params.MinBonusRetrievalCount, params.MaxBonusAddresses)
+	}
+	if params.BonusDeadlineSeconds != 100*24*60*60 {
+		t.Fatalf("bonus deadline: got %d", params.BonusDeadlineSeconds)
+	}
+	if params.ActivationWindowSeconds != 10*24*60*60 {
+		t.Fatalf("activation window: got %d", params.ActivationWindowSeconds)
 	}
 }

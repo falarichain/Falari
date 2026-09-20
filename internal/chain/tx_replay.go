@@ -75,6 +75,10 @@ type finalizeEpochTxPayload struct {
 }
 
 func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
+	// Pin the deterministic block clock for every transaction in this block.
+	previousBlockTime := s.currentBlockTimeUnix
+	s.currentBlockTimeUnix = block.TimeUnix
+	defer func() { s.currentBlockTimeUnix = previousBlockTime }()
 	blockSnapshot, err := cloneStateForRollback(s.data)
 	if err != nil {
 		return err
@@ -88,13 +92,15 @@ func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
 		if s.data.ConfirmedTxs[tx.TxID] {
 			return restoreBlock(errors.New("block contains already confirmed transaction"))
 		}
+		// C3: genesis_credit is only allowed in the genesis block (height 1).
+		if tx.Type == "genesis_credit" && uint64(len(s.data.Blocks)+1) > 1 {
+			return restoreBlock(errors.New("genesis_credit only allowed at height 1"))
+		}
 		if err := s.validateTransactionFeeLocked(tx); err != nil {
 			return restoreBlock(err)
 		}
-		if tx.AgentKeyID != "" {
-			if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
-				return restoreBlock(err)
-			}
+		if err := verifyTransactionEnvelope(tx, s.data.ChainID); err != nil {
+			return restoreBlock(err)
 		}
 		if err := s.validateAgentKeyTxLocked(tx); err != nil {
 			return restoreBlock(err)
@@ -126,15 +132,18 @@ func (s *Store) applyPendingTransactionsForBlockLocked(txs []wire.Transaction, p
 		restoreTx := func() {
 			s.data = txSnapshot
 		}
+		// C3: genesis_credit is only allowed in the genesis block (height 1).
+		if tx.Type == "genesis_credit" && uint64(len(s.data.Blocks)+1) > 1 {
+			restoreTx()
+			continue
+		}
 		if err := s.validateTransactionFeeLocked(tx); err != nil {
 			restoreTx()
 			continue
 		}
-		if tx.AgentKeyID != "" {
-			if err := wire.VerifyTransactionSignature(tx, s.data.ChainID); err != nil {
-				restoreTx()
-				continue
-			}
+		if err := verifyTransactionEnvelope(tx, s.data.ChainID); err != nil {
+			restoreTx()
+			continue
 		}
 		if err := s.validateAgentKeyTxLocked(tx); err != nil {
 			restoreTx()
@@ -1277,25 +1286,34 @@ func (s *Store) applyGovernanceCreateProposalLocked(payload governanceCreateProp
 		if err := validateMiningParamsChangeFields(req, s.miningParamsLocked()); err != nil {
 			return errors.New("replay governance create: " + err.Error())
 		}
+	} else if isFeeMarketAction(req.Action) {
+		if err := validateFeeMarketChangeFields(req); err != nil {
+			return errors.New("replay governance create: " + err.Error())
+		}
 	} else {
 		if _, ok := s.data.Intents[req.IntentID]; !ok {
 			return errors.New("replay governance create: intent not found")
 		}
 	}
 
-	// Validate the response proposal matches the request.
+	// Validate the response proposal matches the request. The operator snapshot is
+	// not part of the signed request: it is a function of local state at this
+	// height, so it is recomputed here instead of trusted from the payload —
+	// otherwise a producer could shrink the quorum by publishing a smaller set.
 	proposal := payload.Response.Proposal
 	if proposal.ProposalID == "" {
 		return errors.New("replay governance create: missing proposal id")
 	}
 	expectedProposal := governanceProposalFromRequest(req, proposer, proposal.ProposalID, req.CreatedAtUnix)
+	expectedProposal.EnabledOperatorsSnapshot = s.enabledOperatorAddressesLocked()
+	proposal.EnabledOperatorsSnapshot = expectedProposal.EnabledOperatorsSnapshot
 	if !reflect.DeepEqual(proposal, expectedProposal) {
 		return errors.New("replay governance create: response proposal mismatch")
 	}
 
 	// Consume nonce and write proposal.
 	s.data.OperatorNonces[proposer] = expectedNonce + 1
-	s.data.GovernanceProposals[proposal.ProposalID] = proposal
+	s.data.GovernanceProposals[proposal.ProposalID] = expectedProposal
 	s.data.GovernanceVotes[proposal.ProposalID] = []wire.GovernanceVote{}
 	s.emitEventWithEmitterLocked(wire.EventGovProposalCreated, map[string]any{
 		"proposal_id": proposal.ProposalID,
@@ -1370,22 +1388,11 @@ func (s *Store) applyGovernanceCastVoteLocked(payload governanceCastVoteTxPayloa
 	}
 
 	// Recompute vote counts without mutating state first.
-	approveCount, rejectCount := 0, 0
-	for _, existing := range append(append([]wire.GovernanceVote(nil), votes...), vote) {
-		voterAddr := normalizeGovernanceOperator(existing.Voter)
-		op, ok := s.data.GovernanceOperators[voterAddr]
-		if !ok || !op.Enabled {
-			continue
-		}
-		if existing.Approve {
-			approveCount++
-		} else {
-			rejectCount++
-		}
-	}
-	threshold := s.governanceThresholdLocked(proposal.Action)
+	allVotes := append(append([]wire.GovernanceVote(nil), votes...), vote)
+	approveCount, rejectCount := s.countProposalVotesLocked(proposal, allVotes)
+	totalEnabled := s.proposalTotalEnabledLocked(proposal)
+	threshold := s.governanceThresholdForLocked(proposal.Action, totalEnabled)
 
-	totalEnabled := s.countEnabledOperatorsLocked()
 	remaining := totalEnabled - approveCount - rejectCount
 	executed := approveCount >= threshold
 	if approveCount >= threshold {
@@ -1476,20 +1483,11 @@ func (s *Store) applyGovernanceExecuteProposalLocked(payload governanceExecutePr
 		return errors.New("replay governance execute: proposal signature re-verification failed: " + err.Error())
 	}
 
-	// Re-count votes and verify threshold.
-	approveCount := 0
-	for _, v := range s.data.GovernanceVotes[proposal.ProposalID] {
-		if !v.Approve {
-			continue
-		}
-		voterAddr := normalizeGovernanceOperator(v.Voter)
-		op, ok := s.data.GovernanceOperators[voterAddr]
-		if !ok || !op.Enabled {
-			continue
-		}
-		approveCount++
-	}
-	threshold := s.governanceThresholdLocked(proposal.Action)
+	// Re-count votes and verify threshold, against the proposal's operator
+	// snapshot so a later add/remove_operator cannot diverge from the node that
+	// executed the proposal.
+	approveCount, _ := s.countProposalVotesLocked(proposal, s.data.GovernanceVotes[proposal.ProposalID])
+	threshold := s.governanceThresholdForLocked(proposal.Action, s.proposalTotalEnabledLocked(proposal))
 	if approveCount < threshold {
 		return errors.New("replay governance execute: insufficient approval votes")
 	}
@@ -1572,34 +1570,16 @@ func (s *Store) applyGenerateChallengesLocked(payload generateChallengesTxPayloa
 }
 
 func (s *Store) applyStartEpochLocked(payload startEpochTxPayload) error {
-	// Operator auth verification (soft fork: legacy txs with empty operator pass).
-	if payload.Request.OperatorAddress != "" {
-		operatorAddr := normalizeGovernanceOperator(payload.Request.OperatorAddress)
-		if operatorAddr == "" {
-			return errors.New("replay start epoch: invalid operator address")
-		}
-		if payload.Request.ChainID != s.data.ChainID {
-			return errors.New("replay start epoch: chain_id mismatch")
-		}
-		operator, ok := s.data.GovernanceOperators[operatorAddr]
-		if !ok || !operator.Enabled {
-			return errors.New("replay start epoch: operator not authorized")
-		}
-		if err := s.validateGovernanceOperatorLocked(operatorAddr, "start_epoch"); err != nil {
-			return errors.New("replay start epoch: " + err.Error())
-		}
-		expectedNonce := s.data.OperatorNonces[operatorAddr]
-		if payload.Request.Nonce != expectedNonce {
-			return errors.New("replay start epoch: operator nonce mismatch")
-		}
-		if payload.Request.CreatedAtUnix == 0 {
-			return errors.New("replay start epoch: missing created_at_unix")
-		}
-		if err := wire.VerifyStartEpochRequest(payload.Request, operatorAddr); err != nil {
-			return errors.New("replay start epoch: " + err.Error())
-		}
-		s.data.OperatorNonces[operatorAddr] = expectedNonce + 1
+	// An epoch transaction without a verifiable operator signature is never valid, on
+	// any chain version.
+	operatorAddr, err := s.validateEpochOperatorLocked(epochActionStart, startEpochAuthFields(payload.Request))
+	if err != nil {
+		return errors.New("replay " + err.Error())
 	}
+	if err := wire.VerifyStartEpochRequest(payload.Request, operatorAddr); err != nil {
+		return errors.New("replay " + err.Error())
+	}
+	s.data.OperatorNonces[operatorAddr] = payload.Request.Nonce + 1
 
 	if payload.Epoch.EpochID == "" {
 		return errors.New("replay start epoch missing epoch id")
@@ -1714,34 +1694,16 @@ func (s *Store) applySubmitProofLocked(payload submitProofTxPayload) error {
 }
 
 func (s *Store) applyFinalizeEpochLocked(payload finalizeEpochTxPayload) error {
-	// Operator auth verification (soft fork: legacy txs with empty operator pass).
-	if payload.Request.OperatorAddress != "" {
-		operatorAddr := normalizeGovernanceOperator(payload.Request.OperatorAddress)
-		if operatorAddr == "" {
-			return errors.New("replay finalize epoch: invalid operator address")
-		}
-		if payload.Request.ChainID != s.data.ChainID {
-			return errors.New("replay finalize epoch: chain_id mismatch")
-		}
-		operator, ok := s.data.GovernanceOperators[operatorAddr]
-		if !ok || !operator.Enabled {
-			return errors.New("replay finalize epoch: operator not authorized")
-		}
-		if err := s.validateGovernanceOperatorLocked(operatorAddr, "finalize_epoch"); err != nil {
-			return errors.New("replay finalize epoch: " + err.Error())
-		}
-		expectedNonce := s.data.OperatorNonces[operatorAddr]
-		if payload.Request.Nonce != expectedNonce {
-			return errors.New("replay finalize epoch: operator nonce mismatch")
-		}
-		if payload.Request.CreatedAtUnix == 0 {
-			return errors.New("replay finalize epoch: missing created_at_unix")
-		}
-		if err := wire.VerifyFinalizeEpochRequest(payload.Request, operatorAddr); err != nil {
-			return errors.New("replay finalize epoch: " + err.Error())
-		}
-		s.data.OperatorNonces[operatorAddr] = expectedNonce + 1
+	// An epoch transaction without a verifiable operator signature is never valid, on
+	// any chain version.
+	operatorAddr, err := s.validateEpochOperatorLocked(epochActionFinalize, finalizeEpochAuthFields(payload.Request))
+	if err != nil {
+		return errors.New("replay " + err.Error())
 	}
+	if err := wire.VerifyFinalizeEpochRequest(payload.Request, operatorAddr); err != nil {
+		return errors.New("replay " + err.Error())
+	}
+	s.data.OperatorNonces[operatorAddr] = payload.Request.Nonce + 1
 
 	epoch, ok := s.data.Epochs[payload.Response.EpochID]
 	if !ok {
@@ -1866,7 +1828,7 @@ func validateReceiptForReplay(intent *Intent, receipt wire.MinerReceipt) error {
 }
 
 func (s *Store) applyDirectGovernanceActionLocked(payload directGovernanceActionTxPayload) error {
-	resp, err := s.DirectGovernanceAction(payload.Request)
+	resp, err := s.directGovernanceActionLocked(payload.Request)
 	if err != nil {
 		return err
 	}
@@ -1880,7 +1842,7 @@ func (s *Store) applyDirectGovernanceActionLocked(payload directGovernanceAction
 }
 
 func (s *Store) applyDirectActionReviewVoteLocked(payload directActionReviewVoteTxPayload) error {
-	resp, err := s.CastDirectActionReviewVote(payload.Request)
+	resp, err := s.castDirectActionReviewVoteLocked(payload.Request)
 	if err != nil {
 		return err
 	}

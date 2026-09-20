@@ -21,10 +21,10 @@ import (
 type deployContractTxPayload struct {
 	Request         wire.DeployContractRequest  `json:"request"`
 	Response        wire.DeployContractResponse `json:"response"`
-	BytecodeHash    string                     `json:"bytecode_hash"`
-	ContractAddress string                     `json:"contract_address"`
-	DeployedAtUnix  int64                      `json:"deployed_at_unix"`
-	StateDelta      *WasmStateDelta            `json:"state_delta,omitempty"`
+	BytecodeHash    string                      `json:"bytecode_hash"`
+	ContractAddress string                      `json:"contract_address"`
+	DeployedAtUnix  int64                       `json:"deployed_at_unix"`
+	StateDelta      *WasmStateDelta             `json:"state_delta,omitempty"`
 }
 
 type callContractTxPayload struct {
@@ -214,7 +214,7 @@ func (s *Store) DeployContract(req wire.DeployContractRequest) (wire.DeployContr
 	}
 
 	// Store or increment code.
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	if existing, ok := s.data.WasmCodes[codeHash]; ok {
 		existing.RefCount++
 	} else {
@@ -271,7 +271,10 @@ func (s *Store) DeployContract(req wire.DeployContractRequest) (wire.DeployContr
 			gasUsed = result.GasUsed
 			initResult = string(result.Data)
 		}
-		// init failure is not fatal — contract is still deployed
+		if execErr != nil {
+			// Mark contract as init_failed to prevent calling uninitialized state.
+			contract.Status = wire.WasmContractStatusInitFailed
+		}
 	}
 
 	// Register cron jobs.
@@ -389,6 +392,14 @@ func (s *Store) CallContract(req wire.CallContractRequest) (wire.CallContractRes
 		}
 	}
 
+	// C3: Snapshot full state before any mutations so we can roll back on
+	// WASM execution failure. Gas exhaustion panics leave partial host-function
+	// side effects in the live state; committing them would corrupt the chain.
+	preSnapshot, snapErr := cloneStateForRollback(s.data)
+	if snapErr != nil {
+		return wire.CallContractResponse{}, fmt.Errorf("pre-execution snapshot failed: %w", snapErr)
+	}
+
 	// Deduct fee from caller.
 	account.Balance -= req.Fee
 	account.Nonce++
@@ -419,7 +430,7 @@ func (s *Store) CallContract(req wire.CallContractRequest) (wire.CallContractRes
 	}
 
 	// Build context with contract identity, block time, and event counter.
-	now := time.Now().Unix()
+	now := s.consensusTimeLocked()
 	execCtx := withContractAddress(context.Background(), contractAddr)
 	execCtx = withBlockTime(execCtx, now)
 	execCtx = withEventCounter(execCtx, wire.MaxWasmEventsPerCall)
@@ -440,21 +451,12 @@ func (s *Store) CallContract(req wire.CallContractRequest) (wire.CallContractRes
 	}
 
 	if execErr != nil {
-		// Execution failed — still record the tx and charge the fee,
-		// but return the error to the caller.
-		resp := wire.CallContractResponse{
-			Result:  fmt.Sprintf("error: %v", execErr),
-			GasUsed: gasUsed,
-		}
-		s.recordTxLocked("call_contract", caller, callContractTxPayload{
-			Request:    req,
-			Response:   resp,
-			StateDelta: &delta,
-		})
-		if err := s.saveLocked(); err != nil {
-			return wire.CallContractResponse{}, err
-		}
-		return resp, nil
+		// C3: Roll back ALL state changes (including pre-WASM mutations like
+		// fee deduction, nonce increment, and fund transfer) on execution
+		// failure. Gas exhaustion panics leave partial host-function side
+		// effects in the live state; committing them would corrupt the chain.
+		s.data = preSnapshot
+		return wire.CallContractResponse{}, fmt.Errorf("contract execution failed: %w", execErr)
 	}
 
 	resp := wire.CallContractResponse{
@@ -552,7 +554,8 @@ func (s *Store) DestroyContract(req wire.DestroyContractRequest) (wire.DestroyCo
 
 	// Mark as destroyed.
 	contract.Status = wire.WasmContractStatusDestroyed
-	contract.UpdatedAtUnix = time.Now().Unix()
+	destroyTime := s.consensusTimeLocked()
+	contract.UpdatedAtUnix = destroyTime
 	s.data.WasmContracts[contractAddr] = contract
 
 	// Clean up cron jobs.

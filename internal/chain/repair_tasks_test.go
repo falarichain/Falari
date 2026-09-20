@@ -171,6 +171,7 @@ func TestRepairRewardRequiresForcedProof(t *testing.T) {
 
 func TestStartEpochDefaultRewardPerProofIsOneGF(t *testing.T) {
 	store, _, resp, _ := setupCommittedAssignedIntent(t)
+	testEpochOperatorIdentity(t, store)
 	intent := store.data.Intents[resp.IntentID]
 	intent.Status = wire.StatusFinalized
 	intent.StorageStatus = wire.StorageStatusActive
@@ -193,6 +194,7 @@ func TestStartEpochDefaultRewardPerProofIsOneGF(t *testing.T) {
 
 func TestFinalizeEpochCreatesRepairTaskForMissedProof(t *testing.T) {
 	store, _, resp, _ := setupCommittedAssignedIntent(t)
+	testEpochOperatorIdentity(t, store)
 	// With repair delay = 1 epoch, a single missed proof triggers immediate repair.
 	store.data.MiningParams.RepairDelayEpochs = 1
 	intent := store.data.Intents[resp.IntentID]
@@ -433,21 +435,21 @@ func TestCrossParityRepairTaskCreatedForPooledSegment(t *testing.T) {
 			segRoot = intent.Segments[assignment.SegmentID].SegmentRoot
 		}
 		receipt := wire.MinerReceipt{
-			Version:        1,
-			MinerAddress:   m.Address,
-			MinerPublicKey: m.PublicKey,
-			User:           alice.Addr,
-			IntentID:       resp.IntentID,
-			FileRoot:       "file-root",
-			SegmentID:      assignment.SegmentID,
-			SegmentRoot:    segRoot,
-			ShardIndex:     assignment.ShardIndex,
-			ShardID:        resp.IntentID + ":" + strconv.Itoa(assignment.SegmentID) + ":" + strconv.Itoa(assignment.ShardIndex),
-			ShardHash:      assignment.ShardHash,
-			ShardSize:      assignment.ShardSize,
+			Version:          1,
+			MinerAddress:     m.Address,
+			MinerPublicKey:   m.PublicKey,
+			User:             alice.Addr,
+			IntentID:         resp.IntentID,
+			FileRoot:         "file-root",
+			SegmentID:        assignment.SegmentID,
+			SegmentRoot:      segRoot,
+			ShardIndex:       assignment.ShardIndex,
+			ShardID:          resp.IntentID + ":" + strconv.Itoa(assignment.SegmentID) + ":" + strconv.Itoa(assignment.ShardIndex),
+			ShardHash:        assignment.ShardHash,
+			ShardSize:        assignment.ShardSize,
 			SectorCommitment: "sector-" + assignment.ShardHash,
-			ExpiresAtUnix:  time.Now().Add(time.Hour).Unix(),
-			MinerEndpoint:  m.Endpoint,
+			ExpiresAtUnix:    time.Now().Add(time.Hour).Unix(),
+			MinerEndpoint:    m.Endpoint,
 		}
 		if err := wire.SignReceipt(&receipt, m.PrivateKey); err != nil {
 			t.Fatal(err)
@@ -463,8 +465,14 @@ func TestCrossParityRepairTaskCreatedForPooledSegment(t *testing.T) {
 	// Manually add cross-parity receipts at segmentID -1.
 	intent = store.data.Intents[resp.IntentID]
 	paritySegID := -1
+	// Find which miner holds segment 0, shard 0. Parity shards must stay with available
+	// miners, otherwise the shard the test repairs for cannot be sourced from them.
+	seg0Shard0Miner := intent.Receipts[0][0].MinerAddress
 	minerList := make([]testMinerIdentity, 0, len(miners))
 	for _, m := range miners {
+		if wire.NormalizeAddress(m.Address) == wire.NormalizeAddress(seg0Shard0Miner) {
+			continue
+		}
 		minerList = append(minerList, m)
 	}
 	intent.Receipts[paritySegID] = make(map[int]wire.MinerReceipt)
@@ -481,9 +489,6 @@ func TestCrossParityRepairTaskCreatedForPooledSegment(t *testing.T) {
 			ExpiresAtUnix:  time.Now().Add(time.Hour).Unix(),
 		}
 	}
-
-	// Find which miner holds segment 0, shard 0.
-	seg0Shard0Miner := intent.Receipts[0][0].MinerAddress
 
 	// Create repair tasks with that miner unavailable.
 	repair, err := store.CreateRepairTasks(wire.CreateRepairRequest{

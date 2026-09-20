@@ -134,7 +134,8 @@ func TestDeregisterMinerDoesNotSettleUnprovedStorageRewards(t *testing.T) {
 		t.Fatal(err)
 	}
 	stats := store.minerStatsLocked(miner.Addr)
-	expected := uint64(50) * wire.TokenUnit
+	params := store.miningParamsLocked()
+	expected := params.StorageRewardPerBlock * (10000 - params.PermanentFundInjectionBPS) / 10000
 	if stats.Status != wire.MinerStatusExiting {
 		t.Fatalf("expected miner exiting, got %s", stats.Status)
 	}

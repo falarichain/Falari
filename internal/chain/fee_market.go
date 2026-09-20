@@ -18,7 +18,9 @@ func (s *Store) validateTransactionFeeLocked(tx wire.Transaction) error {
 		return nil
 	}
 	multiplierBPS := s.transactionFeeMultiplierBPS(tx.Type)
-	requiredFee := s.data.FeeMarket.BaseFee * multiplierBPS / 10000
+	// H1: Use mulDivUint64 to prevent uint64 overflow when BaseFee * multiplierBPS
+	// exceeds ~1.8×10¹⁹.
+	requiredFee := mulDivUint64(s.data.FeeMarket.BaseFee, multiplierBPS, 1, 10000)
 	if tx.Fee < requiredFee {
 		return fmt.Errorf("transaction fee %d below required %d (base %d x %d bps)",
 			tx.Fee, requiredFee, s.data.FeeMarket.BaseFee, multiplierBPS)
@@ -179,6 +181,8 @@ func (s *Store) chargeableTransactionFeeLocked(tx wire.Transaction) uint64 {
 	return tx.Fee
 }
 
+const maxBaseFee uint64 = 1_000_000_000_000 // 10,000 Tokens — absolute ceiling for BaseFee
+
 func (s *Store) adjustFeeMarketAfterBlockLocked(block wire.Block) {
 	market := s.data.FeeMarket
 	if market.BaseFee == 0 {
@@ -195,6 +199,9 @@ func (s *Store) adjustFeeMarketAfterBlockLocked(block wire.Block) {
 			step = 1
 		}
 		market.BaseFee += step
+		if market.BaseFee > maxBaseFee {
+			market.BaseFee = maxBaseFee
+		}
 	case txCount < market.TargetBlockTxs && market.BaseFee > defaultBaseFee:
 		step := market.BaseFee / 8
 		if step == 0 {

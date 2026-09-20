@@ -1804,13 +1804,21 @@ func runEpoch(args []string) {
 
 	chainClient := client.NewHTTP(*chainURL)
 	var epochResp wire.StartEpochResponse
-	if err := postOperator(*chainURL, "/epochs", wire.StartEpochRequest{
+	startReq := &wire.StartEpochRequest{
 		IntentID:            *intentID,
 		ChallengesPerDeal:   *challengesPerDeal,
 		DurationSeconds:     *duration,
 		RewardPerProof:      *rewardPerProof,
 		SlashPerMissedProof: *slash,
-	}, &epochResp, *keyPath); err != nil {
+	}
+	startKey := loadGovernanceECDSAKey(*keyPath)
+	if err := postOperatorSigned(*chainURL, "/epochs", startReq, &epochResp, *keyPath, func(operatorAddress, signingChainID string, nonce uint64) error {
+		startReq.OperatorAddress = operatorAddress
+		startReq.ChainID = signingChainID
+		startReq.Nonce = nonce
+		startReq.CreatedAtUnix = time.Now().Unix()
+		return wire.SignStartEpochRequest(startReq, startKey)
+	}); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("started epoch %s with %d challenges\n", epochResp.Epoch.EpochID, len(epochResp.Challenges))
@@ -1846,7 +1854,15 @@ func finalizeEpoch(args []string) {
 		log.Fatal("-key is required")
 	}
 	var resp wire.FinalizeEpochResponse
-	if err := postOperator(*chainURL, "/epochs/finalize", wire.FinalizeEpochRequest{EpochID: *epochID}, &resp, *keyPath); err != nil {
+	finalizeReq := &wire.FinalizeEpochRequest{EpochID: *epochID}
+	finalizeKey := loadGovernanceECDSAKey(*keyPath)
+	if err := postOperatorSigned(*chainURL, "/epochs/finalize", finalizeReq, &resp, *keyPath, func(operatorAddress, signingChainID string, nonce uint64) error {
+		finalizeReq.OperatorAddress = operatorAddress
+		finalizeReq.ChainID = signingChainID
+		finalizeReq.Nonce = nonce
+		finalizeReq.CreatedAtUnix = time.Now().Unix()
+		return wire.SignFinalizeEpochRequest(finalizeReq, finalizeKey)
+	}); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("finalized epoch %s accepted=%d missed=%d storage_rewards=%s retrieval_rewards=%s repair_rewards=%s slashed=%s repairs=%d\n",
@@ -2145,16 +2161,33 @@ func operatorNonce(chainURL string, address string) uint64 {
 	return resp["nonce"]
 }
 
+// operatorBodySigner attaches an operator signature to the request body itself. The
+// chain requires it on the epoch endpoints, where the body carries its own nonce.
+type operatorBodySigner func(operatorAddress, signingChainID string, nonce uint64) error
+
 func postOperator(chainURL string, path string, in any, out any, keyPath string) error {
+	return postOperatorSigned(chainURL, path, in, out, keyPath, nil)
+}
+
+// postOperatorSigned sends an operator-authenticated request. When signBody is set it
+// runs before the body is marshalled, so the body signature and the request headers are
+// bound to the same nonce.
+func postOperatorSigned(chainURL string, path string, in any, out any, keyPath string, signBody operatorBodySigner) error {
 	keyFile := loadGovernanceKey(keyPath)
 	privateKey := loadGovernanceECDSAKey(keyPath)
+	nonce := operatorNonce(chainURL, keyFile.Address)
+	networkChainID := chainID(chainURL)
+	if signBody != nil {
+		if err := signBody(keyFile.Address, networkChainID, nonce); err != nil {
+			return err
+		}
+	}
 	raw, err := json.Marshal(in)
 	if err != nil {
 		return err
 	}
-	nonce := operatorNonce(chainURL, keyFile.Address)
 	timestamp := time.Now().Unix()
-	signature, err := wire.SignOperatorRequest(chainID(chainURL), http.MethodPost, path, raw, nonce, timestamp, privateKey)
+	signature, err := wire.SignOperatorRequest(networkChainID, http.MethodPost, path, raw, nonce, timestamp, privateKey)
 	if err != nil {
 		return err
 	}
@@ -3497,12 +3530,37 @@ func genesisInit(args []string) {
 	fs := flag.NewFlagSet("genesis init", flag.ExitOnError)
 	outPath := fs.String("out", "./genesis.json", "output genesis file path")
 	chainID := fs.String("chain-id", "falari-1", "chain identifier")
+	foundationAddress := fs.String("foundation-address", "", "beneficiary of the foundation emission pool (required)")
+	retrievalAddress := fs.String("retrieval-address", "", "beneficiary of the retrieval gateway pool (required)")
+	operatorAddress := fs.String("operator-address", "", "governance operator allowed to sign epoch and admin requests (required)")
 	fs.Parse(args)
 
+	// The node refuses to boot a genesis whose funded pools have no beneficiary, so
+	// fail here instead of writing a file that cannot be used.
+	if !wire.IsValidAddress(*foundationAddress) {
+		log.Fatal("-foundation-address must be a valid hex address")
+	}
+	if !wire.IsValidAddress(*retrievalAddress) {
+		log.Fatal("-retrieval-address must be a valid hex address")
+	}
+	// Epochs and every admin endpoint need an operator that is already on the book,
+	// and adding the first one is itself a signed proposal — so genesis must carry one.
+	if !wire.IsValidAddress(*operatorAddress) {
+		log.Fatal("-operator-address must be a valid hex address")
+	}
+
 	now := time.Now().Unix()
+	enabled := true
 	doc := wire.GenesisDoc{
-		ChainID:     *chainID,
-		GenesisTime: now,
+		ChainID:           *chainID,
+		GenesisTime:       now,
+		FoundationAddress: *foundationAddress,
+		RetrievalAddress:  *retrievalAddress,
+		GovernanceOperators: []wire.GenesisGovernanceOperator{{
+			Operator:    *operatorAddress,
+			Permissions: []string{"admin"},
+			Enabled:     &enabled,
+		}},
 		RewardPools: &wire.GenesisRewardPools{
 			StoragePoolRemaining:    wire.TokenStoragePoolInitial,
 			RetrievalPoolRemaining:  wire.TokenRetrievalPoolInitial,
@@ -3520,7 +3578,9 @@ func genesisInit(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("genesis file created: %s\n", *outPath)
-	fmt.Printf("edit this file to add accounts and validators, then start chainnode with:\n")
+	fmt.Printf("the four pools already cover the whole supply, so every genesis account balance you add\n")
+	fmt.Printf("must be deducted from a pool (validator_pool for bootstrap stake) or the node rejects it.\n")
+	fmt.Printf("then start chainnode with:\n")
 	fmt.Printf("  chainnode -genesis %s\n", *outPath)
 }
 
@@ -3724,8 +3784,8 @@ func usage() {
   chainctl repair        -chain http://localhost:8080 -storage http://localhost:9090,http://localhost:9091 -plan ./upload-plan.json -unavailable miner_xxx
   chainctl prove         -chain http://localhost:8080 -intent intent_xxx -count 3
   chainctl storage-providers -chain http://localhost:8080 -shard shard_hash
-  chainctl epoch         -chain http://localhost:8080 -intent intent_xxx -challenges 3 -reward 10
-  chainctl finalize-epoch -chain http://localhost:8080 -epoch epoch_xxx
+  chainctl epoch         -chain http://localhost:8080 -key ./operator.json -intent intent_xxx -challenges 3 -reward 10
+  chainctl finalize-epoch -chain http://localhost:8080 -key ./operator.json -epoch epoch_xxx
   chainctl miner         -chain http://localhost:8080 -address miner_xxx
   chainctl account-new   -out ./alice.json
   chainctl balance       -chain http://localhost:8080 -address user_demo
@@ -3749,6 +3809,6 @@ func usage() {
   chainctl agent-key revoke -id key_abc123 -master 0xa1b2c3...
   chainctl validators    -chain http://localhost:8080
   chainctl peers         -chain http://localhost:8080
-  chainctl genesis init  -out ./genesis.json
+  chainctl genesis init  -out ./genesis.json -operator-address 0xa1b2c3...
   chainctl events        -chain http://localhost:8080 -type miner_jailed -intent intent_xxx -limit 20 -json`)
 }

@@ -153,14 +153,14 @@ func TestUpdateFeeMarketViaProposal(t *testing.T) {
 	origFM := store.GetFeeMarket()
 
 	req := wire.CreateGovernanceProposalRequest{
-		Proposer:                addresses[0],
-		ChainID:                 store.data.ChainID,
-		Action:                  "update_fee_market",
-		ReasonHash:              "adjust_fee_market",
-		TargetFeeMarketBaseFee:  200_000_000,
+		Proposer:                     addresses[0],
+		ChainID:                      store.data.ChainID,
+		Action:                       "update_fee_market",
+		ReasonHash:                   "adjust_fee_market",
+		TargetFeeMarketBaseFee:       200_000_000,
 		TargetFeeMultiplierBridgeOut: 30000,
-		Nonce:                   store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
-		CreatedAtUnix:           time.Now().Unix(),
+		Nonce:                        store.data.OperatorNonces[normalizeGovernanceOperator(addresses[0])],
+		CreatedAtUnix:                time.Now().Unix(),
 	}
 	if err := wire.SignGovernanceProposal(&req, privKeys[0]); err != nil {
 		t.Fatal(err)

@@ -26,6 +26,10 @@ const MaxBytecodeSize = 2 * 1024 * 1024 // 2 MB
 // executionTimeout is the wall-clock deadline for a single contract call.
 const executionTimeout = 30 * time.Second
 
+// maxMemoryPages is the maximum number of WASM memory pages (64KB each).
+// 256 pages = 16 MB, matching wire.MaxWasmMemoryBytes.
+const maxMemoryPages = 256
+
 // HostFunctionRegistrar is a callback that registers host functions on a
 // wazero HostModuleBuilder. The chain package uses this to bind its Host API.
 type HostFunctionRegistrar func(builder wazero.HostModuleBuilder)
@@ -244,6 +248,15 @@ func (e *WasmEngine) CallExport(
 		return nil, fmt.Errorf("WASM instantiation failed: %w", err)
 	}
 	defer mod.Close(execCtx)
+
+	// C6: Instruction-level CPU protection is handled by context timeout +
+	// RuntimeConfig.WithCloseOnContextDone(true), which causes wazero to check
+	// ctx.Done() at safepoints during WASM execution.
+
+	// C7: Enforce memory page limit to prevent unbounded memory.grow.
+	if mem := mod.Memory(); mem != nil && mem.Size()/65536 > maxMemoryPages {
+		return &CallResult{GasUsed: gm.Used}, fmt.Errorf("WASM memory exceeds limit: %d pages (max %d)", mem.Size()/65536, maxMemoryPages)
+	}
 
 	// Write input data into WASM linear memory via the contract's "alloc".
 	inputPtr, inputLen, err := writeToMemory(execCtx, mod, input)

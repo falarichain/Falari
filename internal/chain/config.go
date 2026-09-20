@@ -30,9 +30,11 @@ type MiningParams struct {
 	FoundationAnnualRateBPS uint64 `json:"foundation_annual_rate_bps"` // deprecated
 
 	// ── Storage per-block reward ──
-	// StorageRewardPerBlock: fixed number of smallest-unit tokens released from
-	// the StoragePool on every block. Default 50 * TokenUnit (50 tokens).
-	// When the pool is depleted, no more storage rewards are emitted.
+	// StorageRewardPerBlock: gross number of smallest-unit tokens released from
+	// the StoragePool on every block. Default 70 * TokenUnit.
+	// PermanentFundInjectionBPS of the gross release is carved out for the
+	// permanent-storage fund; miners share the remainder. When the pool is
+	// depleted, no more storage rewards are emitted.
 	StorageRewardPerBlock uint64 `json:"storage_reward_per_block,omitempty"`
 
 	// ── Miner effective weight factors (BPS) ──
@@ -72,10 +74,21 @@ type MiningParams struct {
 	BlockProductionRewardBPS uint64 `json:"block_production_reward_bps,omitempty"`
 
 	// ── Validator per-block reward ──
-	// ValidatorRewardPerBlock: fixed number of smallest-unit tokens released from
-	// the ValidatorPool on every block. Default 16 * TokenUnit (16 tokens).
-	// When the pool is depleted, no more validator rewards are emitted.
+	// ValidatorRewardPerBlock: gross number of smallest-unit tokens released from
+	// the ValidatorPool on every block. Default 22 * TokenUnit.
+	// PermanentFundInjectionBPS of the gross release is carved out for the
+	// permanent-storage fund; the remainder is split between the block producer
+	// and the consensus set. When the pool is depleted, no more validator
+	// rewards are emitted.
 	ValidatorRewardPerBlock uint64 `json:"validator_reward_per_block,omitempty"`
+
+	// ── Permanent-storage fund injection ──
+	// PermanentFundInjectionBPS: share of every gross storage and validator
+	// release that is parked in the permanent-storage fund instead of being paid
+	// out. The fund is capped at reward.PermanentFundCap; once filled, the
+	// carve-out stops and the streams pay their recipients in full. The
+	// foundation and retrieval streams are never carved.
+	PermanentFundInjectionBPS uint64 `json:"permanent_fund_injection_bps,omitempty"`
 
 	// ── Foundation per-block reward ──
 	// FoundationRewardPerBlock: fixed number of smallest-unit tokens released from
@@ -148,47 +161,48 @@ type MiningParams struct {
 // DefaultMiningParams returns the factory-default mining parameters.
 func DefaultMiningParams() MiningParams {
 	return MiningParams{
-		StorageReleaseRateBPS:       3,
-		RetrievalReleaseRateBPS:     0,
-		FoundationReleaseRateBPS:    1,
-		RetrievalAnnualRateBPS:      0, // deprecated — use RetrievalRewardPerBlock
-		FoundationAnnualRateBPS:     0, // deprecated — use FoundationRewardPerBlock
-		StorageRewardPerBlock:       50 * reward.TokenUnit,
-		StoredBytesWeightBPS:      4000,
-		ProofScoreWeightBPS:       3000,
-		AvailabilityWeightBPS:     1000,
-		RetrievalSpeedWeightBPS:   1000,
-		IPDispersionWeightBPS:     1000,
-		RetrievalRewardPerMiB:       0,
-		MaxRetrievalRewardPerWindow: 0,
-		PermanentFundTakeoverSeconds: 50 * 365 * 24 * 60 * 60, // 50 years
-		MinerDegradeThreshold:    24,
-		StorageProofSamples:         16,
-		ValidatorCommissionBPS:      1000,
-		AvailabilityWindowSize:      7200,
-		AvailabilityThresholdBPS:    6000,
-		BlockProductionRewardBPS:    3000,
-		ValidatorRewardPerBlock:     16 * reward.TokenUnit,
-		FoundationRewardPerBlock:    16 * reward.TokenUnit,
-		RetrievalRewardPerBlock:     10 * reward.TokenUnit,
-		MaxConsensusValidators:      21,
-		MinConsensusValidators:      2,
-		TargetBlockBytes:            defaultTargetBlockBytes,
-		MaxBlockBytes:               defaultMaxBlockBytes,
-		MaxBlockTxs:                 defaultMaxBlockTxs,
-		MaxTxBytes:                  defaultMaxTxBytes,
-		MaxStorageTxBytes:           defaultMaxStorageTxBytes,
-		RetrievalWeightBPS:          3000,
-		RegistrationBonusAmount:     5000 * reward.TokenUnit,
-		MinBonusProofCount:          5000,
-		MinBonusSuccessRateBPS:      9500,
-		MinBonusRetrievalCount:      100,
-		MaxBonusAddresses:           200_000,
-		BonusDeadlineSeconds:        90 * 24 * 60 * 60,
-		ActivationWindowSeconds:     7 * 24 * 60 * 60,
-		RepairDelayEpochs:           3,
-		MinCapacityBytes:            200 * 1024 * 1024 * 1024,
-		StakePerTiB:                 1000 * reward.TokenUnit,
+		StorageReleaseRateBPS:         3,
+		RetrievalReleaseRateBPS:       0,
+		FoundationReleaseRateBPS:      1,
+		RetrievalAnnualRateBPS:        0, // deprecated — use RetrievalRewardPerBlock
+		FoundationAnnualRateBPS:       0, // deprecated — use FoundationRewardPerBlock
+		StorageRewardPerBlock:         70 * reward.TokenUnit,
+		StoredBytesWeightBPS:          4000,
+		ProofScoreWeightBPS:           3000,
+		AvailabilityWeightBPS:         1000,
+		RetrievalSpeedWeightBPS:       1000,
+		IPDispersionWeightBPS:         1000,
+		RetrievalRewardPerMiB:         0,
+		MaxRetrievalRewardPerWindow:   0,
+		PermanentFundTakeoverSeconds:  50 * 365 * 24 * 60 * 60, // 50 years
+		MinerDegradeThreshold:         24,
+		StorageProofSamples:           16,
+		ValidatorCommissionBPS:        1000,
+		AvailabilityWindowSize:        7200,
+		AvailabilityThresholdBPS:      6000,
+		BlockProductionRewardBPS:      3000,
+		ValidatorRewardPerBlock:       22 * reward.TokenUnit,
+		PermanentFundInjectionBPS:     2800,
+		FoundationRewardPerBlock:      16 * reward.TokenUnit,
+		RetrievalRewardPerBlock:       10 * reward.TokenUnit,
+		MaxConsensusValidators:        21,
+		MinConsensusValidators:        2,
+		TargetBlockBytes:              defaultTargetBlockBytes,
+		MaxBlockBytes:                 defaultMaxBlockBytes,
+		MaxBlockTxs:                   defaultMaxBlockTxs,
+		MaxTxBytes:                    defaultMaxTxBytes,
+		MaxStorageTxBytes:             defaultMaxStorageTxBytes,
+		RetrievalWeightBPS:            3000,
+		RegistrationBonusAmount:       5000 * reward.TokenUnit,
+		MinBonusProofCount:            5000,
+		MinBonusSuccessRateBPS:        9500,
+		MinBonusRetrievalCount:        100,
+		MaxBonusAddresses:             200_000,
+		BonusDeadlineSeconds:          90 * 24 * 60 * 60,
+		ActivationWindowSeconds:       7 * 24 * 60 * 60,
+		RepairDelayEpochs:             3,
+		MinCapacityBytes:              200 * 1024 * 1024 * 1024,
+		StakePerTiB:                   1000 * reward.TokenUnit,
 		CapacityAdjustCooldownSeconds: 7 * 24 * 60 * 60,
 	}
 }
@@ -219,15 +233,16 @@ func RequiredStakeForCapacity(capacityBytes uint64, stakePerTiB uint64) uint64 {
 // Governance parameter bounds — hard safety limits that cannot be exceeded
 // even through governance proposals.
 const (
-	maxAnnualReleaseRateBPS     = 5000                    // 50%/year
-	maxValidatorRewardPerBlock  = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
-	maxStorageRewardPerBlock    = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
-	maxFoundationRewardPerBlock = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
-	maxRetrievalRewardPerBlock  = 1000 * reward.TokenUnit // safety cap: 1000 tokens/block
-	maxWeightBPSSum             = 10000                   // sum of 4 weight BPS must not exceed 100%
-	minStorageProofSamples      = 1
-	maxStorageProofSamples      = 64
-	minMinerDegradeThreshold    = 1
-	maxMinerDegradeThreshold    = 100
-	maxConsensusValidatorsLimit = 100
+	maxValidatorRewardPerBlock   = 2000 * reward.TokenUnit // safety cap: 2000 tokens/block
+	maxStorageRewardPerBlock     = 2000 * reward.TokenUnit // safety cap: 2000 tokens/block
+	maxFoundationRewardPerBlock  = 2000 * reward.TokenUnit // safety cap: 2000 tokens/block
+	maxRetrievalRewardPerBlock   = 2000 * reward.TokenUnit // safety cap: 2000 tokens/block
+	maxPermanentFundInjectionBPS = 10000                   // at most 100% of a release
+	maxWeightBPSSum              = 10000                   // sum of 5 weight BPS must not exceed 100%
+	minStorageProofSamples       = 1
+	maxStorageProofSamples       = 64
+	minMinerDegradeThreshold     = 1
+	maxMinerDegradeThreshold     = 100
+	maxConsensusValidatorsLimit  = 100
+	maxActivationWindowSeconds   = 365 * 24 * 60 * 60 // 1 year
 )

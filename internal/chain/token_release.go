@@ -15,9 +15,49 @@ func (s *Store) initRewardPoolsLocked() {
 	}
 }
 
+// permanentFundInjectionAmountLocked returns how much of a gross storage or
+// validator release still fits under the fund's lifetime cap. The cap changes
+// how fast the fund fills, never how many tokens exist: once it is full the
+// carve-out returns 0 and the recipients get the whole release. Pure, so a
+// release that turns out to pay nobody cannot leave the fund inflated; the
+// caller credits the fund once the release is committed. Caller must hold s.mu.
+func (s *Store) permanentFundInjectionAmountLocked(gross uint64) uint64 {
+	if gross == 0 {
+		return 0
+	}
+	s.initRewardPoolsLocked()
+	bps := s.miningParamsLocked().PermanentFundInjectionBPS
+	if bps == 0 {
+		return 0
+	}
+	if bps > 10000 {
+		bps = 10000
+	}
+	filled := s.data.RewardPools.PermanentFundRemaining
+	if filled >= reward.PermanentFundCap {
+		return 0
+	}
+	want := gross * bps / 10000
+	if headroom := reward.PermanentFundCap - filled; want > headroom {
+		want = headroom
+	}
+	return want
+}
+
+// consensusValidatorPowerLocked is the total voting power available to receive
+// the staking share of the validator release. Caller must hold s.mu.
+func (s *Store) consensusValidatorPowerLocked() uint64 {
+	var total uint64
+	for _, address := range s.consensusValidatorAddressesLocked() {
+		total = saturatingAdd(total, s.validatorPowerLocked(address))
+	}
+	return total
+}
+
 // releaseFoundationPerBlockLocked releases a fixed FoundationRewardPerBlock from
 // the FoundationPool on every block. The reward is sent directly to the
-// FoundationAddress (no vesting).
+// FoundationAddress (no vesting). Without a recipient the pool stays untouched:
+// the emission is deferred, never minted and refunded.
 func (s *Store) releaseFoundationPerBlockLocked(now int64) {
 	s.initRewardPoolsLocked()
 	params := s.miningParamsLocked()
@@ -26,7 +66,7 @@ func (s *Store) releaseFoundationPerBlockLocked(now int64) {
 	if perBlock == 0 {
 		perBlock = 16 * reward.TokenUnit
 	}
-	if s.data.RewardPools.FoundationRemaining == 0 {
+	if s.data.FoundationAddress == "" || s.data.RewardPools.FoundationRemaining == 0 {
 		return
 	}
 	amount := perBlock
@@ -44,7 +84,9 @@ func (s *Store) releaseFoundationPerBlockLocked(now int64) {
 
 // releaseRetrievalPerBlockLocked releases a fixed RetrievalRewardPerBlock from
 // the RetrievalPool on every block. The reward is sent directly to the
-// RetrievalAddress (no vesting).
+// RetrievalAddress (no vesting). Without a recipient the pool stays untouched,
+// so a node that never provisions the gateway address keeps the reservation
+// intact instead of dropping it out of the supply schedule.
 func (s *Store) releaseRetrievalPerBlockLocked(now int64) {
 	s.initRewardPoolsLocked()
 	params := s.miningParamsLocked()
@@ -53,7 +95,7 @@ func (s *Store) releaseRetrievalPerBlockLocked(now int64) {
 	if perBlock == 0 {
 		perBlock = 10 * reward.TokenUnit
 	}
-	if s.data.RewardPools.RetrievalRemaining == 0 {
+	if s.data.RetrievalAddress == "" || s.data.RewardPools.RetrievalRemaining == 0 {
 		return
 	}
 	amount := perBlock
@@ -84,25 +126,31 @@ func mulDivUint64(a, b, c, denominator uint64) uint64 {
 }
 
 // releaseValidatorPerBlockLocked releases a fixed ValidatorRewardPerBlock from
-// the ValidatorPool on every block. The reward is split: BlockProductionRewardBPS
-// (default 30%) goes directly to the block producer without vesting; the remainder
-// (70%) is distributed to all consensus validators with 90-day vesting.
+// the ValidatorPool on every block. PermanentFundInjectionBPS of the gross
+// release is parked in the permanent-storage fund; the remainder is split:
+// BlockProductionRewardBPS (default 30%) goes directly to the block producer
+// without vesting, the rest to all consensus validators with 90-day vesting.
 func (s *Store) releaseValidatorPerBlockLocked(now int64, producerAddress string) {
 	s.initRewardPoolsLocked()
 	params := s.miningParamsLocked()
 
 	perBlock := params.ValidatorRewardPerBlock
 	if perBlock == 0 {
-		perBlock = 16 * reward.TokenUnit
+		perBlock = 22 * reward.TokenUnit
 	}
-	if s.data.RewardPools.ValidatorRemaining == 0 {
+	// No one to pay means no release: hold the pool instead of burning it, so the
+	// validator stream still adds up to its lifetime total.
+	if s.data.RewardPools.ValidatorRemaining == 0 || s.consensusValidatorPowerLocked() == 0 {
 		return
 	}
 	validatorRelease := perBlock
 	if validatorRelease > s.data.RewardPools.ValidatorRemaining {
 		validatorRelease = s.data.RewardPools.ValidatorRemaining
 	}
+	fundShare := s.permanentFundInjectionAmountLocked(validatorRelease)
+	payout := validatorRelease - fundShare
 	s.data.RewardPools.ValidatorRemaining -= validatorRelease
+	s.data.RewardPools.PermanentFundRemaining = reward.SaturatingAdd(s.data.RewardPools.PermanentFundRemaining, fundShare)
 	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, validatorRelease)
 	s.data.LastValidatorReleaseAtUnix = now
 
@@ -111,8 +159,11 @@ func (s *Store) releaseValidatorPerBlockLocked(now int64, producerAddress string
 	if productionBPS == 0 {
 		productionBPS = 3000
 	}
-	blockReward := validatorRelease * productionBPS / 10000
-	stakingReward := validatorRelease - blockReward
+	if productionBPS > 10000 {
+		productionBPS = 10000
+	}
+	blockReward := payout * productionBPS / 10000
+	stakingReward := payout - blockReward
 
 	// Credit block production reward directly to producer (no vesting).
 	if blockReward > 0 && producerAddress != "" {
@@ -122,26 +173,29 @@ func (s *Store) releaseValidatorPerBlockLocked(now int64, producerAddress string
 		validator := s.validatorLocked(producerAddress)
 		validator.Rewards = saturatingAdd(validator.Rewards, blockReward)
 		s.data.Validators[producerAddress] = validator
+	} else if blockReward > 0 {
+		stakingReward = saturatingAdd(stakingReward, blockReward)
 	}
 
 	// Distribute staking reward to all consensus validators (with vesting).
 	s.distributeValidatorPoolRewardsLocked(stakingReward, now)
 	if validatorRelease > 0 {
-		log.Printf("validator per-block release total=%d producer=%d staking=%d",
-			validatorRelease, blockReward, stakingReward)
+		log.Printf("validator per-block release total=%d fund=%d producer=%d staking=%d",
+			validatorRelease, fundShare, blockReward, stakingReward)
 	}
 }
 
 // releaseStoragePerBlockLocked releases a fixed StorageRewardPerBlock from
-// the StoragePool on every block into a global reward index. Miners settle
-// their accrued share when they submit a valid storage proof.
+// the StoragePool on every block. PermanentFundInjectionBPS of the gross release
+// is parked in the permanent-storage fund; the remainder feeds a global reward
+// index that miners settle when they submit a valid storage proof.
 func (s *Store) releaseStoragePerBlockLocked(now int64) {
 	s.initRewardPoolsLocked()
 	params := s.miningParamsLocked()
 
 	perBlock := params.StorageRewardPerBlock
 	if perBlock == 0 {
-		perBlock = 50 * reward.TokenUnit
+		perBlock = 70 * reward.TokenUnit
 	}
 	if s.data.RewardPools.StorageRemaining == 0 {
 		return
@@ -154,7 +208,9 @@ func (s *Store) releaseStoragePerBlockLocked(now int64) {
 	if storageRelease > s.data.RewardPools.StorageRemaining {
 		storageRelease = s.data.RewardPools.StorageRemaining
 	}
-	numerator := new(big.Int).Mul(new(big.Int).SetUint64(storageRelease), storageRewardIndexScale())
+	fundShare := s.permanentFundInjectionAmountLocked(storageRelease)
+	minerShare := storageRelease - fundShare
+	numerator := new(big.Int).Mul(new(big.Int).SetUint64(minerShare), storageRewardIndexScale())
 	numerator.Add(numerator, parseStorageRewardIndex(s.data.StorageRewardRemainder))
 	indexIncrement := new(big.Int).Div(numerator, totalWeight)
 	remainder := new(big.Int).Mod(numerator, totalWeight)
@@ -167,71 +223,21 @@ func (s *Store) releaseStoragePerBlockLocked(now int64) {
 	s.data.StorageRewardIndex = index.String()
 	s.data.StorageRewardRemainder = remainder.String()
 	s.data.RewardPools.StorageRemaining -= storageRelease
+	s.data.RewardPools.PermanentFundRemaining = reward.SaturatingAdd(s.data.RewardPools.PermanentFundRemaining, fundShare)
 	s.data.RewardPools.TokensReleased = saturatingAdd(s.data.RewardPools.TokensReleased, storageRelease)
 
 	if storageRelease > 0 {
-		log.Printf("storage per-block release total=%d index_increment=%s time=%d", storageRelease, indexIncrement.String(), now)
+		log.Printf("storage per-block release total=%d fund=%d index_increment=%s time=%d",
+			storageRelease, fundShare, indexIncrement.String(), now)
 	}
 }
 
-func (s *Store) distributeStoragePoolRewardsLocked(amount uint64, now int64) {
-	if amount == 0 {
-		return
-	}
-	var totalWeight uint64
-	type weightEntry struct {
-		address string
-		weight  uint64
-	}
-	entries := make([]weightEntry, 0, len(s.data.Miners))
-	for addr, stats := range s.data.Miners {
-		if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited || stats.Status == wire.MinerStatusJailed {
-			continue
-		}
-		w := stats.EffectiveWeight
-		if w == 0 && stats.UsedBytes > 0 && stats.Status == wire.MinerStatusActive {
-			w = stats.UsedBytes
-		}
-		if w == 0 {
-			continue
-		}
-		entries = append(entries, weightEntry{address: addr, weight: w})
-		totalWeight = saturatingAdd(totalWeight, w)
-	}
-	if totalWeight == 0 || len(entries) == 0 {
-		return
-	}
-	var distributed uint64
-	for i, entry := range entries {
-		reward := amount * entry.weight / totalWeight
-		// Give integer-division remainder to the last entry to avoid token dust loss.
-		if i == len(entries)-1 && distributed+reward < amount {
-			reward = amount - distributed
-		}
-		if reward == 0 {
-			continue
-		}
-		s.vestMiningRewardLocked(entry.address, reward, miningRewardSourceStoragePool, now)
-		stats := s.minerStatsLocked(entry.address)
-		stats.StorageRewards = saturatingAdd(stats.StorageRewards, reward)
-		stats.Rewards = saturatingAdd(stats.Rewards, reward)
-		s.data.Miners[entry.address] = stats
-		distributed += reward
-	}
-}
-
+// distributeRetrievalPoolRewardsLocked credits the retrieval gateway share. The
+// caller only releases once a recipient exists, so an unset address can never
+// mint tokens that then have to be clawed back.
 func (s *Store) distributeRetrievalPoolRewardsLocked(amount uint64) {
-	if amount == 0 {
-		return
-	}
 	addr := s.data.RetrievalAddress
-	if addr == "" {
-		// No retrieval address configured — return tokens to pool.
-		s.initRewardPoolsLocked()
-		if s.data.RewardPools.TokensReleased >= amount {
-			s.data.RewardPools.RetrievalRemaining = saturatingAdd(s.data.RewardPools.RetrievalRemaining, amount)
-			s.data.RewardPools.TokensReleased -= amount
-		}
+	if amount == 0 || addr == "" {
 		return
 	}
 	account := s.accountLocked(addr)
@@ -240,17 +246,8 @@ func (s *Store) distributeRetrievalPoolRewardsLocked(amount uint64) {
 }
 
 func (s *Store) distributeFoundationPoolRewardsLocked(amount uint64) {
-	if amount == 0 {
-		return
-	}
 	addr := s.data.FoundationAddress
-	if addr == "" {
-		// No foundation address configured — return tokens to pool.
-		s.initRewardPoolsLocked()
-		if s.data.RewardPools.TokensReleased >= amount {
-			s.data.RewardPools.FoundationRemaining = saturatingAdd(s.data.RewardPools.FoundationRemaining, amount)
-			s.data.RewardPools.TokensReleased -= amount
-		}
+	if amount == 0 || addr == "" {
 		return
 	}
 	account := s.accountLocked(addr)
@@ -274,20 +271,22 @@ func (s *Store) distributeValidatorPoolRewardsLocked(amount uint64, now int64) {
 		return
 	}
 	var distributed uint64
-	for i, address := range validators {
+	for _, address := range validators {
 		power := s.validatorPowerLocked(address)
 		if power == 0 {
 			continue
 		}
 		reward := amount * power / totalPower
-		if i == len(validators)-1 && distributed < amount {
-			reward = amount - distributed
-		}
 		if reward == 0 {
 			continue
 		}
 		distributed = saturatingAdd(distributed, reward)
 		s.distributeValidatorRewardLocked(address, reward, now)
+	}
+	// Carry rounding remainder to next distribution cycle for fairness.
+	if distributed < amount {
+		s.data.RewardPools.ValidatorRemaining = saturatingAdd(
+			s.data.RewardPools.ValidatorRemaining, amount-distributed)
 	}
 }
 

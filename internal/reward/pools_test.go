@@ -26,78 +26,47 @@ func TestNewPoolsInitialBalances(t *testing.T) {
 	}
 }
 
-func TestReleaseEpochRewards(t *testing.T) {
-	p := NewPools()
-	// Use default release rates matching DefaultMiningParams()
-	const (
-		defaultStorageBPS    uint64 = 3
-		defaultRetrievalBPS  uint64 = 20
-		defaultValidatorBPS  uint64 = 2
-		defaultFoundationBPS uint64 = 1
-	)
-	s1, r1, v1, f1 := p.ReleaseEpochRewards(defaultStorageBPS, defaultRetrievalBPS, defaultValidatorBPS, defaultFoundationBPS)
-
-	if s1 == 0 || r1 == 0 || v1 == 0 || f1 == 0 {
-		t.Fatalf("expected non-zero epoch release: storage=%d retrieval=%d validator=%d foundation=%d", s1, r1, v1, f1)
+// TestPoolsCoverWholeSupply guards the emission envelope: the four pools are the
+// entire supply, so the permanent-storage fund can only ever be carved out of a
+// stream and can never push total issuance past TotalSupply.
+func TestPoolsCoverWholeSupply(t *testing.T) {
+	sum := StoragePoolInitial + ValidatorPoolInitial + FoundationPoolInitial + RetrievalPoolInitial + PermanentFundPoolInitial
+	if sum != TotalSupply {
+		t.Fatalf("pools %d do not add up to total supply %d", sum, TotalSupply)
 	}
-	if p.TokensReleased != s1+r1+v1+f1 {
-		t.Fatalf("tokens released mismatch: %d != %d", p.TokensReleased, s1+r1+v1+f1)
-	}
-
-	expectedStorage := StoragePoolInitial - s1
-	if p.StorageRemaining != expectedStorage {
-		t.Fatalf("storage pool after release: expected %d got %d", expectedStorage, p.StorageRemaining)
-	}
-
-	expectedFoundation := FoundationPoolInitial - f1
-	if p.FoundationRemaining != expectedFoundation {
-		t.Fatalf("foundation pool after release: expected %d got %d", expectedFoundation, p.FoundationRemaining)
+	if PermanentFundCap > StoragePoolInitial+ValidatorPoolInitial {
+		t.Fatalf("permanent fund cap %d exceeds the streams that feed it %d",
+			PermanentFundCap, StoragePoolInitial+ValidatorPoolInitial)
 	}
 }
 
-func TestPayFromPool(t *testing.T) {
-	p := NewPools()
+func TestSpendPermanentFund(t *testing.T) {
+	p := &Pools{PermanentFundRemaining: 100, TokensReleased: 1_000}
 
-	if !p.PayFromStoragePool(100) {
-		t.Fatal("expected pay to succeed")
+	if !p.SpendPermanentFund(50) {
+		t.Fatal("expected spend to succeed")
 	}
-	if p.StorageRemaining != StoragePoolInitial-100 {
-		t.Fatalf("storage pool: expected %d got %d", StoragePoolInitial-100, p.StorageRemaining)
+	if p.PermanentFundRemaining != 50 {
+		t.Fatalf("permanent fund: expected 50 got %d", p.PermanentFundRemaining)
+	}
+	if p.TokensReleased != 1_000 {
+		t.Fatalf("fund spend must not count as new issuance, got %d", p.TokensReleased)
 	}
 
-	if p.PayFromStoragePool(StoragePoolInitial) {
-		t.Fatal("expected pay to fail when pool insufficient")
+	if p.SpendPermanentFund(1_000) {
+		t.Fatal("expected spend to fail when the fund is insufficient")
 	}
-
-	if !p.PayFromPermanentFund(50) {
-		t.Fatal("expected permanent fund pay to succeed")
-	}
-	if p.PermanentFundRemaining != PermanentFundPoolInitial-50 {
-		t.Fatalf("permanent fund: expected %d got %d", PermanentFundPoolInitial-50, p.PermanentFundRemaining)
-	}
-}
-
-func TestReleaseEpochDepletesPool(t *testing.T) {
-	p := &Pools{
-		StorageRemaining:    10,
-		RetrievalRemaining:  10,
-		ValidatorRemaining:  10,
-		PermanentFundRemaining: PermanentFundPoolInitial,
-		FoundationRemaining: 10,
-	}
-	s, r, v, f := p.ReleaseEpochRewards(3, 20, 2, 1)
-	total := s + r + v + f
-	if total == 0 || total > 40 {
-		t.Fatalf("unexpected release from tiny pools: %d+%d+%d+%d=%d", s, r, v, f, total)
+	if p.PermanentFundRemaining != 50 {
+		t.Fatalf("permanent fund after failed spend: expected 50 got %d", p.PermanentFundRemaining)
 	}
 }
 
 func TestSaturatingAdd(t *testing.T) {
-	if saturatingAdd(1, 2) != 3 {
+	if SaturatingAdd(1, 2) != 3 {
 		t.Fatal("expected 1+2=3")
 	}
 	max := ^uint64(0)
-	if saturatingAdd(max, 1) != max {
+	if SaturatingAdd(max, 1) != max {
 		t.Fatal("expected saturating add to cap at max")
 	}
 }

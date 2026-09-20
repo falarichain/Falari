@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +25,27 @@ import (
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
+
+// isPublicEndpoint validates that a URL does not point to a private, loopback,
+// or link-local address. Returns true only for public endpoints.
+func isPublicEndpoint(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := u.Hostname()
+	// Block localhost and loopback.
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Hostname-based: allow (DNS resolution happens later).
+		return true
+	}
+	// Block private and link-local addresses.
+	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast()
+}
 
 type Config struct {
 	ChainURL               string
@@ -680,6 +702,10 @@ func (h *Handler) fetchShard(shardHash, shardCID string) ([]byte, error) {
 				if provider.Endpoint == "" {
 					continue
 				}
+				// C5: Block SSRF — reject endpoints pointing to private/internal addresses.
+				if !isPublicEndpoint(provider.Endpoint) {
+					continue
+				}
 				stClient := client.NewHTTP(provider.Endpoint)
 				if shardCID != "" {
 					data, err := stClient.GetBytes("/blocks/" + shardCID)
@@ -703,6 +729,9 @@ func (h *Handler) fetchShard(shardHash, shardCID string) ([]byte, error) {
 		if err := chainClient.Get("/storage/providers?shard_hash="+shardHash, &providersResp); err == nil {
 			for _, provider := range providersResp.Providers {
 				if provider.Endpoint == "" {
+					continue
+				}
+				if !isPublicEndpoint(provider.Endpoint) {
 					continue
 				}
 				stClient := client.NewHTTP(provider.Endpoint)

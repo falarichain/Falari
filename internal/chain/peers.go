@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,12 +14,13 @@ import (
 
 	"chain/internal/wire"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	libp2p "github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	host "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
@@ -76,8 +78,8 @@ func (b *peerTokenBucket) Allow() bool {
 
 const (
 	// Per-peer gossip rate limit: 20 messages/second with burst of 50.
-	peerGossipRate     = 20.0
-	peerGossipBurst    = 50
+	peerGossipRate  = 20.0
+	peerGossipBurst = 50
 	// Cleanup interval for stale peer rate limiters.
 	peerRateCleanupInterval = 5 * time.Minute
 	peerRateStaleTimeout    = 10 * time.Minute
@@ -102,7 +104,7 @@ type PeerNetwork struct {
 	mu          sync.RWMutex
 
 	// Per-peer gossip rate limiters.
-	peerRateMu      sync.Mutex
+	peerRateMu       sync.Mutex
 	peerRateLimiters map[string]*peerRateState
 }
 
@@ -408,6 +410,16 @@ func (p *PeerNetwork) registerChainHandshake() {
 			log.Printf("handshake rejected: empty public_key from peer %s (addr=%s)", stream.Conn().RemotePeer(), remoteAddr)
 			return
 		}
+		// C6: Verify the peer owns the private key for the claimed address.
+		// Without this check, any peer can impersonate any address (Sybil attack).
+		if req.Signature == "" {
+			log.Printf("handshake rejected: empty signature from peer %s (addr=%s)", stream.Conn().RemotePeer(), remoteAddr)
+			return
+		}
+		if err := verifyChainHandshakeSignature(req.Address, req.Signature); err != nil {
+			log.Printf("handshake rejected: invalid signature from peer %s (addr=%s): %v", stream.Conn().RemotePeer(), remoteAddr, err)
+			return
+		}
 		// Log accepted handshake for observability.
 		log.Printf("handshake accepted: peer=%s addr=%s", stream.Conn().RemotePeer(), remoteAddr)
 		// Respond with our own identity.
@@ -420,6 +432,32 @@ func (p *PeerNetwork) registerChainHandshake() {
 		}
 		_ = json.NewEncoder(stream).Encode(resp)
 	})
+}
+
+// verifyChainHandshakeSignature verifies that the signature was produced by the
+// private key corresponding to the claimed address. The peer signs Keccak256(address)
+// to prove identity ownership — without this check, any peer can impersonate
+// any address (Sybil attack).
+func verifyChainHandshakeSignature(address, sigHex string) error {
+	sigHex = strings.TrimPrefix(strings.TrimPrefix(sigHex, "0x"), "0X")
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return fmt.Errorf("invalid signature encoding: %w", err)
+	}
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid signature length: %d", len(sigBytes))
+	}
+	hash := ethcrypto.Keccak256([]byte(address))
+	pub, err := ethcrypto.SigToPub(hash, sigBytes)
+	if err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+	recoveredAddr := wire.NormalizeAddress(ethcrypto.PubkeyToAddress(*pub).Hex())
+	claimedAddr := wire.NormalizeAddress(address)
+	if recoveredAddr != claimedAddr {
+		return fmt.Errorf("signer %s does not match claimed address %s", recoveredAddr, claimedAddr)
+	}
+	return nil
 }
 
 func (p *PeerNetwork) publishGossip(messageType string, value any) {
@@ -590,6 +628,12 @@ func (p *PeerNetwork) syncFromPeer(peer string) error {
 	localHeight := p.store.Height()
 	if latest.Height <= localHeight {
 		return nil
+	}
+	// Security: limit sync to 1000 blocks ahead to prevent DoS from
+	// malicious peers claiming extreme heights.
+	maxSyncHeight := localHeight + 1000
+	if latest.Height > maxSyncHeight {
+		latest.Height = maxSyncHeight
 	}
 	for height := localHeight + 1; height <= latest.Height; height++ {
 		block, err := p.getBlock(fmt.Sprintf("%s/blocks/%d", peer, height))

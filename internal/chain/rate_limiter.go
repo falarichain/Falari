@@ -3,6 +3,7 @@ package chain
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,8 +18,8 @@ const (
 )
 
 type rateLimiter struct {
-	mu       sync.Mutex
-	entries  map[string]*rateEntry
+	mu        sync.Mutex
+	entries   map[string]*rateEntry
 	lastClean time.Time
 }
 
@@ -99,25 +100,41 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP extracts the client IP from the request, respecting X-Forwarded-For.
+// clientIP extracts the client IP from the request. X-Forwarded-For and
+// X-Real-Ip are only trusted when the direct connection comes from a
+// loopback or private-network address (i.e. a local reverse proxy).
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the chain.
-		if idx := len(xff); idx > 0 {
+	directIP := remoteIP(r)
+	trustedProxy := directIP != "" && isPrivateOrLoopback(directIP)
+
+	if trustedProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			for i := 0; i < len(xff); i++ {
 				if xff[i] == ',' {
-					return xff[:i]
+					return strings.TrimSpace(xff[:i])
 				}
 			}
-			return xff
+			return strings.TrimSpace(xff)
+		}
+		if xri := r.Header.Get("X-Real-Ip"); xri != "" {
+			return strings.TrimSpace(xri)
 		}
 	}
-	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
-		return xri
-	}
+	return directIP
+}
+
+func remoteIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func isPrivateOrLoopback(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
 }
