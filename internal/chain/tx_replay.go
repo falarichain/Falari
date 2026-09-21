@@ -117,6 +117,7 @@ func (s *Store) applyBlockTransactionsLocked(block wire.Block) error {
 		}
 		s.data.ConfirmedTxs[tx.TxID] = true
 	}
+	s.recomputeMinerScoresOnTickLocked()
 	return nil
 }
 
@@ -1580,7 +1581,7 @@ func (s *Store) applyStartEpochLocked(payload startEpochTxPayload) error {
 	if err := wire.VerifyStartEpochRequest(payload.Request, operatorAddr); err != nil {
 		return errors.New("replay " + err.Error())
 	}
-	s.data.OperatorNonces[operatorAddr] = payload.Request.Nonce + 1
+	s.setOperatorNonceLocked(operatorAddr, payload.Request.Nonce+1)
 
 	if payload.Epoch.EpochID == "" {
 		return errors.New("replay start epoch missing epoch id")
@@ -1704,7 +1705,7 @@ func (s *Store) applyFinalizeEpochLocked(payload finalizeEpochTxPayload) error {
 	if err := wire.VerifyFinalizeEpochRequest(payload.Request, operatorAddr); err != nil {
 		return errors.New("replay " + err.Error())
 	}
-	s.data.OperatorNonces[operatorAddr] = payload.Request.Nonce + 1
+	s.setOperatorNonceLocked(operatorAddr, payload.Request.Nonce+1)
 
 	epoch, ok := s.data.Epochs[payload.Response.EpochID]
 	if !ok {
@@ -1788,7 +1789,7 @@ func (s *Store) settleEpochWithoutTxLocked(epoch wire.ProofEpoch) wire.FinalizeE
 		}
 	}
 	// Check DHT/retrieval obligations before finalizing.
-	s.checkDHTObligationsLocked()
+	s.checkDHTObligationsLocked(epoch)
 	epoch.Status = "finalized"
 	epoch.StorageSlashed = totalSlashed
 	epoch.RepairTasksCreated = len(repairTasks)

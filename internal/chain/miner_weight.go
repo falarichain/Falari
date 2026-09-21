@@ -182,10 +182,18 @@ func (s *Store) RecomputeAllMinerWeightsLocked() {
 	}
 }
 
-// checkDHTObligationsLocked clears RetrievalObligMet for miners whose DHT
-// publish records have gone stale. Called during epoch finalization.
-func (s *Store) checkDHTObligationsLocked() {
-	cutoff := time.Now().Unix() - DHTStalenessSeconds
+// checkDHTObligationsLocked clears RetrievalObligMet for miners whose DHT publish
+// records went stale by the time the epoch being finalized ended.
+//
+// The cutoff is the epoch deadline rather than the clock on purpose. Finalization
+// mutates state twice per epoch: once when the driver records the system transaction
+// (its own wall clock) and once on every node that replays the block carrying it (the
+// pinned block time). RetrievalObligMet is not a StateRoot leaf but feeds
+// EffectiveWeight, which is, so a time.Now() cutoff gave those two paths different
+// roots for the same block. Deriving it from the epoch also stops the driver from
+// softening the penalty by delaying finalization.
+func (s *Store) checkDHTObligationsLocked(epoch wire.ProofEpoch) {
+	cutoff := epoch.DeadlineUnix - DHTStalenessSeconds
 	for addr, stats := range s.data.Miners {
 		if stats.Status == wire.MinerStatusExiting || stats.Status == wire.MinerStatusExited {
 			continue

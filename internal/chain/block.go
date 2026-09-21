@@ -277,6 +277,7 @@ func (s *Store) produceBlockLocked() (wire.Block, bool, error) {
 	s.withBlockTimeLocked(blockTime, func() {
 		s.runBlockHousekeepingLocked()
 		appliedTxs, _ = s.applyPendingTransactionsForBlockLocked(txs, s.operatorIdentity.OwnerAddress)
+		s.recomputeMinerScoresOnTickLocked()
 	})
 	txLeaves := make([]string, 0, len(appliedTxs))
 	for _, tx := range appliedTxs {

@@ -70,6 +70,16 @@ func (s *Store) validateEpochOperatorLocked(action string, auth epochAuthFields)
 	return operatorAddress, nil
 }
 
+// setOperatorNonceLocked consumes an operator nonce. The map is tagged omitempty, so the
+// JSON round trip a failed block's rollback snapshot restores through hands back a nil one,
+// and a bare write to that panics the node.
+func (s *Store) setOperatorNonceLocked(address string, nonce uint64) {
+	if s.data.OperatorNonces == nil {
+		s.data.OperatorNonces = map[string]uint64{}
+	}
+	s.data.OperatorNonces[address] = nonce
+}
+
 // EpochDriverStatus applies the start-epoch authorization rule to the node's own operator
 // identity and returns the reason it would be refused. The epoch scheduler runs on every
 // node, so a genesis that does not register this node's operator shows up as a repeating

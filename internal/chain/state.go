@@ -113,6 +113,8 @@ type State struct {
 	LastValidatorReleaseAtUnix      int64                                     `json:"last_validator_release_at_unix,omitempty"`
 	StorageRewardIndex              string                                    `json:"storage_reward_index,omitempty"`
 	StorageRewardRemainder          string                                    `json:"storage_reward_remainder,omitempty"`
+	// When the periodic miner weight / anti-spam recompute last ran, in pinned block time.
+	LastWeightRecomputeAtUnix int64 `json:"last_weight_recompute_at_unix,omitempty"`
 
 	// Validator availability scoring — per-validator ring buffer of proposer turn results.
 	ProposerTurns map[string]*wire.ValidatorTurnWindow `json:"proposer_turns,omitempty"`
@@ -1708,7 +1710,7 @@ func (s *Store) StartEpoch(req wire.StartEpochRequest) (wire.StartEpochResponse,
 	// Locally recorded system transactions are skipped by the block replay guard, so
 	// the producing node consumes the operator nonce here; other nodes consume it when
 	// they apply the transaction.
-	s.data.OperatorNonces[operatorAddress] = req.Nonce + 1
+	s.setOperatorNonceLocked(operatorAddress, req.Nonce+1)
 	if err := s.saveLocked(); err != nil {
 		return wire.StartEpochResponse{}, err
 	}
@@ -1816,7 +1818,7 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.Fina
 		}
 	}
 	// Check DHT/retrieval obligations before finalizing.
-	s.checkDHTObligationsLocked()
+	s.checkDHTObligationsLocked(epoch)
 	epoch.Status = "finalized"
 	epoch.StorageSlashed = totalSlashed
 	epoch.RepairTasksCreated = len(repairTasks)
@@ -1842,7 +1844,7 @@ func (s *Store) finalizeEpochLocked(epoch wire.ProofEpoch, finalizeReq wire.Fina
 		RepairTasksCreated:   len(repairTasks),
 	}
 	s.recordTxLocked("finalize_epoch", "", finalizeEpochTxPayload{Request: finalizeReq, Response: resp, RepairTasks: repairTasks})
-	s.data.OperatorNonces[normalizeGovernanceOperator(finalizeReq.OperatorAddress)] = finalizeReq.Nonce + 1
+	s.setOperatorNonceLocked(normalizeGovernanceOperator(finalizeReq.OperatorAddress), finalizeReq.Nonce+1)
 	s.rotateValidatorsLocked(epoch.EpochRound)
 	return resp
 }
@@ -2544,6 +2546,33 @@ func (s *Store) runBlockHousekeepingLocked() {
 	// Runs after the exits above so unbonding entries created in this block cannot mature
 	// in the same block, and on both sides of the block so the credited balances agree.
 	s.processMaturedUnbondingEntriesLocked()
+}
+
+// minerScoreRecomputeInterval is how often the weight / anti-spam recompute runs. The
+// pass costs O(all miners) twice over, so it keeps the epoch-interval cadence it had as a
+// scheduler job; only the trigger moves.
+const minerScoreRecomputeInterval = int64(EpochIntervalDefault / time.Second)
+
+// recomputeMinerScoresOnTickLocked refreshes EffectiveWeight and the storage-reward
+// accrual that feeds it. Both are StateRoot leaves, so the trigger reads the pinned block
+// clock and a stamp of its own: it used to sit on the epoch scheduler's ticker, which ran
+// at a per-node --epoch-interval and at whatever wall-clock phase each node booted at, so
+// peers credited the same block different amounts.
+//
+// Callers run it once per block after the transactions, on the producing node and on every
+// replaying one. Before the transactions would put it on opposite sides of an epoch
+// finalization: the driver settles an epoch out of band and then skips its own recorded
+// transaction, so a pre-transaction pass there would still see the cleared retrieval
+// obligation while a replaying node would not.
+func (s *Store) recomputeMinerScoresOnTickLocked() {
+	now := s.consensusTimeLocked()
+	if last := s.data.LastWeightRecomputeAtUnix; last != 0 && now-last < minerScoreRecomputeInterval {
+		return
+	}
+	// Anti-spam first: the weight reads the SpeedScore that pass produces.
+	s.RecomputeAllAntiSpamScoresLocked()
+	s.RecomputeAllMinerWeightsLocked()
+	s.data.LastWeightRecomputeAtUnix = now
 }
 
 func (s *Store) finalizeExitingValidatorsLocked() {

@@ -2,6 +2,7 @@ package chain
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -401,5 +402,190 @@ func TestAgentKeyQuotaRollsOverFromBlockClock(t *testing.T) {
 	}
 	if !reflect.DeepEqual(producerKey, followerKey) {
 		t.Fatalf("replay drifted from the producing node:\n producer %+v\n follower %+v", producerKey, followerKey)
+	}
+}
+
+// setStorageRewardIndex moves the global storage reward index. The index has no transaction
+// that carries it — every node derives it from the blocks — so a test that forces it has to
+// do the same thing to every node in the scene or the lagging one just rejects the block.
+func setStorageRewardIndex(t *testing.T, store *Store, units uint64) {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.data.StorageRewardIndex = strconv.FormatUint(units, 10)
+}
+
+// seedStorageMiner queues a miner the weight pass is meant to act on: active, holding data,
+// and a full index unit behind the global storage reward index.
+func seedStorageMiner(t *testing.T, store *Store, address string) {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.data.Accounts[address] = wire.Account{Address: address, LockedStake: 10}
+	store.data.Miners[address] = wire.MinerStats{
+		MinerAddress:       address,
+		Status:             wire.MinerStatusActive,
+		UsedBytes:          4096,
+		CapacityBytes:      8192,
+		Stake:              10,
+		RegisteredAtUnix:   time.Now().Unix(),
+		StorageRewardIndex: "0",
+		// What normalizeState leaves on an active miner of a live node.
+		AccessServiceRequired:  true,
+		UploadServiceEnabled:   true,
+		DownloadServiceEnabled: true,
+	}
+}
+
+// TestMinerWeightRecomputeRunsInsideBlockApplication is the regression for the weight pass
+// sitting on the epoch scheduler ticker. EffectiveWeight and the storage-reward accrual
+// behind it are StateRoot leaves, and the ticker ran at a per-node --epoch-interval in a
+// per-node phase, so peers credited the same height differently. The pass now runs inside
+// block application, gated on the pinned block clock.
+func TestMinerWeightRecomputeRunsInsideBlockApplication(t *testing.T) {
+	producer, identity := registeredTestValidator(t, MinValidatorStake)
+	producer.SetOperatorIdentity(identity)
+	seedStorageMiner(t, producer, "miner_weight_a")
+	seedStorageMiner(t, producer, "miner_weight_b")
+
+	// One index unit is one reward token per weight, so a due recompute has to pay out.
+	setStorageRewardIndex(t, producer, storageRewardIndexScaleUint64)
+
+	follower := followerStoreFrom(t, producer)
+	if testStateRoot(t, follower) != testStateRoot(t, producer) {
+		t.Fatal("follower did not start from the producer's state")
+	}
+
+	acceptNextBlock(t, producer, follower, 1)
+
+	producer.mu.Lock()
+	miner := producer.data.Miners["miner_weight_a"]
+	stamp := producer.data.LastWeightRecomputeAtUnix
+	producer.mu.Unlock()
+	follower.mu.Lock()
+	followerMiner := follower.data.Miners["miner_weight_a"]
+	followerStamp := follower.data.LastWeightRecomputeAtUnix
+	follower.mu.Unlock()
+
+	if miner.EffectiveWeight == 0 {
+		t.Fatal("block application left the miner weight uncomputed")
+	}
+	if miner.StorageRewardAccrued == 0 {
+		t.Fatalf("block application left the storage reward unaccrued: %+v", miner)
+	}
+	if stamp == 0 || followerStamp != stamp {
+		t.Fatalf("the two nodes stamped different recompute times: %d vs %d", stamp, followerStamp)
+	}
+	if !reflect.DeepEqual(miner, followerMiner) {
+		t.Fatalf("replay computed a different miner record:\n producer %+v\n follower %+v", miner, followerMiner)
+	}
+
+	// The pass costs O(all miners), so it keeps the interval it had as a scheduler job: the
+	// index moving on inside the window must not accrue a second time.
+	setStorageRewardIndex(t, producer, 2*storageRewardIndexScaleUint64)
+	setStorageRewardIndex(t, follower, 2*storageRewardIndexScaleUint64)
+
+	acceptNextBlock(t, producer, follower, 2)
+
+	producer.mu.Lock()
+	held := producer.data.Miners["miner_weight_a"]
+	producer.mu.Unlock()
+	if held.StorageRewardAccrued != miner.StorageRewardAccrued || held.EffectiveWeight != miner.EffectiveWeight {
+		t.Fatalf("the recompute ran twice inside one interval:\n first %+v\n second %+v", miner, held)
+	}
+}
+
+// acceptNextBlock has the producer commit a block and the follower replay it, then fails if
+// the two disagree on the resulting StateRoot.
+func acceptNextBlock(t *testing.T, producer, follower *Store, height uint64) {
+	t.Helper()
+	produced, err := producer.ProduceBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !produced.Produced {
+		t.Fatalf("expected block at height %d", height)
+	}
+	accepted, err := follower.AcceptBlock(produced.Block)
+	if err != nil {
+		t.Fatalf("follower rejected honest block %d: %v", height, err)
+	}
+	if !accepted {
+		t.Fatalf("follower ignored block %d", height)
+	}
+	if got, want := testStateRoot(t, follower), testStateRoot(t, producer); got != want {
+		t.Fatalf("nodes diverged after block %d: follower %s, producer %s", height, got, want)
+	}
+}
+
+// TestDHTObligationCutoffFollowsEpochDeadline is the regression for the epoch finalization
+// judging DHT staleness against time.Now(). Finalization writes state once on the driver's
+// wall clock and again on every node that replays the block, and RetrievalObligMet feeds
+// EffectiveWeight, so the cutoff has to come from the epoch record both paths can read.
+func TestDHTObligationCutoffFollowsEpochDeadline(t *testing.T) {
+	producer, identity := registeredTestValidator(t, MinValidatorStake)
+	producer.SetOperatorIdentity(identity)
+	testRegisterEpochOperator(producer, identity.OperatorAddress)
+
+	// The driver is two hours late for an epoch that ran an hour. Judged against the epoch,
+	// a publish half an hour before its deadline was current; judged against the wall clock
+	// it is stale, and only because the finalization was delayed.
+	deadline := time.Now().Unix() - 2*3600
+	producer.mu.Lock()
+	for address, published := range map[string]int64{
+		"miner_dht_current": deadline - 1800,
+		"miner_dht_stale":   deadline - 7200,
+	} {
+		producer.data.Accounts[address] = wire.Account{Address: address, LockedStake: 10}
+		producer.data.Miners[address] = wire.MinerStats{
+			MinerAddress:           address,
+			Status:                 wire.MinerStatusActive,
+			UsedBytes:              4096,
+			CapacityBytes:          8192,
+			Stake:                  10,
+			DHTLastPublishUnix:     published,
+			DHTPublishCount:        1,
+			RetrievalObligMet:      true,
+			AccessServiceRequired:  true,
+			UploadServiceEnabled:   true,
+			DownloadServiceEnabled: true,
+		}
+	}
+	producer.data.Epochs["epoch_dht"] = wire.ProofEpoch{
+		EpochID:             "epoch_dht",
+		EpochRound:          1,
+		StartedAtUnix:       deadline - 3600,
+		DeadlineUnix:        deadline,
+		Status:              "active",
+		RewardPerProof:      wire.TokenUnit,
+		SlashPerMissedProof: 1,
+	}
+	producer.mu.Unlock()
+
+	follower := followerStoreFrom(t, producer)
+
+	if _, err := producer.FinalizeExpiredEpochs(); err != nil {
+		t.Fatal(err)
+	}
+	acceptNextBlock(t, producer, follower, 1)
+
+	producer.mu.Lock()
+	current := producer.data.Miners["miner_dht_current"]
+	stale := producer.data.Miners["miner_dht_stale"]
+	producer.mu.Unlock()
+	follower.mu.Lock()
+	defer follower.mu.Unlock()
+
+	if !current.RetrievalObligMet {
+		t.Fatal("a publish 30 minutes before the epoch deadline was judged against the wall clock")
+	}
+	if stale.RetrievalObligMet {
+		t.Fatal("a publish two hours before the epoch deadline stayed obligated")
+	}
+	if !reflect.DeepEqual(current, follower.data.Miners["miner_dht_current"]) {
+		t.Fatalf("replay judged the same publish differently:\n producer %+v\n follower %+v", current, follower.data.Miners["miner_dht_current"])
+	}
+	if !reflect.DeepEqual(stale, follower.data.Miners["miner_dht_stale"]) {
+		t.Fatalf("replay judged the same publish differently:\n producer %+v\n follower %+v", stale, follower.data.Miners["miner_dht_stale"])
 	}
 }

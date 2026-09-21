@@ -42,7 +42,6 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 		// refusal is a property of this node's genesis entry, so report it once and stay quiet.
 		refusedLogged := false
 		for range ticker.C {
-			s.checkAndLogMinerWeights()
 			s.checkAndLogDealHealths()
 
 			s.mu.Lock()
@@ -50,7 +49,8 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 			// NOTE: token release is deterministic from block production/acceptance.
 			// Vested mining rewards move to balance only when miners claim them.
 			// Miner and validator expiry/finalization is per-block housekeeping
-			// (see runBlockHousekeepingLocked), not a scheduler job.
+			// (see runBlockHousekeepingLocked), not a scheduler job, and so is the
+			// miner weight / anti-spam recompute that used to sit here.
 			s.mu.Unlock()
 
 			if _, err := s.EpochDriverStatus(); err != nil {
@@ -85,13 +85,6 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 			log.Printf("auto started epoch %s challenges=%d", resp.Epoch.EpochID, len(resp.Challenges))
 		}
 	}()
-}
-
-func (s *Store) checkAndLogMinerWeights() {
-	s.mu.Lock()
-	s.RecomputeAllMinerWeightsLocked()
-	s.RecomputeAllAntiSpamScoresLocked()
-	s.mu.Unlock()
 }
 
 func (s *Store) checkAndLogDealHealths() {
