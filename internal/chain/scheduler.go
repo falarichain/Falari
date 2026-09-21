@@ -37,6 +37,10 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 	go func() {
 		ticker := time.NewTicker(config.Interval)
 		defer ticker.Stop()
+		// One node's operator is authorized to sign the epoch transactions and the rest are
+		// not, so every non-driver validator would log the same refusal on every tick. The
+		// refusal is a property of this node's genesis entry, so report it once and stay quiet.
+		refusedLogged := false
 		for range ticker.C {
 			s.checkAndLogMinerWeights()
 			s.checkAndLogDealHealths()
@@ -48,6 +52,15 @@ func (s *Store) StartEpochScheduler(config EpochSchedulerConfig) {
 			// Miner and validator expiry/finalization is per-block housekeeping
 			// (see runBlockHousekeepingLocked), not a scheduler job.
 			s.mu.Unlock()
+
+			if _, err := s.EpochDriverStatus(); err != nil {
+				if !refusedLogged {
+					log.Printf("epoch scheduler: this node cannot drive epochs, skipping finalize and start: %v", err)
+					refusedLogged = true
+				}
+				continue
+			}
+			refusedLogged = false
 
 			finalized, err := s.FinalizeExpiredEpochs()
 			if err != nil {
