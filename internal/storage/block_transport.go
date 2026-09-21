@@ -53,6 +53,10 @@ func (p *ProviderNetwork) handleBlockStream(stream network.Stream) {
 		_ = json.NewEncoder(stream).Encode(blockResponse{Error: "cid is required"})
 		return
 	}
+	if shardHash := p.node.ShardHashForCID(req.CID); p.node.isShardBlacklisted(shardHash) {
+		_ = json.NewEncoder(stream).Encode(blockResponse{Error: "shard is blacklisted"})
+		return
+	}
 	data, err := p.node.ReadShardByCID(req.CID)
 	if err != nil {
 		_ = json.NewEncoder(stream).Encode(blockResponse{Error: err.Error()})

@@ -78,6 +78,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	receipt, err := s.node.Store(req)
 	if err != nil {
+		if errors.Is(err, errShardBlacklisted) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -151,7 +155,7 @@ func (s *Server) signRetrievalReceipt(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getShard(w http.ResponseWriter, r *http.Request) {
 	hash := strings.TrimPrefix(r.URL.Path, "/shards/")
 	hash = strings.TrimSuffix(hash, ".bin")
-	if s.isShardBlacklisted(hash) {
+	if s.node.isShardBlacklisted(hash) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "shard is blacklisted"})
 		return
 	}
@@ -167,7 +171,7 @@ func (s *Server) getShard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getBlock(w http.ResponseWriter, r *http.Request) {
 	cid := strings.TrimPrefix(r.URL.Path, "/blocks/")
-	if shardHash := s.node.ShardHashForCID(cid); s.isShardBlacklisted(shardHash) {
+	if shardHash := s.node.ShardHashForCID(cid); s.node.isShardBlacklisted(shardHash) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "shard is blacklisted"})
 		return
 	}
@@ -179,23 +183,6 @@ func (s *Server) getBlock(w http.ResponseWriter, r *http.Request) {
 	s.node.recordHTTPBlockServeHit()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(data)
-}
-
-// isShardBlacklisted checks if a shard hash is on the blacklist.
-// Returns false if blacklist is not available or shardHash is empty.
-func (s *Server) isShardBlacklisted(shardHash string) bool {
-	if shardHash == "" || s.provider == nil {
-		return false
-	}
-	dhtSvc := s.provider.DHTService()
-	if dhtSvc == nil {
-		return false
-	}
-	bl := dhtSvc.Blacklist()
-	if bl == nil {
-		return false
-	}
-	return bl.IsBlocked(shardHash)
 }
 
 const maxStorageRequestSize = 32 << 20 // 32 MB (shard data can be large)

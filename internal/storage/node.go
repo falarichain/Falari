@@ -36,11 +36,34 @@ type Node struct {
 	endpoint                  string
 	requireChainAuthorization bool
 	dhtService                atomic.Pointer[falaridht.Service]
+	blacklist                 atomic.Pointer[falaridht.BlacklistCache]
 }
 
 // SetDHTService injects a DHT service for decentralized shard discovery during repair.
+// The service carries the governance shard blacklist cache, so the content policy is wired
+// in with it.
 func (n *Node) SetDHTService(svc *falaridht.Service) {
 	n.dhtService.Store(svc)
+	if svc != nil {
+		n.SetBlacklistCache(svc.Blacklist())
+	}
+}
+
+// SetBlacklistCache attaches the governance shard blacklist this node enforces on every
+// path that admits bytes, not just the ones it serves.
+func (n *Node) SetBlacklistCache(cache *falaridht.BlacklistCache) {
+	n.blacklist.Store(cache)
+}
+
+// isShardBlacklisted reports whether the shard is on the governance blacklist. A node
+// without a wired cache reports false for everything: the cache is populated by a sync loop
+// against a chain node, so refusing to serve or store anything without it would take the
+// node down whenever that chain is unreachable.
+func (n *Node) isShardBlacklisted(shardHash string) bool {
+	if shardHash == "" {
+		return false
+	}
+	return n.blacklist.Load().IsBlocked(shardHash)
 }
 
 // DHTService returns the DHT service, or nil if not configured.
@@ -321,6 +344,10 @@ func (n *Node) Register(chainURL string, endpoint string, capacityBytes uint64, 
 	return err
 }
 
+// errShardBlacklisted is returned for bytes the governance committee has blocked. The upload
+// handler reports it as 403 so both admission paths answer the same way.
+var errShardBlacklisted = errors.New("shard is blacklisted")
+
 func (n *Node) Store(req wire.UploadRequest) (wire.MinerReceipt, error) {
 	data, err := base64.StdEncoding.DecodeString(req.DataBase64)
 	if err != nil {
@@ -329,8 +356,14 @@ func (n *Node) Store(req wire.UploadRequest) (wire.MinerReceipt, error) {
 	if int64(len(data)) != req.ShardSize {
 		return wire.MinerReceipt{}, errors.New("shard size mismatch")
 	}
-	if hash := chaincrypto.HashBytes(data); hash != req.ShardHash {
+	hash := chaincrypto.HashBytes(data)
+	if hash != req.ShardHash {
 		return wire.MinerReceipt{}, errors.New("shard hash mismatch")
+	}
+	if n.isShardBlacklisted(hash) {
+		// The verdict is on the recomputed hash, so it follows the bytes and not the name
+		// the caller claimed for them.
+		return wire.MinerReceipt{}, errShardBlacklisted
 	}
 	shardCID := req.ShardCID
 	if shardCID == "" {
