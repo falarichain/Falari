@@ -12,7 +12,7 @@ import (
 // DHTStalenessSeconds is the maximum age (in seconds) of a miner's last DHT
 // publish before it is considered stale. Miners with stale DHT records have
 // their RetrievalObligMet flag cleared at epoch finalization.
-const DHTStalenessSeconds = int64(EpochIntervalDefault / time.Second) // 1 epoch interval (default 1800s = 30min)
+const DHTStalenessSeconds = int64(EpochIntervalDefault / time.Second) // 1 epoch interval (EpochIntervalDefault is 60m, so 3600s)
 
 // minerIP extracts the IP address string for a miner from its Endpoint or
 // ProviderRecord PeerAddrs. Returns empty string if no IP can be determined.
