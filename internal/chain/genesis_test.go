@@ -19,7 +19,19 @@ func genesisTestAddress(seed uint64) string {
 
 func genesisBool(value bool) *bool { return &value }
 
+// genesisTestOperator returns the address and the canonical public key of the operator
+// key that validTestGenesisDoc registers. Genesis binds validators[].operator_public_key
+// to validators[].operator_address, so the two cannot be picked independently.
+func genesisTestOperator() (string, string) {
+	privateKey, err := ethcrypto.HexToECDSA("0000000000000000000000000000000000000000000000000000000000000004")
+	if err != nil {
+		panic("genesis test operator key: " + err.Error())
+	}
+	return wire.AccountAddress(&privateKey.PublicKey), wire.EncodeHex(ethcrypto.CompressPubkey(&privateKey.PublicKey))
+}
+
 func validTestGenesisDoc() wire.GenesisDoc {
+	operatorAddress, operatorPublicKey := genesisTestOperator()
 	return wire.GenesisDoc{
 		ChainID:           "genesis-test",
 		GenesisTime:       1_700_000_000,
@@ -30,8 +42,8 @@ func validTestGenesisDoc() wire.GenesisDoc {
 		},
 		Validators: []wire.GenesisValidator{{
 			OwnerAddress:      genesisTestAddress(3),
-			OperatorAddress:   genesisTestAddress(4),
-			OperatorPublicKey: "operator-public-key",
+			OperatorAddress:   operatorAddress,
+			OperatorPublicKey: operatorPublicKey,
 			Endpoint:          "http://localhost:8080",
 			Stake:             MinValidatorStake,
 		}},
@@ -102,6 +114,44 @@ func TestGenesisRejectsPlaceholderAddress(t *testing.T) {
 	doc.Accounts = append(doc.Accounts, wire.GenesisAccount{Address: "0xSTAKING_RESERVE_PLACEHOLDER", Balance: 1})
 	if _, err := newStateFromGenesis(doc); err == nil {
 		t.Fatal("expected a non-hex genesis address to be rejected")
+	}
+}
+
+// TestGenesisRejectsUnusableOperatorPublicKey covers the key a booting node compares
+// against its own identity: validators[].operator_public_key has to be canonical and has
+// to belong to validators[].operator_address, or the validator signs nothing and the
+// network halts on a single mistyped field. The base64 case is the pre-ECDSA genesis
+// format, which deploy/genesis.json still shipped.
+func TestGenesisRejectsUnusableOperatorPublicKey(t *testing.T) {
+	other, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherOperatorAddress := wire.AccountAddress(&other.PublicKey)
+	otherCompressed := wire.EncodeHex(ethcrypto.CompressPubkey(&other.PublicKey))
+	_, canonical := genesisTestOperator()
+
+	for _, tc := range []struct {
+		name    string
+		address string
+		key     string
+	}{
+		{"empty", "", ""},
+		{"pre-ECDSA base64", "", "R1EoUTkTzJI0TljJH8Wb2eiljTUH1t2wSQBdgJDZp5U="},
+		{"uppercase hex", "", "0X" + strings.ToUpper(canonical[2:])},
+		{"missing 0x prefix", "", canonical[2:]},
+		{"uncompressed point", "", wire.EncodeHex(ethcrypto.FromECDSAPub(&other.PublicKey))},
+		{"key of another operator", "", otherCompressed},
+		{"address of another operator", otherOperatorAddress, canonical},
+	} {
+		doc := validTestGenesisDoc()
+		if tc.address != "" {
+			doc.Validators[0].OperatorAddress = tc.address
+		}
+		doc.Validators[0].OperatorPublicKey = tc.key
+		if _, err := newStateFromGenesis(doc); err == nil {
+			t.Fatalf("expected an operator public key that is %s to be rejected", tc.name)
+		}
 	}
 }
 
@@ -210,39 +260,54 @@ func testDeployDir(t *testing.T) string {
 	}
 }
 
+// deployGenesisKeyPlaceholder marks a genesis template whose validator keys have not been
+// filled in yet: validators[].operator_public_key can only come from the operator key of
+// the node that will boot with it, printed by `chainctl genesis operator-key`.
+const deployGenesisKeyPlaceholder = "__REPLACE_ME__chainctl_genesis_operator_key"
+
 // TestDeployedGenesisFilesValidate guards the files operators actually boot with:
 // a genesis the loader rejects is a failed deployment, not a failed unit test.
 func TestDeployedGenesisFilesValidate(t *testing.T) {
 	deployDir := testDeployDir(t)
 	for _, name := range []string{"genesis.json", "genesis-test.json"} {
-		state, err := newStateFromGenesisFile(filepath.Join(deployDir, name))
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if state.RetrievalAddress == "" || state.FoundationAddress == "" {
-			t.Fatalf("%s: both emission beneficiary addresses are required", name)
-		}
-		// A genesis nobody can sign epochs with boots into a chain that finalizes nothing,
-		// so the deployed files must seed the driver themselves.
-		drivers := 0
-		for _, record := range state.GovernanceOperators {
-			if !record.Enabled || !hasAdminPermission(record.Permissions) {
-				continue
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(deployDir, name)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
 			}
-			drivers++
-			matchesValidator := false
-			for _, validator := range state.Validators {
-				if validator.OperatorAddress == record.Operator {
-					matchesValidator = true
+			if strings.Contains(string(raw), deployGenesisKeyPlaceholder) {
+				t.Skipf("%s is still a template: fill validators[].operator_public_key from `chainctl genesis operator-key` to validate it", name)
+			}
+			state, err := newStateFromGenesisFile(path)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if state.RetrievalAddress == "" || state.FoundationAddress == "" {
+				t.Fatalf("%s: both emission beneficiary addresses are required", name)
+			}
+			// A genesis nobody can sign epochs with boots into a chain that finalizes nothing,
+			// so the deployed files must seed the driver themselves.
+			drivers := 0
+			for _, record := range state.GovernanceOperators {
+				if !record.Enabled || !hasAdminPermission(record.Permissions) {
+					continue
+				}
+				drivers++
+				matchesValidator := false
+				for _, validator := range state.Validators {
+					if validator.OperatorAddress == record.Operator {
+						matchesValidator = true
+					}
+				}
+				if !matchesValidator {
+					t.Fatalf("%s: governance operator %s is not the operator address of any genesis validator, "+
+						"so no node started with these keys can sign epoch transactions", name, record.Operator)
 				}
 			}
-			if !matchesValidator {
-				t.Fatalf("%s: governance operator %s is not the operator address of any genesis validator, "+
-					"so no node started with these keys can sign epoch transactions", name, record.Operator)
+			if drivers == 0 {
+				t.Fatalf("%s: needs at least one enabled governance operator with the admin permission", name)
 			}
-		}
-		if drivers == 0 {
-			t.Fatalf("%s: needs at least one enabled governance operator with the admin permission", name)
-		}
+		})
 	}
 }

@@ -481,10 +481,18 @@ func validateGenesisDoc(doc wire.GenesisDoc) error {
 		if !wire.IsValidAddress(v.OperatorAddress) {
 			return fmt.Errorf("genesis: validator operator %q is not a valid hex address", v.OperatorAddress)
 		}
-		if v.OperatorPublicKey == "" {
-			return fmt.Errorf("genesis: validator %s has no operator public key", wire.NormalizeAddress(v.OwnerAddress))
-		}
 		operator := wire.NormalizeAddress(v.OperatorAddress)
+		// The node will not sign a block unless this string is byte-identical to the
+		// one derived from its own operator key, so a stale or mistyped key has to
+		// fail here rather than leave the validator quiet after launch.
+		operatorPublicKey, err := wire.ParseOperatorPublicKey(v.OperatorPublicKey)
+		if err != nil {
+			return fmt.Errorf("genesis: validator %s: %w", wire.NormalizeAddress(v.OwnerAddress), err)
+		}
+		if derived := wire.AccountAddress(operatorPublicKey); derived != operator {
+			return fmt.Errorf("genesis: validator %s: operator_public_key derives address %s, not operator_address %s",
+				wire.NormalizeAddress(v.OwnerAddress), derived, operator)
+		}
 		if prev, taken := operators[operator]; taken {
 			return fmt.Errorf("genesis: operator %s is shared by validators %s and %s", operator, prev, wire.NormalizeAddress(v.OwnerAddress))
 		}

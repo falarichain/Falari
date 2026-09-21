@@ -28,4 +28,6 @@ func main() {
 	fmt.Println("  OWNER_ADDRESS=<address> OWNER_PRIVATE_KEY=<private_key> OPERATOR_PRIVATE_KEY=<private_key> chainnode ...")
 	fmt.Println("  MINER_PRIVATE_KEY=<private_key>     storagenode ...")
 	fmt.Println("  MINER_PRIVATE_KEY=<private_key>     retrievalnode ...")
+	fmt.Println()
+	fmt.Println("public_key is the value for genesis validators[].operator_public_key.")
 }

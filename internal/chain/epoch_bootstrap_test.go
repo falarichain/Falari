@@ -46,6 +46,7 @@ func TestBootWithGenesisOperatorDrivesEpochs(t *testing.T) {
 	// The devnet shape: one validator whose operator key is also the governance operator
 	// that drives epochs, so the booting node needs no separate driver identity.
 	doc.Validators[0].OperatorAddress = operatorAddress
+	doc.Validators[0].OperatorPublicKey = wire.EncodeHex(ethcrypto.CompressPubkey(&privateKey.PublicKey))
 	doc.GovernanceOperators = []wire.GenesisGovernanceOperator{{
 		Operator:    operatorAddress,
 		Permissions: []string{"admin"},

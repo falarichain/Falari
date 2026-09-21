@@ -5,7 +5,36 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
+
+// ParseOperatorPublicKey decodes an operator public key and requires the canonical
+// encoding: "0x" plus lowercase hex of a 33-byte compressed secp256k1 point.
+//
+// A node compares this string against its own EncodeHex(CompressPubkey(key)) before
+// every block, so a key in any other spelling — or one from the pre-ECDSA era — makes
+// the validator silently stop producing blocks instead of failing loudly. The
+// round-trip check rejects those encodings here.
+func ParseOperatorPublicKey(raw string) (*ecdsa.PublicKey, error) {
+	if raw == "" {
+		return nil, errors.New("operator public key is empty")
+	}
+	point, err := decodeHex(raw)
+	if err != nil {
+		return nil, fmt.Errorf("operator public key %q is not hex: expected a 0x-prefixed lowercase compressed secp256k1 public key", raw)
+	}
+	pub, err := ethcrypto.DecompressPubkey(point)
+	if err != nil {
+		return nil, fmt.Errorf("operator public key %q is not a compressed secp256k1 point: %w", raw, err)
+	}
+	if canonical := encodeHex(ethcrypto.CompressPubkey(pub)); canonical != raw {
+		return nil, fmt.Errorf("operator public key %q is not canonical: expected %s", raw, canonical)
+	}
+	return pub, nil
+}
 
 type validatorRegistrationPayload struct {
 	Action            string `json:"action"`

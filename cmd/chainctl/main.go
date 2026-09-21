@@ -3520,10 +3520,42 @@ func agentKeyRevoke(args []string) {
 }
 
 func genesisCommand(args []string) {
-	if len(args) < 1 || args[0] != "init" {
-		log.Fatal("genesis requires subcommand: init")
+	if len(args) < 1 {
+		log.Fatal("genesis requires subcommand: init | operator-key")
 	}
-	genesisInit(args[1:])
+	switch args[0] {
+	case "init":
+		genesisInit(args[1:])
+	case "operator-key":
+		genesisOperatorKey(args[1:])
+	default:
+		log.Fatal("genesis requires subcommand: init | operator-key")
+	}
+}
+
+// genesisOperatorKey derives the two genesis validator fields that come from the operator
+// private key. Genesis rejects an operator_public_key that is not canonical or not bound
+// to operator_address, and a node that cannot match its own key to the entry never
+// produces a block, so the values have to be derived rather than typed.
+func genesisOperatorKey(args []string) {
+	fs := flag.NewFlagSet("genesis operator-key", flag.ExitOnError)
+	keyHex := fs.String("key", "", "operator private key in hex; defaults to the OPERATOR_PRIVATE_KEY environment variable")
+	fs.Parse(args)
+
+	raw := *keyHex
+	if raw == "" {
+		raw = os.Getenv("OPERATOR_PRIVATE_KEY")
+	}
+	if raw == "" {
+		log.Fatal("no operator key: pass -key or set OPERATOR_PRIVATE_KEY, e.g. from this node's deploy/serverN/.env")
+	}
+	privateKey, err := ethcrypto.HexToECDSA(strings.TrimPrefix(strings.TrimPrefix(raw, "0x"), "0X"))
+	if err != nil {
+		log.Fatalf("invalid operator private key: %v", err)
+	}
+	publicKey := &privateKey.PublicKey
+	fmt.Printf("operator_address:    %s\n", wire.AccountAddress(publicKey))
+	fmt.Printf("operator_public_key: %s\n", wire.EncodeHex(ethcrypto.CompressPubkey(publicKey)))
 }
 
 func genesisInit(args []string) {
@@ -3810,5 +3842,6 @@ func usage() {
   chainctl validators    -chain http://localhost:8080
   chainctl peers         -chain http://localhost:8080
   chainctl genesis init  -out ./genesis.json -operator-address 0xa1b2c3...
+  chainctl genesis operator-key [-key 0xOperatorPrivateKey]
   chainctl events        -chain http://localhost:8080 -type miner_jailed -intent intent_xxx -limit 20 -json`)
 }
