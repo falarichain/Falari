@@ -15,6 +15,15 @@ func EncodeShards(data []byte, dataShards, parityShards int) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Split treats spare capacity on the slice it is handed as its own scratch space: it
+	// zeroes that room and writes the parity shards there, so a segment carved out of a
+	// larger buffer would have the bytes after its end overwritten. Give it a buffer whose
+	// capacity is exactly its length and let it allocate the parity instead.
+	if cap(data) > len(data) {
+		exact := make([]byte, len(data))
+		copy(exact, data)
+		data = exact
+	}
 	shards, err := enc.Split(data)
 	if err != nil {
 		return nil, err

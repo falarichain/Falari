@@ -23,6 +23,47 @@ func TestDecodeShardsWithOneMissingShard(t *testing.T) {
 	}
 }
 
+// A segment sliced out of a pooled buffer carries capacity that Reed-Solomon would happily
+// use as parity scratch space, overwriting whatever the caller keeps after the segment.
+func TestEncodeShardsDoesNotWritePastTheInput(t *testing.T) {
+	const (
+		dataShards      = 4
+		parityShards    = 2
+		segmentLength   = 40_000
+		survivingLength = 20_000
+	)
+	backing := make([]byte, 3*segmentLength)
+	for i := range backing {
+		backing[i] = byte(i * 31)
+	}
+	segment := backing[:segmentLength]
+	beyond := append([]byte(nil), backing[segmentLength:segmentLength+survivingLength]...)
+
+	shards, err := EncodeShards(segment, dataShards, parityShards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shards) != dataShards+parityShards {
+		t.Fatalf("got %d shards, want %d", len(shards), dataShards+parityShards)
+	}
+	if !bytes.Equal(backing[segmentLength:segmentLength+survivingLength], beyond) {
+		t.Fatal("EncodeShards overwrote the caller's bytes past the input slice")
+	}
+	for i := 0; i < dataShards; i++ {
+		if want := segment[i*len(shards[0]) : (i+1)*len(shards[0])]; !bytes.Equal(shards[i], want) {
+			t.Fatalf("data shard %d does not hold its slice of the input", i)
+		}
+	}
+
+	restored, err := DecodeShards(shards, dataShards, parityShards, segmentLength)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored, segment) {
+		t.Fatal("restored data mismatch")
+	}
+}
+
 func TestStreamingSegmentEncodeMatchesDecode(t *testing.T) {
 	data := bytes.Repeat([]byte("streaming-storage-chain"), 8192)
 	path := filepath.Join(t.TempDir(), "data.bin")
