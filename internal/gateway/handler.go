@@ -561,11 +561,23 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
 	w.Header().Set("Content-Type", "application/octet-stream")
 
+	dataShards, parityShards, err := h.erasurePolicy(plan)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
 	for segIdx, segment := range plan.Segments {
+		if stored := len(segment.ShardHashes); stored != dataShards+parityShards {
+			writeError(w, http.StatusBadGateway, fmt.Errorf(
+				"segment %d: stored %d shards, erasure policy %d+%d expects %d",
+				segIdx, stored, dataShards, parityShards, dataShards+parityShards))
+			return
+		}
 		shards := make([][]byte, len(segment.ShardHashes))
+		shardErrs := make([]error, len(segment.ShardHashes))
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		var firstErr error
 
 		for i := range segment.ShardHashes {
 			wg.Add(1)
@@ -576,27 +588,38 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 					cid = segment.ShardCIDs[shardIndex]
 				}
 				data, err := h.fetchShard(segment.ShardHashes[shardIndex], cid)
-				if err != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = fmt.Errorf("fetch shard %d/%d: %w", segIdx, shardIndex, err)
-					}
-					mu.Unlock()
-					return
+				if err == nil && chaincrypto.HashBytes(data) != segment.ShardHashes[shardIndex] {
+					err = fmt.Errorf("served bytes do not match plan hash")
 				}
 				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					shardErrs[shardIndex] = err
+					return
+				}
 				shards[shardIndex] = data
-				mu.Unlock()
 			}(i)
 		}
 		wg.Wait()
-		if firstErr != nil {
-			writeError(w, http.StatusBadGateway, firstErr)
+
+		// Reed-Solomon recovers from any dataShards of the stored copies, so unreachable
+		// miners cost redundancy rather than the download. Only a shortfall below
+		// dataShards means the segment is actually lost.
+		reachable := 0
+		for _, shard := range shards {
+			if shard != nil {
+				reachable++
+			}
+		}
+		if reachable < dataShards {
+			writeError(w, http.StatusBadGateway, fmt.Errorf(
+				"segment %d: only %d of %d shards reachable, %d required (%w)",
+				segIdx, reachable, len(shards), dataShards, firstShardError(shardErrs)))
 			return
 		}
 
 		segBytes := int(segmentBytes(plan.FileSize, int64(segIdx), plan.SegmentSize))
-		reconstructed, err := client.DecodeShards(shards, h.cfg.DataShards, h.cfg.ParityShards, segBytes)
+		reconstructed, err := client.DecodeShards(shards, dataShards, parityShards, segBytes)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("decode segment %d: %w", segIdx, err))
 			return
@@ -609,6 +632,31 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 			f.Flush()
 		}
 	}
+}
+
+// erasurePolicy returns the D/P the stored shards were cut with. The intent records the
+// policy the assignments were built against, so it wins; the gateway's own config only
+// matches by coincidence and would reconstruct garbage for an intent uploaded with
+// different parameters. Plans recorded without a policy fall back to the config.
+func (h *Handler) erasurePolicy(plan wire.UploadPlan) (int, int, error) {
+	dataShards, parityShards := plan.Erasure.DataShards, plan.Erasure.ParityShards
+	if dataShards <= 0 {
+		dataShards, parityShards = h.cfg.DataShards, h.cfg.ParityShards
+	}
+	if dataShards <= 0 || parityShards < 0 {
+		return 0, 0, fmt.Errorf("no usable erasure policy: intent has %d+%d, gateway is configured %d+%d",
+			plan.Erasure.DataShards, plan.Erasure.ParityShards, h.cfg.DataShards, h.cfg.ParityShards)
+	}
+	return dataShards, parityShards, nil
+}
+
+func firstShardError(shardErrs []error) error {
+	for i, err := range shardErrs {
+		if err != nil {
+			return fmt.Errorf("first fetch failure: shard %d: %w", i, err)
+		}
+	}
+	return errors.New("no shard could be fetched")
 }
 
 type collectionFileInfo struct {
